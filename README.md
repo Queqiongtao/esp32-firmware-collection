@@ -8,7 +8,12 @@ This collection groups independent ESP-IDF firmware projects by chip model.
 esp32-firmware-collection/
 ├── esp32s3/
 │   ├── README.md
-│   └── blink/
+│   ├── blink/
+│   │   ├── CMakeLists.txt
+│   │   ├── sdkconfig.defaults
+│   │   ├── main/
+│   │   └── components/
+│   └── clock/
 │       ├── CMakeLists.txt
 │       ├── sdkconfig.defaults
 │       ├── main/
@@ -31,6 +36,14 @@ For ESP32-S3 blink:
 
 ```sh
 cd esp32s3/blink
+idf.py set-target esp32s3
+idf.py build
+```
+
+For ESP32-S3 clock:
+
+```sh
+cd esp32s3/clock
 idf.py set-target esp32s3
 idf.py build
 ```

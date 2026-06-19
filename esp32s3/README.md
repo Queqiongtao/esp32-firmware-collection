@@ -9,3 +9,8 @@ cd blink
 idf.py set-target esp32s3
 idf.py build
 ```
+
+Available projects:
+
+- `blink`: minimal starter project.
+- `clock`: migrated ESP32-S3 clock firmware project.
