@@ -76,6 +76,16 @@ menu "Board Support Package"
                 60 MHz is the component default for smoother full-screen clock rotation.
                 If the panel shows artifacts or SPI DMA underflow, reduce this value.
 
+        config BSP_LCD_LVGL_BUFFER_HEIGHT
+            int "Set LVGL draw buffer height in pixels"
+            default 80
+            range 40 466
+            help
+                Height of each LVGL partial draw buffer. Larger values reduce the number of
+                chunks needed for full-screen rotated clock refreshes, but consume more PSRAM.
+                The clock app uses double buffering, so memory is roughly width * height * 2
+                bytes * 2 buffers.
+
         config BSP_LCD_TRANS_QUEUE_DEPTH
             int "Set The depth of the SPI transmission task queue for the SPI screen"
             default 1

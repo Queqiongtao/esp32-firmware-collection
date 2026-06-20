@@ -342,7 +342,7 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #if BSP_LCD_LVGL_FORCE_FULL_REFRESH
 #define BSP_LCD_LVGL_BUFFER_HEIGHT (BSP_LCD_V_RES)
 #else
-#define BSP_LCD_LVGL_BUFFER_HEIGHT (80)
+#define BSP_LCD_LVGL_BUFFER_HEIGHT (CONFIG_BSP_LCD_LVGL_BUFFER_HEIGHT)
 #endif
 
 esp_err_t bsp_display_brightness_init(void)
@@ -531,6 +531,14 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
     const bsp_display_config_t disp_config = {
         .max_transfer_sz = BSP_LCD_H_RES * BSP_LCD_V_RES * BSP_LCD_BITS_PER_PIXEL / 8,
     };
+
+    const size_t lvgl_buffer_bytes =
+        (size_t)BSP_LCD_H_RES * BSP_LCD_LVGL_BUFFER_HEIGHT * BSP_LCD_BITS_PER_PIXEL / 8;
+    ESP_LOGI(TAG,
+             "LVGL draw buffers: height=%d, single=%zu bytes, double=%zu bytes",
+             BSP_LCD_LVGL_BUFFER_HEIGHT,
+             lvgl_buffer_bytes,
+             lvgl_buffer_bytes * 2);
 
     BSP_ERROR_CHECK_RETURN_NULL(bsp_display_new(&disp_config, &panel_handle, &io_handle));
 

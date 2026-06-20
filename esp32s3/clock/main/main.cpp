@@ -66,6 +66,11 @@ static lv_draw_buf_t *s_clock_snapshot = NULL;
 static spring_angle_t s_clock_rotation_spring = {};
 static uint32_t s_clock_rotation_last_tick_ms = 0;
 static uint32_t s_clock_rotation_last_perf_log_ms = 0;
+static uint32_t s_clock_rotation_perf_ticks = 0;
+static uint32_t s_clock_rotation_perf_applies = 0;
+static uint32_t s_clock_rotation_perf_snapshots = 0;
+static uint32_t s_clock_rotation_perf_skip_epsilon = 0;
+static uint32_t s_clock_rotation_perf_skip_settled = 0;
 static float s_clock_rotation_applied_deg = 0.0f;
 static bool s_clock_rotation_applied_valid = false;
 static portMUX_TYPE s_clock_rotation_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -74,6 +79,20 @@ static float s_clock_rotation_submitted_target_deg = 0.0f;
 static bool s_clock_rotation_submitted_target_valid = false;
 static bool s_clock_rotation_target_dirty = false;
 static volatile bool s_theme_switch_pending = false;
+
+static bool is_clock_rotation_active(void)
+{
+    return !spring_angle_is_settled(&s_clock_rotation_spring);
+}
+
+static void reset_clock_rotation_perf_counters(void)
+{
+    s_clock_rotation_perf_ticks = 0;
+    s_clock_rotation_perf_applies = 0;
+    s_clock_rotation_perf_snapshots = 0;
+    s_clock_rotation_perf_skip_epsilon = 0;
+    s_clock_rotation_perf_skip_settled = 0;
+}
 
 static void apply_clock_rotation(float angle_deg)
 {
@@ -87,13 +106,14 @@ static void apply_clock_rotation(float angle_deg)
     if (s_clock_rotation_applied_valid &&
         fabsf(spring_angle_shortest_delta(angle_deg, s_clock_rotation_applied_deg)) <
             invalidate_epsilon) {
+        ++s_clock_rotation_perf_skip_epsilon;
         return;
     }
 
     lv_image_set_rotation(s_clock_snapshot_image, (int32_t)(angle_deg * 10.0f));
     s_clock_rotation_applied_deg = spring_angle_normalize(angle_deg);
     s_clock_rotation_applied_valid = true;
-    lv_obj_invalidate(s_clock_snapshot_image);
+    ++s_clock_rotation_perf_applies;
 }
 
 static void refresh_clock_snapshot(void)
@@ -128,6 +148,7 @@ static void refresh_clock_snapshot(void)
         lv_draw_buf_destroy(old_snapshot);
     }
 
+    ++s_clock_rotation_perf_snapshots;
     s_clock_rotation_applied_valid = false;
     apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
 }
@@ -142,14 +163,28 @@ static void log_clock_rotation_perf(uint32_t now_ms)
     }
 
     s_clock_rotation_last_perf_log_ms = now_ms;
+    const uint32_t perf_ticks = s_clock_rotation_perf_ticks;
+    const uint32_t perf_applies = s_clock_rotation_perf_applies;
+    const uint32_t perf_snapshots = s_clock_rotation_perf_snapshots;
+    const uint32_t perf_skip_epsilon = s_clock_rotation_perf_skip_epsilon;
+    const uint32_t perf_skip_settled = s_clock_rotation_perf_skip_settled;
+    reset_clock_rotation_perf_counters();
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS
     uint32_t fps = 0;
     esp_err_t fps_err = s_display != NULL ? esp_lv_adapter_get_fps(s_display, &fps) : ESP_ERR_INVALID_STATE;
     if (fps_err == ESP_OK) {
         ESP_LOGI(TAG,
-                 "rotation perf: fps=%" PRIu32 ", current=%.2f deg, target=%.2f deg",
+                 "rotation perf: fps=%" PRIu32
+                 ", ticks=%" PRIu32 ", apply=%" PRIu32 ", snapshots=%" PRIu32
+                 ", skip_epsilon=%" PRIu32
+                 ", skip_settled=%" PRIu32 ", current=%.2f deg, target=%.2f deg",
                  fps,
+                 perf_ticks,
+                 perf_applies,
+                 perf_snapshots,
+                 perf_skip_epsilon,
+                 perf_skip_settled,
                  spring_angle_get_current(&s_clock_rotation_spring),
                  spring_angle_get_target(&s_clock_rotation_spring));
         return;
@@ -157,7 +192,14 @@ static void log_clock_rotation_perf(uint32_t now_ms)
 #endif
 
     ESP_LOGI(TAG,
-             "rotation perf: current=%.2f deg, target=%.2f deg",
+             "rotation perf: ticks=%" PRIu32 ", apply=%" PRIu32
+             ", snapshots=%" PRIu32 ", skip_epsilon=%" PRIu32 ", skip_settled=%" PRIu32
+             ", current=%.2f deg, target=%.2f deg",
+             perf_ticks,
+             perf_applies,
+             perf_snapshots,
+             perf_skip_epsilon,
+             perf_skip_settled,
              spring_angle_get_current(&s_clock_rotation_spring),
              spring_angle_get_target(&s_clock_rotation_spring));
 }
@@ -182,6 +224,8 @@ static void update_clock_rotation(lv_timer_t *timer)
         switch_to_next_theme();
     }
 
+    ++s_clock_rotation_perf_ticks;
+
     const uint32_t now_ms = lv_tick_get();
     uint32_t elapsed_ms = now_ms - s_clock_rotation_last_tick_ms;
     s_clock_rotation_last_tick_ms = now_ms;
@@ -204,6 +248,11 @@ static void update_clock_rotation(lv_timer_t *timer)
     if (target_dirty) {
         spring_angle_set_target(&s_clock_rotation_spring, target_deg);
     } else if (spring_angle_is_settled(&s_clock_rotation_spring)) {
+        ++s_clock_rotation_perf_skip_settled;
+        if ((uint32_t)(now_ms - s_clock_rotation_last_perf_log_ms) >= CLOCK_ROTATION_PERF_LOG_MS) {
+            s_clock_rotation_last_perf_log_ms = now_ms;
+            reset_clock_rotation_perf_counters();
+        }
         return;
     }
 
@@ -262,6 +311,9 @@ static void update_theme_animation(lv_timer_t *timer)
 
     const clock_theme_t *theme = s_themes[s_current_theme_index];
     if (theme->tick == NULL) {
+        return;
+    }
+    if (is_clock_rotation_active()) {
         return;
     }
 
