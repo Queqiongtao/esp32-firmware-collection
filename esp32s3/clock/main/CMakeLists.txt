@@ -1,5 +1,6 @@
 set(MAIN_SRCS
     "main.cpp"
+    "clock_touch_gesture.cpp"
     "rtc_time_sync.cpp"
     "imu_demo.cpp"
     "lv_font_clock_96.c"

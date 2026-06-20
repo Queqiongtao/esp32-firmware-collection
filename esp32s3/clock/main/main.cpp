@@ -12,6 +12,7 @@
 
 #include "bsp/esp-bsp.h"
 #include "button_gpio.h"
+#include "clock_touch_gesture.h"
 #include "clock_theme.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -81,7 +82,9 @@ static float s_clock_rotation_submitted_target_deg = 0.0f;
 static bool s_clock_rotation_submitted_target_valid = false;
 static bool s_clock_rotation_started = false;
 static bool s_clock_rotation_target_dirty = false;
-static volatile bool s_theme_switch_pending = false;
+static volatile int s_theme_switch_pending_step = 0;
+
+static void keep_touch_layer_foreground(void);
 
 static bool is_clock_rotation_active(void)
 {
@@ -136,6 +139,8 @@ static void apply_clock_rotation(float angle_deg)
 
     lv_image_set_rotation(s_clock_snapshot_image, (int32_t)(angle_deg * 10.0f));
     set_current_theme_rotation(angle_deg);
+    clock_touch_gesture_set_rotation(angle_deg);
+    keep_touch_layer_foreground();
     s_clock_rotation_applied_deg = spring_angle_normalize(angle_deg);
     s_clock_rotation_applied_valid = true;
     ++s_clock_rotation_perf_applies;
@@ -178,6 +183,7 @@ static void refresh_clock_snapshot(void)
     ++s_clock_rotation_perf_snapshots;
     s_clock_rotation_applied_valid = false;
     apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+    keep_touch_layer_foreground();
 }
 
 static void log_clock_rotation_perf(uint32_t now_ms)
@@ -231,8 +237,22 @@ static void log_clock_rotation_perf(uint32_t now_ms)
              spring_angle_get_target(&s_clock_rotation_spring));
 }
 
-static void switch_to_next_theme(void);
+static void switch_theme(int step);
 static void reset_current_theme(void);
+
+static void keep_touch_layer_foreground(void)
+{
+    clock_touch_gesture_move_foreground();
+}
+
+static void request_theme_switch(int step)
+{
+    if (step == 0) {
+        return;
+    }
+
+    s_theme_switch_pending_step = step;
+}
 
 static void reset_current_theme(void)
 {
@@ -246,9 +266,10 @@ static void update_clock_rotation(lv_timer_t *timer)
 {
     (void)timer;
 
-    if (s_theme_switch_pending) {
-        s_theme_switch_pending = false;
-        switch_to_next_theme();
+    const int theme_switch_step = s_theme_switch_pending_step;
+    if (theme_switch_step != 0) {
+        s_theme_switch_pending_step = 0;
+        switch_theme(theme_switch_step);
     }
 
     ++s_clock_rotation_perf_ticks;
@@ -366,7 +387,7 @@ static void update_theme_animation(lv_timer_t *timer)
     }
 }
 
-static void switch_to_next_theme(void)
+static void switch_theme(int step)
 {
     if (s_theme_count <= 1 || s_current_theme_root == NULL) {
         return;
@@ -376,14 +397,24 @@ static void switch_to_next_theme(void)
     set_current_theme_overlay_visible(false);
     lv_obj_del(s_current_theme_root);
 
-    s_current_theme_index = (s_current_theme_index + 1) % s_theme_count;
+    const int normalized_step = step % (int)s_theme_count;
+    s_current_theme_index =
+        (s_current_theme_index + s_theme_count + normalized_step) % s_theme_count;
     s_current_theme_root = s_themes[s_current_theme_index]->build(screen);
     ESP_LOGI(TAG, "switch theme -> %s", s_themes[s_current_theme_index]->name);
 
     s_clock_rotation_applied_valid = false;
     reset_current_theme();
     update_clock(NULL);
+    keep_touch_layer_foreground();
 }
+
+static void on_touch_theme_switch(int step, void *user_ctx)
+{
+    (void)user_ctx;
+    request_theme_switch(step);
+}
+
 
 static void create_clock_ui(void)
 {
@@ -398,6 +429,8 @@ static void create_clock_ui(void)
     s_clock_snapshot_image = lv_image_create(screen);
     lv_obj_center(s_clock_snapshot_image);
 
+    clock_touch_gesture_create(screen, on_touch_theme_switch, NULL);
+
     spring_angle_init(&s_clock_rotation_spring, &CLOCK_ROTATION_SPRING_CONFIG, 0.0f);
     s_clock_rotation_last_tick_ms = lv_tick_get();
     s_clock_rotation_last_perf_log_ms = s_clock_rotation_last_tick_ms;
@@ -411,6 +444,7 @@ static void create_clock_ui(void)
     portEXIT_CRITICAL(&s_clock_rotation_lock);
 
     update_clock(NULL);
+    keep_touch_layer_foreground();
     lv_timer_create(update_clock, 1000, NULL);
     lv_timer_create(update_theme_animation, CLOCK_THEME_ANIMATION_TIMER_MS, NULL);
     lv_timer_create(update_clock_rotation, CLOCK_ROTATION_TIMER_MS, NULL);
@@ -420,7 +454,7 @@ static void on_theme_button(void *button_handle, void *user_ctx)
 {
     (void)button_handle;
     (void)user_ctx;
-    s_theme_switch_pending = true;
+    request_theme_switch(1);
 }
 
 static void clock_button_init(void)
@@ -455,6 +489,7 @@ extern "C" void app_main(void)
 
     s_display = bsp_display_start();
     ESP_ERROR_CHECK(s_display ? ESP_OK : ESP_FAIL);
+    ESP_LOGI(TAG, "touch indev: %p", bsp_display_get_input_dev());
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS
     ESP_ERROR_CHECK(esp_lv_adapter_fps_stats_enable(s_display, true));
