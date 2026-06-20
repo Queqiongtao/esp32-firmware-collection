@@ -18,9 +18,6 @@ static constexpr float IMU_SAMPLE_DT_S = 1.0f / IMU_SAMPLE_HZ;
 static constexpr int GYRO_BIAS_CALIBRATION_SAMPLES = 200;
 static constexpr int ATTITUDE_LOG_PERIOD_MS = 500;
 static constexpr float RAD_TO_DEG = 57.29577951308232f;
-static constexpr float THEME_SWITCH_GESTURE_ENTER_DPS = 220.0f;
-static constexpr float THEME_SWITCH_GESTURE_EXIT_DPS = 70.0f;
-static constexpr int THEME_SWITCH_GESTURE_COOLDOWN_MS = 500;
 
 // Continuous in-plane gravity angle: angle = OFFSET - SIGN * atan2(ax, ay).
 // Defaults map the four upright orientations to the previous 270/0/90/180 targets.
@@ -37,12 +34,8 @@ static qmi8658_t s_imu = {};
 static attitude_t s_attitude = {};
 static imu_demo_angle_cb_t s_angle_cb = NULL;
 static void *s_angle_user_ctx = NULL;
-static imu_demo_gesture_cb_t s_gesture_cb = NULL;
-static void *s_gesture_user_ctx = NULL;
 static float s_clock_angle_filtered = 0.0f;
 static bool s_clock_angle_valid = false;
-static bool s_theme_switch_gesture_armed = true;
-static TickType_t s_theme_switch_last_trigger_tick = 0;
 
 static esp_err_t calibrate_gyro_bias(qmi8658_t *imu, float gyro_bias_dps[3])
 {
@@ -109,38 +102,6 @@ static void update_clock_angle(const qmi8658_sample_t *sample)
     s_angle_cb(s_clock_angle_filtered, s_angle_user_ctx);
 }
 
-static void detect_theme_switch_gesture(const qmi8658_sample_t *sample,
-                                        const float gyro_bias_dps[3],
-                                        TickType_t now)
-{
-    if (s_gesture_cb == NULL) {
-        return;
-    }
-
-    const float wrist_spin_dps = sample->gyro_dps[2] - gyro_bias_dps[2];
-    const float abs_wrist_spin_dps = fabsf(wrist_spin_dps);
-
-    if (!s_theme_switch_gesture_armed) {
-        if (abs_wrist_spin_dps <= THEME_SWITCH_GESTURE_EXIT_DPS) {
-            s_theme_switch_gesture_armed = true;
-        }
-        return;
-    }
-
-    if ((now - s_theme_switch_last_trigger_tick) < pdMS_TO_TICKS(THEME_SWITCH_GESTURE_COOLDOWN_MS)) {
-        return;
-    }
-
-    if (abs_wrist_spin_dps < THEME_SWITCH_GESTURE_ENTER_DPS) {
-        return;
-    }
-
-    s_theme_switch_gesture_armed = false;
-    s_theme_switch_last_trigger_tick = now;
-    ESP_LOGI(TAG, "Theme switch gesture detected: gyro_z=%.2f dps", wrist_spin_dps);
-    s_gesture_cb(IMU_DEMO_GESTURE_THEME_NEXT, s_gesture_user_ctx);
-}
-
 static void imu_demo_task(void *arg)
 {
     qmi8658_t *imu = static_cast<qmi8658_t *>(arg);
@@ -160,7 +121,6 @@ static void imu_demo_task(void *arg)
         if (err == ESP_OK) {
             update_clock_angle(&sample);
             TickType_t now = xTaskGetTickCount();
-            detect_theme_switch_gesture(&sample, gyro_bias_dps, now);
 
             float gyro_dps[3] = {
                 sample.gyro_dps[0] - gyro_bias_dps[0],
@@ -188,17 +148,11 @@ static void imu_demo_task(void *arg)
 }
 
 esp_err_t imu_demo_start(imu_demo_angle_cb_t angle_cb,
-                         void *angle_user_ctx,
-                         imu_demo_gesture_cb_t gesture_cb,
-                         void *gesture_user_ctx)
+                         void *angle_user_ctx)
 {
     s_angle_cb = angle_cb;
     s_angle_user_ctx = angle_user_ctx;
-    s_gesture_cb = gesture_cb;
-    s_gesture_user_ctx = gesture_user_ctx;
     s_clock_angle_valid = false;
-    s_theme_switch_gesture_armed = true;
-    s_theme_switch_last_trigger_tick = 0;
 
     i2c_master_bus_handle_t bus_handle = bsp_i2c_get_handle();
     if (bus_handle == NULL) {

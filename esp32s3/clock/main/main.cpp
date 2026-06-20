@@ -282,15 +282,6 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
     portEXIT_CRITICAL(&s_clock_rotation_lock);
 }
 
-static void on_imu_gesture(imu_demo_gesture_t gesture, void *user_ctx)
-{
-    (void)user_ctx;
-
-    if (gesture == IMU_DEMO_GESTURE_THEME_NEXT) {
-        s_theme_switch_pending = true;
-    }
-}
-
 static void update_clock(lv_timer_t *timer)
 {
     (void)timer;
@@ -419,5 +410,5 @@ extern "C" void app_main(void)
     bsp_display_unlock();
 
     clock_button_init();
-    imu_demo_start(on_imu_clock_angle, NULL, on_imu_gesture, NULL);
+    imu_demo_start(on_imu_clock_angle, NULL);
 }
