@@ -45,11 +45,13 @@ static size_t s_current_theme_index = 0;
 static constexpr gpio_num_t CLOCK_BUTTON_GPIO = GPIO_NUM_0;
 static constexpr uint8_t CLOCK_BUTTON_ACTIVE_LEVEL = 0;
 
-static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 16;
+static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 24;
 static constexpr uint32_t CLOCK_THEME_ANIMATION_TIMER_MS = 33;
 static constexpr uint32_t CLOCK_ROTATION_PERF_LOG_MS = 1000;
 static constexpr float CLOCK_ROTATION_MAX_DT_S = 0.05f;
-static constexpr float CLOCK_ROTATION_INVALIDATE_EPSILON_DEG = 5.0f;
+static constexpr float CLOCK_ROTATION_INVALIDATE_MOVING_EPSILON_DEG = 4.0f;
+static constexpr float CLOCK_ROTATION_INVALIDATE_SETTLED_EPSILON_DEG = 6.0f;
+static constexpr float CLOCK_ROTATION_TARGET_EPSILON_DEG = 2.0f;
 static constexpr spring_angle_config_t CLOCK_ROTATION_SPRING_CONFIG = {
     .stiffness = 80.0f,
     .damping = 18.0f,
@@ -68,6 +70,8 @@ static float s_clock_rotation_applied_deg = 0.0f;
 static bool s_clock_rotation_applied_valid = false;
 static portMUX_TYPE s_clock_rotation_lock = portMUX_INITIALIZER_UNLOCKED;
 static float s_clock_rotation_target_deg = 0.0f;
+static float s_clock_rotation_submitted_target_deg = 0.0f;
+static bool s_clock_rotation_submitted_target_valid = false;
 static bool s_clock_rotation_target_dirty = false;
 static volatile bool s_theme_switch_pending = false;
 
@@ -77,9 +81,12 @@ static void apply_clock_rotation(float angle_deg)
         return;
     }
 
+    const float invalidate_epsilon = spring_angle_is_settled(&s_clock_rotation_spring)
+                                         ? CLOCK_ROTATION_INVALIDATE_SETTLED_EPSILON_DEG
+                                         : CLOCK_ROTATION_INVALIDATE_MOVING_EPSILON_DEG;
     if (s_clock_rotation_applied_valid &&
         fabsf(spring_angle_shortest_delta(angle_deg, s_clock_rotation_applied_deg)) <
-            CLOCK_ROTATION_INVALIDATE_EPSILON_DEG) {
+            invalidate_epsilon) {
         return;
     }
 
@@ -196,6 +203,8 @@ static void update_clock_rotation(lv_timer_t *timer)
 
     if (target_dirty) {
         spring_angle_set_target(&s_clock_rotation_spring, target_deg);
+    } else if (spring_angle_is_settled(&s_clock_rotation_spring)) {
+        return;
     }
 
     spring_angle_update(&s_clock_rotation_spring, dt_s);
@@ -207,8 +216,19 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
 {
     (void)user_ctx;
 
+    const float normalized_angle_deg = spring_angle_normalize(angle_deg);
+
     portENTER_CRITICAL(&s_clock_rotation_lock);
-    s_clock_rotation_target_deg = angle_deg;
+    if (s_clock_rotation_submitted_target_valid &&
+        fabsf(spring_angle_shortest_delta(normalized_angle_deg, s_clock_rotation_submitted_target_deg)) <
+            CLOCK_ROTATION_TARGET_EPSILON_DEG) {
+        portEXIT_CRITICAL(&s_clock_rotation_lock);
+        return;
+    }
+
+    s_clock_rotation_submitted_target_deg = normalized_angle_deg;
+    s_clock_rotation_submitted_target_valid = true;
+    s_clock_rotation_target_deg = normalized_angle_deg;
     s_clock_rotation_target_dirty = true;
     portEXIT_CRITICAL(&s_clock_rotation_lock);
 }
@@ -287,6 +307,8 @@ static void create_clock_ui(void)
     s_clock_rotation_applied_valid = false;
     portENTER_CRITICAL(&s_clock_rotation_lock);
     s_clock_rotation_target_deg = spring_angle_get_target(&s_clock_rotation_spring);
+    s_clock_rotation_submitted_target_deg = s_clock_rotation_target_deg;
+    s_clock_rotation_submitted_target_valid = false;
     s_clock_rotation_target_dirty = false;
     portEXIT_CRITICAL(&s_clock_rotation_lock);
 
