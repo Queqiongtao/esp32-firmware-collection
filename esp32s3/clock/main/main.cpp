@@ -53,6 +53,7 @@ static constexpr float CLOCK_ROTATION_INVALIDATE_MOVING_EPSILON_DEG = 1.5f;
 static constexpr float CLOCK_ROTATION_INVALIDATE_SETTLED_EPSILON_DEG = 2.0f;
 static constexpr float CLOCK_ROTATION_START_EPSILON_DEG = 15.0f;
 static constexpr float CLOCK_ROTATION_TARGET_EPSILON_DEG = 3.0f;
+static constexpr float CLOCK_ROTATION_SETTLED_CORRECTION_EPSILON_DEG = 2.0f;
 static constexpr spring_angle_config_t CLOCK_ROTATION_SPRING_CONFIG = {
     .stiffness = 180.0f,
     .damping = 24.0f,
@@ -252,9 +253,6 @@ static void update_clock_rotation(lv_timer_t *timer)
     } else if (spring_angle_is_settled(&s_clock_rotation_spring)) {
         portENTER_CRITICAL(&s_clock_rotation_lock);
         s_clock_rotation_started = false;
-        s_clock_rotation_submitted_target_deg =
-            spring_angle_get_target(&s_clock_rotation_spring);
-        s_clock_rotation_submitted_target_valid = true;
         portEXIT_CRITICAL(&s_clock_rotation_lock);
 
         ++s_clock_rotation_perf_skip_settled;
@@ -287,15 +285,24 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
     const float target_delta_deg =
         fabsf(spring_angle_shortest_delta(normalized_angle_deg,
                                           s_clock_rotation_submitted_target_deg));
+    const bool rotation_settled = !s_clock_rotation_started &&
+                                  spring_angle_is_settled(&s_clock_rotation_spring);
     const float update_epsilon_deg = s_clock_rotation_started
                                          ? CLOCK_ROTATION_TARGET_EPSILON_DEG
-                                         : CLOCK_ROTATION_START_EPSILON_DEG;
+                                         : rotation_settled
+                                               ? CLOCK_ROTATION_SETTLED_CORRECTION_EPSILON_DEG
+                                               : CLOCK_ROTATION_START_EPSILON_DEG;
     if (target_delta_deg < update_epsilon_deg) {
+        if (rotation_settled) {
+            s_clock_rotation_submitted_target_deg = normalized_angle_deg;
+        }
         portEXIT_CRITICAL(&s_clock_rotation_lock);
         return;
     }
 
-    s_clock_rotation_started = true;
+    if (s_clock_rotation_started || target_delta_deg >= CLOCK_ROTATION_START_EPSILON_DEG) {
+        s_clock_rotation_started = true;
+    }
     s_clock_rotation_submitted_target_deg = normalized_angle_deg;
     s_clock_rotation_target_deg = normalized_angle_deg;
     s_clock_rotation_target_dirty = true;
