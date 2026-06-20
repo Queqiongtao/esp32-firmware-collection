@@ -95,6 +95,14 @@ menu "Board Support Package"
                 Higher queue depths can let LVGL enqueue the next parameter transaction while a
                 previous color DMA transfer is still being recycled, which can trigger SPI DMA
                 underflow on ESP-IDF 6.
+
+        config BSP_LCD_TE_SYNC_ENABLE
+            bool "Enable CO5300 TE synchronized refresh"
+            default y
+            help
+                Use the CO5300 tearing effect signal on GPIO13 to synchronize LVGL flushes with
+                the AMOLED panel refresh. This reduces visible tearing during large rotated
+                clock updates. Disable this if the TE line is unavailable on a board revision.
     endmenu
 
     config BSP_I2S_NUM

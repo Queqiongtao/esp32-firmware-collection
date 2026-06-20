@@ -344,6 +344,13 @@ esp_codec_dev_handle_t bsp_audio_codec_microphone_init(void)
 #else
 #define BSP_LCD_LVGL_BUFFER_HEIGHT (CONFIG_BSP_LCD_LVGL_BUFFER_HEIGHT)
 #endif
+#if CONFIG_BSP_LCD_TE_SYNC_ENABLE
+#define BSP_LCD_TEAR_AVOID_MODE (ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC)
+#define BSP_LCD_REQUIRE_DOUBLE_BUFFER (false)
+#else
+#define BSP_LCD_TEAR_AVOID_MODE (ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE)
+#define BSP_LCD_REQUIRE_DOUBLE_BUFFER (true)
+#endif
 
 esp_err_t bsp_display_brightness_init(void)
 {
@@ -539,6 +546,10 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
              BSP_LCD_LVGL_BUFFER_HEIGHT,
              lvgl_buffer_bytes,
              lvgl_buffer_bytes * 2);
+    ESP_LOGI(TAG,
+             "LVGL tear avoidance: mode=%d, te_gpio=%d",
+             cfg->tear_avoid_mode,
+             (cfg->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) ? BSP_LCD_TE : -1);
 
     BSP_ERROR_CHECK_RETURN_NULL(bsp_display_new(&disp_config, &panel_handle, &io_handle));
 
@@ -554,9 +565,19 @@ static lv_display_t *bsp_display_lcd_init(const bsp_display_cfg_t *cfg)
             .buffer_height = BSP_LCD_LVGL_BUFFER_HEIGHT,
             .use_psram = true,
             .enable_ppa_accel = false,
-            .require_double_buffer = true,
+            .require_double_buffer = BSP_LCD_REQUIRE_DOUBLE_BUFFER,
         },
         .tear_avoid_mode = cfg->tear_avoid_mode,
+        .te_sync = {
+            .gpio_num = (cfg->tear_avoid_mode == ESP_LV_ADAPTER_TEAR_AVOID_MODE_TE_SYNC) ? BSP_LCD_TE : -1,
+            .time_tvdl_ms = ESP_LV_ADAPTER_TE_TVDL_DEFAULT_MS,
+            .time_tvdh_ms = ESP_LV_ADAPTER_TE_TVDH_DEFAULT_MS,
+            .bus_freq_hz = BSP_LCD_SPI_PCLK_HZ,
+            .data_lines = 4,
+            .bits_per_pixel = BSP_LCD_BITS_PER_PIXEL,
+            .intr_type = GPIO_INTR_DISABLE,
+            .refresh_window_percent = ESP_LV_ADAPTER_TE_WINDOW_PERCENT_DEFAULT,
+        },
     };
 
     lv_display_t *disp = esp_lv_adapter_register_display(&disp_cfg);
@@ -601,7 +622,7 @@ lv_display_t *bsp_display_start(void)
     bsp_display_cfg_t cfg = {
         .lv_adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG(),
         .rotation = ESP_LV_ADAPTER_ROTATE_0,
-        .tear_avoid_mode = ESP_LV_ADAPTER_TEAR_AVOID_MODE_NONE,
+        .tear_avoid_mode = BSP_LCD_TEAR_AVOID_MODE,
         .touch_flags = {
             .swap_xy = 0,
             .mirror_x = 1,
