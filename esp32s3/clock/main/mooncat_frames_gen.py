@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", required=True, help="Source GIF path")
     parser.add_argument("--output-c", required=True, help="Generated C file path")
     parser.add_argument("--output-h", required=True, help="Generated header path")
-    parser.add_argument("--fps", type=int, default=6, help="Animation FPS after sampling")
+    parser.add_argument("--fps", type=int, default=0, help="Optional animation FPS after sampling")
     parser.add_argument("--width", type=int, default=180, help="Scaled frame width")
     parser.add_argument("--symbol-prefix", default="mooncat", help="Generated symbol prefix")
     return parser.parse_args()
@@ -31,6 +31,36 @@ def parse_args() -> argparse.Namespace:
 
 def run_command(args: list[str]) -> None:
     subprocess.run(args, check=True)
+
+
+def read_frame_durations_ms(ffprobe: str, input_path: pathlib.Path) -> list[int]:
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "frame=pkt_duration_time,duration_time",
+            "-of",
+            "csv=p=0",
+            str(input_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    durations: list[int] = []
+    for line in result.stdout.splitlines():
+        value = line.strip().split(",", 1)[0]
+        if not value:
+            continue
+        duration_ms = int(round(float(value) * 1000.0))
+        durations.append(max(duration_ms, 1))
+
+    return durations
 
 
 def background_delta(red: int, green: int, blue: int) -> int:
@@ -261,6 +291,7 @@ def format_c_array(data: bytes) -> str:
 
 def generate_files(
     frames: list[tuple[int, int, bytes]],
+    frame_durations_ms: list[int],
     output_c: pathlib.Path,
     output_h: pathlib.Path,
     symbol_prefix: str,
@@ -278,6 +309,7 @@ extern "C" {{
 #endif
 
 extern const lv_image_dsc_t * const g_{symbol_prefix}_frames[];
+extern const uint32_t g_{symbol_prefix}_frame_durations_ms[];
 extern const size_t g_{symbol_prefix}_frame_count;
 
 #ifdef __cplusplus
@@ -324,6 +356,10 @@ extern const size_t g_{symbol_prefix}_frame_count;
             *[f"    &{frame_name}," for frame_name in frame_names],
             "};",
             "",
+            f"const uint32_t g_{symbol_prefix}_frame_durations_ms[] = {{",
+            *[f"    {duration}," for duration in frame_durations_ms],
+            "};",
+            "",
             f"const size_t g_{symbol_prefix}_frame_count = sizeof(g_{symbol_prefix}_frames) / sizeof(g_{symbol_prefix}_frames[0]);",
             "",
         ]
@@ -339,6 +375,10 @@ def main() -> int:
     if ffmpeg is None:
         print("ffmpeg is required to generate mooncat frames", file=sys.stderr)
         return 1
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        print("ffprobe is required to read mooncat frame durations", file=sys.stderr)
+        return 1
 
     input_path = pathlib.Path(args.input)
     output_c = pathlib.Path(args.output_c)
@@ -350,7 +390,11 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mooncat_frames_") as temp_dir_name:
         temp_dir = pathlib.Path(temp_dir_name)
         frame_pattern = temp_dir / "frame_%02d.pam"
-        filter_graph = f"fps={args.fps},scale={args.width}:-1:flags=lanczos"
+        frame_durations_ms = read_frame_durations_ms(ffprobe, input_path)
+        if args.fps > 0:
+            filter_graph = f"fps={args.fps},scale={args.width}:-1:flags=lanczos"
+        else:
+            filter_graph = f"scale={args.width}:-1:flags=lanczos"
 
         run_command(
             [
@@ -373,7 +417,14 @@ def main() -> int:
             raise RuntimeError("No frames were generated from GIF")
 
         frames = [parse_pam(path) for path in frame_paths]
-        generate_files(frames, output_c, output_h, args.symbol_prefix)
+        if args.fps > 0:
+            frame_durations_ms = [max(int(round(1000.0 / args.fps)), 1)] * len(frames)
+        elif len(frame_durations_ms) != len(frames):
+            raise RuntimeError(
+                f"Frame duration count mismatch: {len(frame_durations_ms)} != {len(frames)}"
+            )
+
+        generate_files(frames, frame_durations_ms, output_c, output_h, args.symbol_prefix)
 
     return 0
 

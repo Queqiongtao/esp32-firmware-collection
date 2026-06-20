@@ -16,6 +16,9 @@ typedef struct {
     void (*update)(const struct tm *timeinfo);
     void (*reset)(void);
     bool (*tick)(uint32_t now_ms);
+    bool (*tick_updates_overlay_only)(void);
+    void (*set_overlay_visible)(bool visible);
+    void (*set_rotation)(float angle_deg);
 } clock_theme_t;
 
 extern const clock_theme_t g_clock_theme_minimal;

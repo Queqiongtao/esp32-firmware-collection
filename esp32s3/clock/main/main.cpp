@@ -88,6 +88,27 @@ static bool is_clock_rotation_active(void)
     return !spring_angle_is_settled(&s_clock_rotation_spring);
 }
 
+static const clock_theme_t *current_theme(void)
+{
+    return s_themes[s_current_theme_index];
+}
+
+static void set_current_theme_overlay_visible(bool visible)
+{
+    const clock_theme_t *theme = current_theme();
+    if (theme->set_overlay_visible != NULL) {
+        theme->set_overlay_visible(visible);
+    }
+}
+
+static void set_current_theme_rotation(float angle_deg)
+{
+    const clock_theme_t *theme = current_theme();
+    if (theme->set_rotation != NULL) {
+        theme->set_rotation(angle_deg);
+    }
+}
+
 static void reset_clock_rotation_perf_counters(void)
 {
     s_clock_rotation_perf_ticks = 0;
@@ -114,6 +135,7 @@ static void apply_clock_rotation(float angle_deg)
     }
 
     lv_image_set_rotation(s_clock_snapshot_image, (int32_t)(angle_deg * 10.0f));
+    set_current_theme_rotation(angle_deg);
     s_clock_rotation_applied_deg = spring_angle_normalize(angle_deg);
     s_clock_rotation_applied_valid = true;
     ++s_clock_rotation_perf_applies;
@@ -126,12 +148,14 @@ static void refresh_clock_snapshot(void)
     }
 
     lv_obj_clear_flag(s_current_theme_root, LV_OBJ_FLAG_HIDDEN);
+    set_current_theme_overlay_visible(false);
     lv_obj_add_flag(s_clock_snapshot_image, LV_OBJ_FLAG_HIDDEN);
     lv_obj_update_layout(s_current_theme_root);
 
     lv_draw_buf_t *snapshot = lv_snapshot_take(s_current_theme_root, LV_COLOR_FORMAT_RGB565);
     lv_obj_add_flag(s_current_theme_root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_clock_snapshot_image, LV_OBJ_FLAG_HIDDEN);
+    set_current_theme_overlay_visible(true);
 
     if (snapshot == NULL) {
         ESP_LOGW(TAG, "Failed to refresh clock snapshot");
@@ -212,7 +236,7 @@ static void reset_current_theme(void);
 
 static void reset_current_theme(void)
 {
-    const clock_theme_t *theme = s_themes[s_current_theme_index];
+    const clock_theme_t *theme = current_theme();
     if (theme->reset != NULL) {
         theme->reset();
     }
@@ -327,7 +351,7 @@ static void update_theme_animation(lv_timer_t *timer)
 {
     (void)timer;
 
-    const clock_theme_t *theme = s_themes[s_current_theme_index];
+    const clock_theme_t *theme = current_theme();
     if (theme->tick == NULL) {
         return;
     }
@@ -336,7 +360,9 @@ static void update_theme_animation(lv_timer_t *timer)
     }
 
     if (theme->tick(lv_tick_get())) {
-        refresh_clock_snapshot();
+        if (theme->tick_updates_overlay_only == NULL || !theme->tick_updates_overlay_only()) {
+            refresh_clock_snapshot();
+        }
     }
 }
 
@@ -347,6 +373,7 @@ static void switch_to_next_theme(void)
     }
 
     lv_obj_t *screen = lv_screen_active();
+    set_current_theme_overlay_visible(false);
     lv_obj_del(s_current_theme_root);
 
     s_current_theme_index = (s_current_theme_index + 1) % s_theme_count;

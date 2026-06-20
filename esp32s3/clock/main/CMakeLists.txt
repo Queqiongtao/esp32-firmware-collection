@@ -45,7 +45,6 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
                 --input ${MOONCAT_GIF}
                 --output-c ${MOONCAT_FRAMES_C}
                 --output-h ${MOONCAT_FRAMES_H}
-                --fps 12
         DEPENDS ${MOONCAT_GIF} ${MOONCAT_GENERATOR}
         VERBATIM)
 
