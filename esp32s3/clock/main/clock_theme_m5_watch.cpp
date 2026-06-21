@@ -221,6 +221,7 @@ static lv_obj_t *s_m5_classic_date = NULL;
 static lv_obj_t *s_m5_classic_hour = NULL;
 static lv_obj_t *s_m5_classic_minute = NULL;
 static lv_obj_t *s_m5_classic_second = NULL;
+static lv_obj_t *s_m5_classic_center_cap = NULL;
 static lv_obj_t *s_m5_classic_ticks = NULL;
 static lv_obj_t *s_m5_classic_sub_panel = NULL;
 static lv_obj_t *s_m5_classic_date_panel = NULL;
@@ -306,6 +307,7 @@ static lv_obj_t *m5_classic_build(lv_obj_t *parent)
     s_m5_classic_hour = NULL;
     s_m5_classic_minute = NULL;
     s_m5_classic_second = NULL;
+    s_m5_classic_center_cap = NULL;
     s_m5_classic_ticks = NULL;
     s_m5_classic_sub_panel = NULL;
     s_m5_classic_date_panel = NULL;
@@ -328,9 +330,12 @@ static lv_obj_t *m5_classic_build(lv_obj_t *parent)
     s_m5_classic_date = make_label(s_m5_classic_date_panel, &lv_font_maple_mono_medium_24, lv_color_hex(0x8B8B8B));
     lv_obj_center(s_m5_classic_date);
 
-    s_m5_classic_hour = make_hand(container, &classic_hour_hand, 126, 14, 12);
-    s_m5_classic_minute = make_hand(container, &classic_minute_hand, 190, 8, 19);
+    s_m5_classic_hour = make_hand(container, &classic_hour_hand, 126, 14, 18);
+    s_m5_classic_minute = make_hand(container, &classic_minute_hand, 190, 8, 20);
     s_m5_classic_second = make_hand(container, &classic_second_hand, 240, 14, 29);
+
+    s_m5_classic_center_cap = make_panel(container, 16, 16, LV_RADIUS_CIRCLE, lv_color_hex(0xE22B2B), LV_OPA_COVER);
+    lv_obj_center(s_m5_classic_center_cap);
 
     apply_classic_display_mode();
 
