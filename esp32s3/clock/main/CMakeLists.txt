@@ -1,5 +1,7 @@
 set(MAIN_SRCS
     "main.cpp"
+    "clock_settings.cpp"
+    "clock_settings_menu.cpp"
     "clock_touch_gesture.cpp"
     "rtc_time_sync.cpp"
     "imu_demo.cpp"
@@ -56,7 +58,7 @@ endif()
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS ${MAIN_INCLUDE_DIRS}
-    REQUIRES attitude pcf85063 qmi8658 ui_physics button)
+    REQUIRES attitude pcf85063 qmi8658 ui_physics button nvs_flash)
 
 target_compile_options(${COMPONENT_LIB} PUBLIC -Wno-missing-field-initializers)
 

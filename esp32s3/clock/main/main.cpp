@@ -12,6 +12,8 @@
 
 #include "bsp/esp-bsp.h"
 #include "button_gpio.h"
+#include "clock_settings.h"
+#include "clock_settings_menu.h"
 #include "clock_touch_gesture.h"
 #include "clock_theme.h"
 #include "esp_log.h"
@@ -19,6 +21,7 @@
 #include "imu_demo.h"
 #include "iot_button.h"
 #include "lvgl.h"
+#include "nvs_flash.h"
 #include "rtc_time_sync.h"
 #include "sdkconfig.h"
 #include "spring_angle.h"
@@ -63,8 +66,10 @@ static constexpr spring_angle_config_t CLOCK_ROTATION_SPRING_CONFIG = {
 };
 
 static lv_display_t *s_display = NULL;
+static clock_settings_t s_settings = {};
 static lv_obj_t *s_current_theme_root = NULL;
 static lv_obj_t *s_clock_snapshot_image = NULL;
+static lv_obj_t *s_settings_menu = NULL;
 static lv_draw_buf_t *s_clock_snapshot = NULL;
 static spring_angle_t s_clock_rotation_spring = {};
 static uint32_t s_clock_rotation_last_tick_ms = 0;
@@ -83,8 +88,16 @@ static bool s_clock_rotation_submitted_target_valid = false;
 static bool s_clock_rotation_started = false;
 static bool s_clock_rotation_target_dirty = false;
 static volatile int s_theme_switch_pending_step = 0;
+static volatile bool s_button_single_click_pending = false;
+static volatile bool s_menu_toggle_pending = false;
+static uint32_t s_last_activity_ms = 0;
+static bool s_touch_action_blocked_until_release = false;
+static bool s_screen_sleeping = false;
 
 static void keep_touch_layer_foreground(void);
+static void close_settings_menu(void);
+static void open_settings_menu(void);
+static bool note_user_activity(void);
 
 static bool is_clock_rotation_active(void)
 {
@@ -242,7 +255,11 @@ static void reset_current_theme(void);
 
 static void keep_touch_layer_foreground(void)
 {
-    clock_touch_gesture_move_foreground();
+    if (s_settings_menu != NULL) {
+        clock_settings_menu_move_foreground();
+    } else {
+        clock_touch_gesture_move_foreground();
+    }
 }
 
 static void request_theme_switch(int step)
@@ -262,9 +279,158 @@ static void reset_current_theme(void)
     }
 }
 
+static void save_settings(void)
+{
+    esp_err_t err = clock_settings_save(&s_settings);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Save settings failed: %s", esp_err_to_name(err));
+    }
+}
+
+static bool is_touch_action_blocked(void)
+{
+    return s_touch_action_blocked_until_release;
+}
+
+static bool wake_screen_if_sleeping(void)
+{
+    if (!s_screen_sleeping) {
+        return false;
+    }
+
+    s_screen_sleeping = false;
+    esp_err_t err = bsp_display_brightness_set(s_settings.brightness_percent);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Wake brightness failed: %s", esp_err_to_name(err));
+    }
+    s_last_activity_ms = lv_tick_get();
+    return true;
+}
+
+static bool note_user_activity(void)
+{
+    const bool woke = wake_screen_if_sleeping();
+    s_last_activity_ms = lv_tick_get();
+    if (woke) {
+        s_touch_action_blocked_until_release = true;
+    }
+    return woke;
+}
+
+static void on_menu_activity(void *user_ctx)
+{
+    (void)user_ctx;
+    note_user_activity();
+}
+
+static void on_menu_brightness(int brightness_percent, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.brightness_percent = brightness_percent;
+    if (!s_screen_sleeping) {
+        esp_err_t err = bsp_display_brightness_set(s_settings.brightness_percent);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Set brightness failed: %s", esp_err_to_name(err));
+        }
+    }
+    save_settings();
+}
+
+static void on_menu_sleep(uint32_t sleep_timeout_sec, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.sleep_timeout_sec = sleep_timeout_sec;
+    save_settings();
+}
+
+static void on_menu_wifi(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.wifi_enabled = enabled;
+    save_settings();
+    ESP_LOGI(TAG, "WiFi setting is %s (connection is not configured yet)", enabled ? "on" : "off");
+}
+
+static void on_menu_close(void *user_ctx)
+{
+    (void)user_ctx;
+    close_settings_menu();
+}
+
+static void open_settings_menu(void)
+{
+    if (s_settings_menu != NULL) {
+        keep_touch_layer_foreground();
+        return;
+    }
+
+    lv_obj_t *screen = lv_screen_active();
+    clock_settings_menu_config_t menu_config = {
+        .settings = &s_settings,
+        .brightness_cb = on_menu_brightness,
+        .sleep_cb = on_menu_sleep,
+        .wifi_cb = on_menu_wifi,
+        .close_cb = on_menu_close,
+        .activity_cb = on_menu_activity,
+        .user_ctx = NULL,
+    };
+    s_settings_menu = clock_settings_menu_create(screen, &menu_config);
+    clock_touch_gesture_set_enabled(false);
+    keep_touch_layer_foreground();
+}
+
+static void close_settings_menu(void)
+{
+    if (s_settings_menu == NULL) {
+        return;
+    }
+
+    lv_obj_del(s_settings_menu);
+    s_settings_menu = NULL;
+    clock_touch_gesture_set_enabled(true);
+    keep_touch_layer_foreground();
+}
+
+static void toggle_settings_menu(void)
+{
+    if (s_settings_menu != NULL) {
+        close_settings_menu();
+    } else {
+        open_settings_menu();
+    }
+}
+
+static void process_pending_input_actions(void)
+{
+    const bool button_single_click = s_button_single_click_pending;
+    const bool menu_toggle = s_menu_toggle_pending;
+    s_button_single_click_pending = false;
+    s_menu_toggle_pending = false;
+
+    if (button_single_click) {
+        if (note_user_activity()) {
+            return;
+        }
+        if (s_settings_menu != NULL) {
+            close_settings_menu();
+        } else {
+            request_theme_switch(1);
+        }
+    }
+
+    if (menu_toggle) {
+        if (note_user_activity()) {
+            return;
+        }
+        toggle_settings_menu();
+    }
+}
+
 static void update_clock_rotation(lv_timer_t *timer)
 {
     (void)timer;
+
+    process_pending_input_actions();
 
     const int theme_switch_step = s_theme_switch_pending_step;
     if (theme_switch_step != 0) {
@@ -311,6 +477,30 @@ static void update_clock_rotation(lv_timer_t *timer)
     spring_angle_update(&s_clock_rotation_spring, dt_s);
     apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
     log_clock_rotation_perf(now_ms);
+}
+
+static void update_auto_sleep(lv_timer_t *timer)
+{
+    (void)timer;
+
+    if (s_screen_sleeping || s_settings.sleep_timeout_sec == 0 || s_last_activity_ms == 0) {
+        return;
+    }
+
+    const uint32_t now_ms = lv_tick_get();
+    const uint32_t timeout_ms = s_settings.sleep_timeout_sec * 1000;
+    if ((uint32_t)(now_ms - s_last_activity_ms) < timeout_ms) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_brightness_set(0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Auto sleep brightness failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    s_screen_sleeping = true;
+    ESP_LOGI(TAG, "screen auto sleep after %" PRIu32 " seconds", s_settings.sleep_timeout_sec);
 }
 
 static void on_imu_clock_angle(float angle_deg, void *user_ctx)
@@ -412,9 +602,37 @@ static void switch_theme(int step)
 static void on_touch_theme_switch(int step, void *user_ctx)
 {
     (void)user_ctx;
+    if (is_touch_action_blocked()) {
+        return;
+    }
+    if (note_user_activity()) {
+        return;
+    }
     request_theme_switch(step);
 }
 
+static void on_touch_long_press(void *user_ctx)
+{
+    (void)user_ctx;
+    if (is_touch_action_blocked()) {
+        return;
+    }
+    if (note_user_activity()) {
+        return;
+    }
+    toggle_settings_menu();
+}
+
+static void on_touch_activity(lv_event_code_t code, void *user_ctx)
+{
+    (void)user_ctx;
+    if (code == LV_EVENT_RELEASED) {
+        note_user_activity();
+        s_touch_action_blocked_until_release = false;
+        return;
+    }
+    note_user_activity();
+}
 
 static void create_clock_ui(void)
 {
@@ -429,7 +647,13 @@ static void create_clock_ui(void)
     s_clock_snapshot_image = lv_image_create(screen);
     lv_obj_center(s_clock_snapshot_image);
 
-    clock_touch_gesture_create(screen, on_touch_theme_switch, NULL);
+    clock_touch_gesture_create(screen,
+                               on_touch_theme_switch,
+                               NULL,
+                               on_touch_long_press,
+                               NULL,
+                               on_touch_activity,
+                               NULL);
 
     spring_angle_init(&s_clock_rotation_spring, &CLOCK_ROTATION_SPRING_CONFIG, 0.0f);
     s_clock_rotation_last_tick_ms = lv_tick_get();
@@ -445,16 +669,25 @@ static void create_clock_ui(void)
 
     update_clock(NULL);
     keep_touch_layer_foreground();
+    s_last_activity_ms = lv_tick_get();
     lv_timer_create(update_clock, 1000, NULL);
     lv_timer_create(update_theme_animation, CLOCK_THEME_ANIMATION_TIMER_MS, NULL);
     lv_timer_create(update_clock_rotation, CLOCK_ROTATION_TIMER_MS, NULL);
+    lv_timer_create(update_auto_sleep, 1000, NULL);
 }
 
 static void on_theme_button(void *button_handle, void *user_ctx)
 {
     (void)button_handle;
     (void)user_ctx;
-    request_theme_switch(1);
+    s_button_single_click_pending = true;
+}
+
+static void on_menu_button(void *button_handle, void *user_ctx)
+{
+    (void)button_handle;
+    (void)user_ctx;
+    s_menu_toggle_pending = true;
 }
 
 static void clock_button_init(void)
@@ -476,6 +709,11 @@ static void clock_button_init(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Button cb register failed: %s", esp_err_to_name(err));
     }
+
+    err = iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, NULL, on_menu_button, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Button long press cb register failed: %s", esp_err_to_name(err));
+    }
 }
 
 extern "C" void app_main(void)
@@ -485,10 +723,24 @@ extern "C" void app_main(void)
     setenv("TZ", "CST-8", 1);
     tzset();
 
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_err);
+
+    esp_err_t settings_err = clock_settings_load(&s_settings);
+    if (settings_err != ESP_OK) {
+        ESP_LOGW(TAG, "Load settings failed: %s", esp_err_to_name(settings_err));
+        clock_settings_defaults(&s_settings);
+    }
+
     rtc_time_sync_from_external_rtc();
 
     s_display = bsp_display_start();
     ESP_ERROR_CHECK(s_display ? ESP_OK : ESP_FAIL);
+    ESP_ERROR_CHECK(bsp_display_brightness_set(s_settings.brightness_percent));
     ESP_LOGI(TAG, "touch indev: %p", bsp_display_get_input_dev());
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS
