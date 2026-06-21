@@ -47,6 +47,7 @@ static void style_slider(lv_obj_t *slider)
     lv_obj_set_style_bg_color(slider, lv_color_hex(0xFFFFFF), LV_PART_KNOB);
     lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_KNOB);
     lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(slider, 6, LV_PART_KNOB);
 }
 
 static void style_switch(lv_obj_t *sw)
@@ -308,9 +309,10 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_text_font(s_brightness_value, &lv_font_montserrat_28, 0);
     update_brightness_value(config->settings->brightness_percent);
     lv_obj_t *slider = lv_slider_create(brightness_page);
-    lv_obj_set_width(slider, 242);
-    lv_obj_set_height(slider, 18);
+    lv_obj_set_width(slider, 270);
+    lv_obj_set_height(slider, 28);
     lv_obj_set_style_margin_top(slider, 20, 0);
+    lv_obj_set_ext_click_area(slider, 18);
     lv_obj_add_flag(slider, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
     style_slider(slider);
     lv_slider_set_range(slider, 1, 100);
