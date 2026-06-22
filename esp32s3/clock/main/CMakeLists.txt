@@ -58,7 +58,7 @@ endif()
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS ${MAIN_INCLUDE_DIRS}
-    REQUIRES attitude pcf85063 qmi8658 ui_physics button nvs_flash)
+    REQUIRES attitude pcf85063 qmi8658 ui_physics button nvs_flash esp_io_expander)
 
 target_compile_options(${COMPONENT_LIB} PUBLIC -Wno-missing-field-initializers)
 

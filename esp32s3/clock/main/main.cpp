@@ -17,6 +17,7 @@
 #include "clock_touch_gesture.h"
 #include "clock_theme.h"
 #include "esp_log.h"
+#include "esp_io_expander.h"
 #include "freertos/FreeRTOS.h"
 #include "imu_demo.h"
 #include "iot_button.h"
@@ -48,6 +49,12 @@ static size_t s_current_theme_index = 0;
 
 static constexpr gpio_num_t CLOCK_BUTTON_GPIO = GPIO_NUM_0;
 static constexpr uint8_t CLOCK_BUTTON_ACTIVE_LEVEL = 0;
+
+static constexpr uint32_t PWR_BUTTON_POLL_TIMER_MS = 30;
+static constexpr uint32_t PWR_BUTTON_DEBOUNCE_MS = 50;
+static constexpr uint32_t PWR_BUTTON_SINGLE_CLICK_MAX_MS = 800;
+static constexpr uint32_t PWR_BUTTON_PIN_MASK = IO_EXPANDER_PIN_NUM_4;
+static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 0;
 
 static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 16;
 static constexpr uint32_t CLOCK_THEME_ANIMATION_TIMER_MS = 33;
@@ -89,15 +96,23 @@ static bool s_clock_rotation_started = false;
 static bool s_clock_rotation_target_dirty = false;
 static volatile int s_theme_switch_pending_step = 0;
 static volatile bool s_button_single_click_pending = false;
+static volatile bool s_pwr_single_click_pending = false;
 static volatile bool s_menu_toggle_pending = false;
 static uint32_t s_last_activity_ms = 0;
 static bool s_touch_action_blocked_until_release = false;
 static bool s_screen_sleeping = false;
+static esp_io_expander_handle_t s_pwr_io_expander = NULL;
+static bool s_pwr_button_ready = false;
+static bool s_pwr_button_stable_pressed = false;
+static bool s_pwr_button_candidate_pressed = false;
+static uint32_t s_pwr_button_candidate_since_ms = 0;
+static uint32_t s_pwr_button_press_start_ms = 0;
 
 static void keep_touch_layer_foreground(void);
 static void close_settings_menu(void);
 static void open_settings_menu(void);
 static bool note_user_activity(void);
+static bool sleep_screen(const char *reason);
 
 static bool is_clock_rotation_active(void)
 {
@@ -307,6 +322,23 @@ static bool wake_screen_if_sleeping(void)
     return true;
 }
 
+static bool sleep_screen(const char *reason)
+{
+    if (s_screen_sleeping) {
+        return false;
+    }
+
+    esp_err_t err = bsp_display_brightness_set(0);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "%s sleep brightness failed: %s", reason, esp_err_to_name(err));
+        return false;
+    }
+
+    s_screen_sleeping = true;
+    ESP_LOGI(TAG, "screen %s sleep", reason);
+    return true;
+}
+
 static bool note_user_activity(void)
 {
     const bool woke = wake_screen_if_sleeping();
@@ -315,6 +347,15 @@ static bool note_user_activity(void)
         s_touch_action_blocked_until_release = true;
     }
     return woke;
+}
+
+static void toggle_screen_sleep_from_pwr(void)
+{
+    if (wake_screen_if_sleeping()) {
+        return;
+    }
+
+    sleep_screen("manual");
 }
 
 static void on_menu_activity(void *user_ctx)
@@ -402,10 +443,17 @@ static void toggle_settings_menu(void)
 
 static void process_pending_input_actions(void)
 {
+    const bool pwr_single_click = s_pwr_single_click_pending;
     const bool button_single_click = s_button_single_click_pending;
     const bool menu_toggle = s_menu_toggle_pending;
+    s_pwr_single_click_pending = false;
     s_button_single_click_pending = false;
     s_menu_toggle_pending = false;
+
+    if (pwr_single_click) {
+        toggle_screen_sleep_from_pwr();
+        return;
+    }
 
     if (button_single_click) {
         if (note_user_activity()) {
@@ -493,14 +541,49 @@ static void update_auto_sleep(lv_timer_t *timer)
         return;
     }
 
-    esp_err_t err = bsp_display_brightness_set(0);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Auto sleep brightness failed: %s", esp_err_to_name(err));
+    if (sleep_screen("auto")) {
+        ESP_LOGI(TAG, "screen auto sleep after %" PRIu32 " seconds", s_settings.sleep_timeout_sec);
+    }
+}
+
+static void update_pwr_button(lv_timer_t *timer)
+{
+    (void)timer;
+
+    if (!s_pwr_button_ready || s_pwr_io_expander == NULL) {
         return;
     }
 
-    s_screen_sleeping = true;
-    ESP_LOGI(TAG, "screen auto sleep after %" PRIu32 " seconds", s_settings.sleep_timeout_sec);
+    uint32_t level_mask = 0;
+    esp_err_t err = esp_io_expander_get_level(s_pwr_io_expander, PWR_BUTTON_PIN_MASK, &level_mask);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PWR button read failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    const bool raw_pressed = ((level_mask & PWR_BUTTON_PIN_MASK) != 0) != (PWR_BUTTON_ACTIVE_LEVEL == 0);
+    const uint32_t now_ms = lv_tick_get();
+    if (raw_pressed != s_pwr_button_candidate_pressed) {
+        s_pwr_button_candidate_pressed = raw_pressed;
+        s_pwr_button_candidate_since_ms = now_ms;
+        return;
+    }
+
+    if (raw_pressed == s_pwr_button_stable_pressed ||
+        (uint32_t)(now_ms - s_pwr_button_candidate_since_ms) < PWR_BUTTON_DEBOUNCE_MS) {
+        return;
+    }
+
+    s_pwr_button_stable_pressed = raw_pressed;
+    if (s_pwr_button_stable_pressed) {
+        s_pwr_button_press_start_ms = now_ms;
+        return;
+    }
+
+    const uint32_t press_ms = now_ms - s_pwr_button_press_start_ms;
+    if (press_ms <= PWR_BUTTON_SINGLE_CLICK_MAX_MS) {
+        s_pwr_single_click_pending = true;
+    }
 }
 
 static void on_imu_clock_angle(float angle_deg, void *user_ctx)
@@ -716,6 +799,45 @@ static void clock_button_init(void)
     }
 }
 
+static void pwr_button_init(void)
+{
+    s_pwr_io_expander = bsp_io_expander_init();
+    if (s_pwr_io_expander == NULL) {
+        ESP_LOGW(TAG, "PWR button IO expander init failed");
+        return;
+    }
+
+    esp_err_t err = esp_io_expander_set_dir(s_pwr_io_expander, PWR_BUTTON_PIN_MASK, IO_EXPANDER_INPUT);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PWR button input config failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint32_t level_mask = 0;
+    err = esp_io_expander_get_level(s_pwr_io_expander, PWR_BUTTON_PIN_MASK, &level_mask);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "PWR button initial read failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    const bool pressed = ((level_mask & PWR_BUTTON_PIN_MASK) != 0) != (PWR_BUTTON_ACTIVE_LEVEL == 0);
+    const uint32_t now_ms = lv_tick_get();
+    s_pwr_button_stable_pressed = pressed;
+    s_pwr_button_candidate_pressed = pressed;
+    s_pwr_button_candidate_since_ms = now_ms;
+    s_pwr_button_press_start_ms = pressed ? now_ms : 0;
+    if (bsp_display_lock(UINT32_MAX) == ESP_OK) {
+        lv_timer_create(update_pwr_button, PWR_BUTTON_POLL_TIMER_MS, NULL);
+        bsp_display_unlock();
+    } else {
+        ESP_LOGW(TAG, "PWR button timer create lock failed");
+        return;
+    }
+
+    s_pwr_button_ready = true;
+    ESP_LOGI(TAG, "PWR button polling on EXIO4");
+}
+
 extern "C" void app_main(void)
 {
     ESP_LOGI(TAG, "Start simple clock demo");
@@ -752,5 +874,6 @@ extern "C" void app_main(void)
     bsp_display_unlock();
 
     clock_button_init();
+    pwr_button_init();
     imu_demo_start(on_imu_clock_angle, NULL);
 }
