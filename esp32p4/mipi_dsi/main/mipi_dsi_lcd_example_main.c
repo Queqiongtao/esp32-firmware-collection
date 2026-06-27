@@ -56,7 +56,8 @@ static const char *TAG = "example";
 #endif
 
 #define EXAMPLE_MIPI_DSI_LANE_NUM          2    // 2 data lanes
-#define EXAMPLE_MIPI_DSI_LANE_BITRATE_MBPS 550
+#define EXAMPLE_MIPI_DSI_LANE_BITRATE_MBPS 750
+#define EXAMPLE_MIPI_DSI_FRAME_BUFFER_NUM  2
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////// Please update the following configuration according to your Board Design //////////////////////////
@@ -260,7 +261,7 @@ void app_main(void)
         .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
         .dpi_clock_freq_mhz = EXAMPLE_MIPI_DSI_DPI_CLK_MHZ,
         .in_color_format = LCD_COLOR_FMT_RGB565,
-        .num_fbs = 1,
+        .num_fbs = EXAMPLE_MIPI_DSI_FRAME_BUFFER_NUM,
         .video_timing = {
             .h_size = EXAMPLE_MIPI_DSI_LCD_H_RES,
             .v_size = EXAMPLE_MIPI_DSI_LCD_V_RES,
@@ -272,6 +273,9 @@ void app_main(void)
             .vsync_front_porch = EXAMPLE_MIPI_DSI_LCD_VFP,
         },
     };
+
+    ESP_LOGI(TAG, "Display pipeline: num_fbs=%d lane_rate=%dMbps dpi_clk=%.1fMHz",
+             EXAMPLE_MIPI_DSI_FRAME_BUFFER_NUM, EXAMPLE_MIPI_DSI_LANE_BITRATE_MBPS, EXAMPLE_MIPI_DSI_DPI_CLK_MHZ);
 
 #if CONFIG_EXAMPLE_LCD_USE_ILI9881C
     ili9881c_vendor_config_t vendor_config = {
