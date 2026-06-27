@@ -1,0 +1,34 @@
+menu "Example Configuration"
+    config EXAMPLE_USE_DMA2D_COPY_FRAME
+        bool "Use DMA2D to copy draw buffer to frame buffer"
+        default y
+        help
+            Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
+            This can save some CPU time and improve the performance.
+
+    config EXAMPLE_MONITOR_REFRESH_BY_GPIO
+        bool "Monitor Refresh Rate by GPIO"
+        default y
+        help
+            Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
+            The GPIO will output a square wave with the frequency equals to half of the refresh rate.
+
+    config EXAMPLE_LCD_BACKLIGHT_BYPASS_PWM
+        bool "Bypass PWM and force backlight always on"
+        default n
+        help
+            Enable this option to drive the backlight pin as a fixed high level instead of PWM.
+            This is useful for diagnosing whether visible flicker comes from PWM dimming or from the display pipeline.
+
+    choice
+        prompt "Select MIPI LCD model"
+        default EXAMPLE_LCD_USE_JD9165
+        help
+            Select LCD controller model.
+
+        config EXAMPLE_LCD_USE_JD9165
+            bool "JD9165"
+        config EXAMPLE_LCD_USE_ILI9881C
+            bool "ILI9881C"
+    endchoice
+endmenu
