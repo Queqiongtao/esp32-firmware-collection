@@ -83,12 +83,20 @@ static const char *TAG = "example";
 //////////////////// Please update the following configuration according to your Application ///////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define EXAMPLE_LVGL_DRAW_BUF_LINES    (EXAMPLE_MIPI_DSI_LCD_V_RES / 10) // number of display lines in each draw buffer
+#define EXAMPLE_LVGL_DRAW_BUF_LINES    CONFIG_EXAMPLE_LVGL_DRAW_BUF_LINES // number of display lines in each draw buffer
 #define EXAMPLE_LVGL_TICK_PERIOD_MS    2
 #define EXAMPLE_LVGL_TASK_STACK_SIZE   (4 * 1024)
 #define EXAMPLE_LVGL_TASK_PRIORITY     2
 #define EXAMPLE_LVGL_TASK_MAX_DELAY_MS 500
 #define EXAMPLE_LVGL_TASK_MIN_DELAY_MS 1000 / CONFIG_FREERTOS_HZ
+
+#if CONFIG_EXAMPLE_LVGL_DRAW_BUF_INTERNAL
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#define EXAMPLE_LVGL_DRAW_BUF_MEM_NAME "internal RAM"
+#else
+#define EXAMPLE_LVGL_DRAW_BUF_CAPS MALLOC_CAP_SPIRAM
+#define EXAMPLE_LVGL_DRAW_BUF_MEM_NAME "PSRAM"
+#endif
 
 // LVGL library is not thread-safe, this example will call LVGL APIs from different tasks, so use a mutex to protect it
 static _lock_t lvgl_api_lock;
@@ -342,13 +350,15 @@ void app_main(void)
     }
 #endif
     size_t draw_buffer_sz = EXAMPLE_MIPI_DSI_LCD_H_RES * EXAMPLE_LVGL_DRAW_BUF_LINES * sizeof(lv_color_t);
+    ESP_LOGI(TAG, "LVGL draw buffers: %d lines, %u bytes each, %u bytes total, %s",
+             EXAMPLE_LVGL_DRAW_BUF_LINES, (unsigned int)draw_buffer_sz, (unsigned int)(draw_buffer_sz * 2),
+             EXAMPLE_LVGL_DRAW_BUF_MEM_NAME);
 
     // Note:
-    // Keep the display buffer in **internal** RAM can speed up the UI because LVGL uses it a lot and it should have a fast access time
-    // This example allocate the buffer from PSRAM mainly because we want to save the internal RAM
-    buf1 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, MALLOC_CAP_SPIRAM);
+    // Draw buffer placement is configurable so render/flush tradeoffs can be tested from menuconfig.
+    buf1 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, EXAMPLE_LVGL_DRAW_BUF_CAPS);
     assert(buf1);
-    buf2 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, MALLOC_CAP_SPIRAM);
+    buf2 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, EXAMPLE_LVGL_DRAW_BUF_CAPS);
     assert(buf2);
     // initialize LVGL draw buffers
     lv_display_set_buffers(display, buf1, buf2, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
