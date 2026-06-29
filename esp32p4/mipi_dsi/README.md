@@ -67,7 +67,33 @@ Run `idf.py menuconfig` and go to `Example Configuration`:
 
 ### Build and Flash
 
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A LVGL widget should show up on the LCD as expected.
+This project provides [dev.sh](./dev.sh), a small wrapper around `eim run "idf.py ..."`. It uses the ESP-IDF version currently selected by `eim`, so you do not need to source ESP-IDF's `export.sh` manually in each shell.
+
+Common commands:
+
+```bash
+./dev.sh build
+./dev.sh flash -p PORT
+./dev.sh monitor -p PORT
+./dev.sh flash-monitor -p PORT
+./dev.sh menuconfig
+```
+
+`PORT` is the serial device connected to the board, for example `/dev/ttyUSB0`. The `flash-monitor` command is equivalent to running `idf.py -p PORT flash monitor` inside the selected `eim` ESP-IDF environment.
+
+The script writes the `eim` log to `/tmp/eim-mipi_dsi.log` by default. You can override it when needed:
+
+```bash
+EIM_LOG_FILE=/tmp/my-eim.log ./dev.sh build
+```
+
+For uncommon `idf.py` commands, use the pass-through form:
+
+```bash
+./dev.sh idf -p PORT build flash monitor
+```
+
+A LVGL widget should show up on the LCD as expected after flashing.
 
 The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from the ESP Component Registry into `managed_components` folder.
 
