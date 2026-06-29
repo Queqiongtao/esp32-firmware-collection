@@ -5,9 +5,9 @@
 
 [esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32p4/api-reference/peripherals/lcd/dsi_lcd.html) supports MIPI DSI interfaced LCD panel, with frame buffer(s) managed by the driver itself.
 
-This project is adapted from the official example for an ESP32-P4 Function-EV-Board style MIPI setup and currently targets a 1024x600 JD9165 panel with 2-lane DSI.
+This project is no longer a generic official demo clone. It is a JD9165-oriented ESP32-P4 display project derived from the official example and tuned for a 1024x600, 2-lane MIPI DSI panel.
 
-本工程基于官方示例修改，当前按 ESP32-P4 Function-EV-Board 风格硬件适配，默认目标屏为 1024x600、JD9165、2-lane MIPI DSI。
+本工程已不再保持“官方通用示例”形态，而是基于官方示例收敛成一个面向 JD9165 的 ESP32-P4 显示工程，当前默认目标屏为 1024x600、2-lane MIPI DSI。
 
 ## How to use the example
 
@@ -53,17 +53,17 @@ This README documents the active wiring used by the current project. Older Demo 
 
 本文档以当前工程实际使用的接线为准。旧版 Demo README 中可能出现 `GPIO26` 的 PWM 说明，但本仓库当前代码和板级定义实际使用的是 `GPIO23` 背光控制。
 
-Before testing the display, review your panel timing and resolution settings in [main/mipi_dsi_lcd_example_main.c](./main/mipi_dsi_lcd_example_main.c).
+Before testing the display, review the active display parameters in [main/display_config.h](./main/display_config.h).
 
 ### Configure
 
 Run `idf.py menuconfig` and go to `Example Configuration`:
 
-* Choose the LCD model in `Select MIPI LCD model` according to your board. The current recommended/default target in this repository is `JD9165`.
 * Choose whether to `Use DMA2D to copy draw buffer to frame buffer` asynchronously. If you choose `No`, the draw buffer will be copied to the frame buffer synchronously by CPU.
 * Choose if you want to `Monitor Refresh Rate by GPIO`. If you choose `Yes`, then you can attach an oscilloscope or logic analyzer to the GPIO pin to monitor the Refresh Rate of the display.
   Please note, the actual Refresh Rate should be **double** the square wave frequency.
 * Enable `Bypass PWM and force backlight always on` if you need to distinguish backlight PWM flicker from display timing or panel instability.
+* Adjust `LVGL draw buffer lines` and `LVGL draw buffer memory` to compare PSRAM/internal RAM tradeoffs without changing source code.
 
 ### Build and Flash
 
@@ -91,26 +91,30 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 
 ## Project Notes / 工程说明
 
-* This repository is currently tuned for the `JD9165` path with `1024x600`, `RGB565`, `2-lane DSI`, `550 Mbps lane rate`, and `58 MHz DPI clock`.
+* This repository is currently tuned for `JD9165`, `1024x600`, `RGB565`, `2-lane DSI`, `750 Mbps lane rate`, `54 MHz DPI clock`, and `2` DPI frame buffers.
 * If the screen appears to "flicker", first use `Example Configuration -> Bypass PWM and force backlight always on` to determine whether the issue is PWM dimming or display pipeline/panel instability.
+* The display stack is split into board control, panel bring-up, and LVGL port layers:
+  * [main/display_board.c](./main/display_board.c): PHY power, backlight, refresh monitor GPIO
+  * [main/display_panel.c](./main/display_panel.c): DSI bus, DBI IO, JD9165 panel creation
+  * [main/display_lvgl.c](./main/display_lvgl.c): LVGL task, draw buffers, flush callbacks
 
-* 当前仓库已按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`550 Mbps lane rate`、`58 MHz DPI clock` 进行适配。
+* 当前仓库已按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`750 Mbps lane rate`、`54 MHz DPI clock`、`2` 个 DPI framebuffer 进行适配。
 * 如果你看到“背光闪”或者“屏幕闪”，优先启用 `Example Configuration -> Bypass PWM and force backlight always on`，先区分是 PWM 背光问题还是显示链路/时序不稳定。
+* 显示链路代码已经拆成三层：
+  * [main/display_board.c](./main/display_board.c)：PHY 供电、背光、刷新监视 GPIO
+  * [main/display_panel.c](./main/display_panel.c)：DSI 总线、DBI IO、JD9165 面板创建
+  * [main/display_lvgl.c](./main/display_lvgl.c)：LVGL 任务、draw buffer、flush 回调
 
 ### Example Output
 
 ```bash
 ...
-I (1629) example: MIPI DSI PHY Powered on
-I (1629) example: Install MIPI DSI LCD control panel
-I (1639) ili9881c: ID1: 0x98, ID2: 0x81, ID3: 0x5c
-I (1779) example: Install MIPI DSI LCD data panel
-I (1799) example: Initialize LVGL library
-I (1799) example: Allocate separate LVGL draw buffers from PSRAM
-I (1809) example: Use esp_timer as LVGL tick timer
-I (1809) example: Create LVGL task
-I (1809) example: Starting LVGL task
-I (1919) example: Display LVGL Meter Widget
+I (1629) display_board: MIPI DSI PHY powered on
+I (1639) display_panel: Panel=JD9165 res=1024x600 lane_rate=750Mbps dpi_clk=54MHz num_fbs=2
+I (1779) display_lvgl: Initialize LVGL
+I (1799) display_lvgl: Draw buffers: 80 lines, ...
+I (1809) display_lvgl: Starting LVGL task
+I (1919) app_main: Display LVGL demo UI
 ...
 ```
 

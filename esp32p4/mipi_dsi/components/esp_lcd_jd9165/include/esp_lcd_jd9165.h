@@ -40,41 +40,6 @@ typedef struct {
 esp_err_t esp_lcd_new_panel_jd9165(const esp_lcd_panel_io_handle_t io, const esp_lcd_panel_dev_config_t *panel_dev_config,
                                    esp_lcd_panel_handle_t *ret_panel);
 
-#define JD9165_PANEL_BUS_DSI_2CH_CONFIG()                \
-    {                                                    \
-        .bus_id = 0,                                     \
-        .num_data_lanes = 2,                             \
-        .phy_clk_src = MIPI_DSI_PHY_CLK_SRC_DEFAULT,     \
-        .lane_bit_rate_mbps = 750,                       \
-    }
-
-#define JD9165_PANEL_IO_DBI_CONFIG()  \
-    {                                 \
-        .virtual_channel = 0,         \
-        .lcd_cmd_bits = 8,            \
-        .lcd_param_bits = 8,          \
-    }
-
-#define JD9165_1024_600_PANEL_60HZ_DPI_CONFIG(px_format) \
-    {                                                    \
-        .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,     \
-        .dpi_clock_freq_mhz = 58,                        \
-        .virtual_channel = 0,                            \
-        .in_color_format = px_format,                    \
-        .num_fbs = 1,                                    \
-        .video_timing = {                                \
-            .h_size = 1024,                              \
-            .v_size = 600,                               \
-            .hsync_back_porch = 160,                     \
-            .hsync_pulse_width = 40,                     \
-            .hsync_front_porch = 160,                    \
-            .vsync_back_porch = 23,                      \
-            .vsync_pulse_width = 10,                     \
-            .vsync_front_porch = 12,                     \
-        },                                               \
-        .flags.use_dma2d = true,                         \
-    }
-
 #ifdef __cplusplus
 }
 #endif

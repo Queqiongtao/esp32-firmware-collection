@@ -1,4 +1,8 @@
-idf_component_register(SRCS "mipi_dsi_lcd_example_main.c" "lvgl_demo_ui.c"
+idf_component_register(SRCS "mipi_dsi_lcd_example_main.c"
+                            "display_board.c"
+                            "display_panel.c"
+                            "display_lvgl.c"
+                            "lvgl_demo_ui.c"
                        INCLUDE_DIRS "."
                        REQUIRES lvgl
                        PRIV_REQUIRES esp_driver_gpio
@@ -9,5 +13,4 @@ idf_component_register(SRCS "mipi_dsi_lcd_example_main.c" "lvgl_demo_ui.c"
                                      esp_common
                                      log
                                      efuse
-                                     esp_lcd_ili9881c
                                      esp_lcd_jd9165)
