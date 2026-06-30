@@ -13,17 +13,22 @@
 - 使用 `lv_snapshot_take()` 将当前主题截图为图片，再由 IMU 姿态驱动图片旋转。
 - 使用 PCF85063 外部 RTC 同步系统时间。
 - 使用 QMI8658 IMU 计算平面重力角度。
-- GPIO0 单击切换时钟主题，快速甩腕也可切换主题。
+- GPIO0 单击切换时钟主题，长按打开设置菜单；触摸屏左右滑动手势切换主题，长按打开设置菜单；快速甩腕也可切换主题。
+- 设置菜单支持调节亮度、息屏超时、WiFi 开关，配置通过 NVS 持久化。
+- 侧边电源键（IO 扩展器 EXIO4）单击用于手动息屏/亮屏。
 
 ## 关键模块
 
-- `main/main.cpp`：应用入口、主题切换、LVGL snapshot、旋转弹簧、按钮和 IMU 手势接入。
+- `main/main.cpp`：应用入口、主题切换、LVGL snapshot、旋转弹簧、GPIO0 按钮/触摸手势/电源键接入、设置菜单、自动息屏。
 - `main/clock_theme.h`：时钟主题接口。
 - `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_outline_analog.cpp`、`main/clock_theme_mooncat.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_watch.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，包括 Classic、Simple、BigNumber、NumberFlow。
 - `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，RTC 无效时使用固件编译时间兜底。
 - `main/imu_demo.cpp`：QMI8658 采样、陀螺零偏校准、时钟旋转角计算、甩腕手势检测。
+- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、WiFi 开关）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：LVGL 设置菜单 UI。
+- `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸屏手势层（滑动切换主题、长按打开菜单、旋转坐标映射）。
 - `components/qmi8658/`：QMI8658 I2C 驱动。
 - `components/pcf85063/`：PCF85063 I2C 驱动。
 - `components/attitude/`：姿态估计算法。
@@ -58,11 +63,13 @@
 
 ## 硬件注意事项
 
-- GPIO0 是当前主题切换按钮，也是 ESP32 启动相关脚。运行时可用，但上电或复位时按住会影响启动模式。
+- GPIO0 单击切换主题、长按打开设置菜单；它也是 ESP32 启动相关脚，上电或复位时按住会影响启动模式。
+- 触摸屏左右滑动切换主题，长按打开设置菜单；手势坐标会根据当前旋转角度做反向映射。
 - PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。
 - `bsp_i2c_get_handle()` 会隐式初始化 I2C，RTC 可以在显示启动前使用。
 - QMI8658 启动后会采样 200 次做陀螺零偏校准，校准期间应保持板子静止。
 - 当前 UI 旋转方案会持有一张 RGB565 snapshot，刷新时短时间内可能同时存在新旧两张 snapshot。改动主题尺寸或刷新频率时要考虑 PSRAM 和碎片。
+- 设置存在 NVS `clock_settings` 命名空间下，首次上电或 NVS 异常时会回退到默认值。
 
 ## 验证要求
 
