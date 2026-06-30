@@ -47,10 +47,6 @@
 #define DISPLAY_TOUCH_I2C_SCL                   GPIO_NUM_8
 #define DISPLAY_TOUCH_I2C_CLK_HZ                400000
 
-/* GT911 touch panel native resolution, needs scaling to DISPLAY_PANEL_H_RES x DISPLAY_PANEL_V_RES */
-#define DISPLAY_TOUCH_NATIVE_H_RES              800
-#define DISPLAY_TOUCH_NATIVE_V_RES              480
-
 #if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
 #define DISPLAY_PIN_NUM_REFRESH_MONITOR         GPIO_NUM_20
 #endif

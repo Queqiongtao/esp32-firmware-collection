@@ -17,7 +17,6 @@
 #include "esp_check.h"
 #include "esp_efuse.h"
 #include "esp_heap_caps.h"
-#include "esp_lcd_touch.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -139,33 +138,6 @@ static void display_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uin
     esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 
-static esp_lcd_touch_handle_t s_touch_handle = NULL;
-
-static void display_lvgl_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
-{
-    (void)indev;
-
-    esp_lcd_touch_point_data_t touch_data[1];
-    uint8_t touch_cnt = 0;
-
-    /* Read latest touch data from GT911 */
-    esp_lcd_touch_read_data(s_touch_handle);
-
-    /* Get the first touch point and scale to panel resolution */
-    esp_err_t err = esp_lcd_touch_get_data(s_touch_handle, touch_data, &touch_cnt, 1);
-
-    if (err == ESP_OK && touch_cnt > 0) {
-        data->point.x = (int32_t)((uint32_t)touch_data[0].x * DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES);
-        data->point.y = (int32_t)((uint32_t)touch_data[0].y * DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES);
-        data->state = LV_INDEV_STATE_PRESSED;
-        ESP_LOGD("TOUCH", "raw=%d,%d -> lcd=%d,%d cnt=%d",
-                 touch_data[0].x, touch_data[0].y,
-                 data->point.x, data->point.y, touch_cnt);
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
 static void display_lvgl_increase_tick(void *arg)
 {
     (void)arg;
@@ -273,13 +245,9 @@ esp_err_t display_lvgl_init(const display_panel_t *panel, display_lvgl_t *out_lv
     ESP_RETURN_ON_ERROR(display_lvgl_register_panel_callbacks(panel, display), TAG, "register DPI callbacks failed");
 
     /* Initialize GT911 touch controller and register LVGL input device */
-    ESP_RETURN_ON_ERROR(display_touch_init(&s_touch_handle), TAG, "init touch failed");
-
-    lv_indev_t *indev = lv_indev_create();
-    ESP_RETURN_ON_FALSE(indev != NULL, ESP_ERR_NO_MEM, TAG, "create LVGL input device failed");
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, display_lvgl_touch_read_cb);
-    lv_indev_set_display(indev, display);
+    lv_indev_t *indev = NULL;
+    ESP_RETURN_ON_ERROR(display_touch_init(), TAG, "init touch failed");
+    ESP_RETURN_ON_ERROR(display_touch_register_lvgl_indev(display, &indev), TAG, "register touch indev failed");
 
     const esp_timer_create_args_t lvgl_tick_timer_args = {
         .callback = display_lvgl_increase_tick,

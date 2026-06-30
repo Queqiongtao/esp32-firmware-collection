@@ -12,12 +12,18 @@
 #include "esp_log.h"
 
 static const char *TAG = "display_touch";
+
+/* GT911 touch controller native resolution (panel-private parameter).
+ * Coordinates are scaled from this native range to DISPLAY_PANEL_H/V_RES
+ * before being reported to LVGL. */
+#define DISPLAY_TOUCH_NATIVE_H_RES  800
+#define DISPLAY_TOUCH_NATIVE_V_RES  480
+
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
+static esp_lcd_touch_handle_t s_touch_handle = NULL;
 
-esp_err_t display_touch_init(esp_lcd_touch_handle_t *ret_touch)
+esp_err_t display_touch_init(void)
 {
-    ESP_RETURN_ON_FALSE(ret_touch != NULL, ESP_ERR_INVALID_ARG, TAG, "ret_touch is NULL");
-
     if (s_i2c_bus == NULL) {
         const i2c_master_bus_config_t i2c_bus_conf = {
             .clk_source = I2C_CLK_SRC_DEFAULT,
@@ -77,7 +83,7 @@ esp_err_t display_touch_init(esp_lcd_touch_handle_t *ret_touch)
             continue;
         }
 
-        ret = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, ret_touch);
+        ret = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, &s_touch_handle);
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "GT911 touch initialized at %s address 0x%02X (native %dx%d, RST=%d, INT=%d)",
                      addr_names[i], i2c_addrs[i],
@@ -94,4 +100,46 @@ esp_err_t display_touch_init(esp_lcd_touch_handle_t *ret_touch)
 
     ESP_LOGE(TAG, "create GT911 touch controller failed on all addresses");
     return ret;
+}
+
+static void display_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+
+    esp_lcd_touch_point_data_t touch_data[1];
+    uint8_t touch_cnt = 0;
+
+    /* Read latest touch data from GT911 */
+    esp_lcd_touch_read_data(s_touch_handle);
+
+    /* Get the first touch point and scale to panel resolution */
+    esp_err_t err = esp_lcd_touch_get_data(s_touch_handle, touch_data, &touch_cnt, 1);
+
+    if (err == ESP_OK && touch_cnt > 0) {
+        data->point.x = (int32_t)((uint32_t)touch_data[0].x * DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES);
+        data->point.y = (int32_t)((uint32_t)touch_data[0].y * DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES);
+        data->state = LV_INDEV_STATE_PRESSED;
+        ESP_LOGD(TAG, "raw=%d,%d -> lcd=%d,%d cnt=%d",
+                 touch_data[0].x, touch_data[0].y,
+                 data->point.x, data->point.y, touch_cnt);
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
+
+esp_err_t display_touch_register_lvgl_indev(lv_display_t *disp, lv_indev_t **out_indev)
+{
+    ESP_RETURN_ON_FALSE(disp != NULL, ESP_ERR_INVALID_ARG, TAG, "disp is NULL");
+    ESP_RETURN_ON_FALSE(s_touch_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "touch not initialized");
+
+    lv_indev_t *indev = lv_indev_create();
+    ESP_RETURN_ON_FALSE(indev != NULL, ESP_ERR_NO_MEM, TAG, "create LVGL input device failed");
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, display_touch_read_cb);
+    lv_indev_set_display(indev, disp);
+
+    if (out_indev) {
+        *out_indev = indev;
+    }
+    return ESP_OK;
 }

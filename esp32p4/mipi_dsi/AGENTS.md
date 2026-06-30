@@ -30,6 +30,42 @@
 - 调整 `num_fbs`、`lane_bit_rate_mbps`、`dpi_clock_freq_mhz`、显示时序等参数时，一次只改一类变量，便于定位问题。
 - 超过当前稳定参数的显示链路优化属于高风险试验，必须保留可回退路径。
 
+## 代码规范
+
+### 模块化与解耦
+
+- 每个硬件子系统独立成模块（`display_board.c` 板级、`display_panel.c` 面板、`display_touch.c` 触摸、`display_lvgl.c` LVGL 适配），单一职责，不互相直穿内部状态。
+- 模块对外只暴露 `display_<模块>_init()` 等 capability 接口，内部静态变量与寄存器配置不外泄。
+- 触摸/输出设备的「硬件读取 + 坐标变换」归 `display_touch` 模块；LVGL 层只负责注册 indev 与回调，不直接引用控制器句柄类型、I2C API 或 native/panel 分辨率常量。
+- 缩放、镜像、旋转等坐标变换参数集中在触摸模块内部，不散落到 LVGL 文件。
+- 公共参数（引脚、分辨率、lane rate 等）集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。
+
+### 资源生命周期与句柄持有
+
+- LVGL 等需要跨函数引用的对象，用 file-static 句柄持有，禁止用 `lv_obj_get_child(parent, 负序号)` 反向索引依赖兄弟对象顺序。
+- 新增 UI 控件前先确认是否会破坏既有“按子序号取对象”的隐式约定；如会，必须改用显式句柄。
+
+### 第三方组件使用
+
+- 引入或升级 managed component 前，先读其头文件和示例，确认必需的配置字段是否齐全（如 GT911 的 `driver_data`、`levels.reset/interrupt`），不允许用零初始化结构体蒙混。
+- 不修改 `managed_components/` 下文件；问题必须在自研代码层绕过或加封装。
+
+### 时序与阻塞
+
+- 触摸/I2C 读、Flash/PSRAM 访问等阻塞操作不得放在 LVGL tick 任务高频路径；如必须放，先用 `ESP_LOGD` 替代 `ESP_LOGI` 避免日志阻塞。
+- 初始化阶段需要的复位时序（RST 释放、INT 选址、上电延时）必须按芯片 datasheet 写完整，不依赖引脚浮空默认电平。
+
+### 风格一致性
+
+- 函数命名、参数顺序、日志 TAG 命名与同模块既有代码保持一致。
+- 同一文件内错误处理统一用 `ESP_RETURN_ON_ERROR` / `ESP_GOTO_ON_ERROR`，不得混用裸 `if (ret != ESP_OK) return`。
+- 头文件使用 `#pragma once`，对外接口写在 `display_<模块>.h`，内部类型写在 `.c` 或独立的 `*_private.h`。
+
+### 改动管控
+
+- 修复一个 bug 时，改动只覆盖该 bug 必要的最小集；不顺手做与当前目标无关的重构、格式化或改名。
+- 重构与 bugfix 不混在同一 commit；先提交 bugfix（已验证），再启动重构。
+
 ## 硬件与显示注意事项
 
 - 当前工程默认目标为 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`。
