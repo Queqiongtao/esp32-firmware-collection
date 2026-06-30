@@ -12,6 +12,7 @@
 
 typedef struct {
     lv_display_t *display;
+    lv_indev_t *indev;
 } display_lvgl_t;
 
 esp_err_t display_lvgl_init(const display_panel_t *panel, display_lvgl_t *out_lvgl);

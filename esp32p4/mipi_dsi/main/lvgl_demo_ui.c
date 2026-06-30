@@ -5,9 +5,13 @@
  */
 
 #include "lvgl.h"
+#include "esp_log.h"
 
 static lv_style_t style_bullet;
 static lv_obj_t *scale1;
+static lv_obj_t *label_revenue;
+static lv_obj_t *label_sales;
+static lv_obj_t *label_costs;
 static const lv_font_t *font_normal = &lv_font_montserrat_16;
 
 static lv_obj_t *create_scale_box(lv_obj_t *parent, const char *text1, const char *text2, const char *text3)
@@ -26,24 +30,24 @@ static lv_obj_t *create_scale_box(lv_obj_t *parent, const char *text1, const cha
     lv_obj_remove_style(bullet1, NULL, LV_PART_SCROLLBAR);
     lv_obj_add_style(bullet1, &style_bullet, 0);
     lv_obj_set_style_bg_color(bullet1, lv_palette_main(LV_PALETTE_RED), 0);
-    lv_obj_t *label1 = lv_label_create(parent);
-    lv_label_set_text(label1, text1);
+    label_revenue = lv_label_create(parent);
+    lv_label_set_text(label_revenue, text1);
 
     lv_obj_t *bullet2 = lv_obj_create(parent);
     lv_obj_set_size(bullet2, 13, 13);
     lv_obj_remove_style(bullet2, NULL, LV_PART_SCROLLBAR);
     lv_obj_add_style(bullet2, &style_bullet, 0);
     lv_obj_set_style_bg_color(bullet2, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_obj_t *label2 = lv_label_create(parent);
-    lv_label_set_text(label2, text2);
+    label_sales = lv_label_create(parent);
+    lv_label_set_text(label_sales, text2);
 
     lv_obj_t *bullet3 = lv_obj_create(parent);
     lv_obj_set_size(bullet3, 13, 13);
     lv_obj_remove_style(bullet3,  NULL, LV_PART_SCROLLBAR);
     lv_obj_add_style(bullet3, &style_bullet, 0);
     lv_obj_set_style_bg_color(bullet3, lv_palette_main(LV_PALETTE_GREEN), 0);
-    lv_obj_t *label3 = lv_label_create(parent);
-    lv_label_set_text(label3, text3);
+    label_costs = lv_label_create(parent);
+    lv_label_set_text(label_costs, text3);
 
     static int32_t grid_col_dsc[] = {LV_GRID_CONTENT, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     static int32_t grid_row_dsc[] = {LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_TEMPLATE_LAST};
@@ -52,37 +56,34 @@ static lv_obj_t *create_scale_box(lv_obj_t *parent, const char *text1, const cha
     lv_obj_set_grid_cell(bullet1, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 2, 1);
     lv_obj_set_grid_cell(bullet2, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 3, 1);
     lv_obj_set_grid_cell(bullet3, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 4, 1);
-    lv_obj_set_grid_cell(label1, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 2, 1);
-    lv_obj_set_grid_cell(label2, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 3, 1);
-    lv_obj_set_grid_cell(label3, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 4, 1);
+    lv_obj_set_grid_cell(label_revenue, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 2, 1);
+    lv_obj_set_grid_cell(label_sales, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 3, 1);
+    lv_obj_set_grid_cell(label_costs, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 4, 1);
     return scale;
 }
 
 static void scale1_indic1_anim_cb(void *var, int32_t v)
 {
     lv_arc_set_value(var, v);
-
-    lv_obj_t *card = lv_obj_get_parent(scale1);
-    lv_obj_t *label = lv_obj_get_child(card, -5);
-    lv_label_set_text_fmt(label, "Revenue: %"LV_PRId32" %%", v);
+    lv_label_set_text_fmt(label_revenue, "Revenue: %"LV_PRId32" %%", v);
 }
 
 static void scale1_indic2_anim_cb(void *var, int32_t v)
 {
     lv_arc_set_value(var, v);
-
-    lv_obj_t *card = lv_obj_get_parent(scale1);
-    lv_obj_t *label = lv_obj_get_child(card, -3);
-    lv_label_set_text_fmt(label, "Sales: %"LV_PRId32" %%", v);
+    lv_label_set_text_fmt(label_sales, "Sales: %"LV_PRId32" %%", v);
 }
 
 static void scale1_indic3_anim_cb(void *var, int32_t v)
 {
     lv_arc_set_value(var, v);
+    lv_label_set_text_fmt(label_costs, "Costs: %"LV_PRId32" %%", v);
+}
 
-    lv_obj_t *card = lv_obj_get_parent(scale1);
-    lv_obj_t *label = lv_obj_get_child(card, -1);
-    lv_label_set_text_fmt(label, "Costs: %"LV_PRId32" %%", v);
+static void touch_test_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ESP_LOGI("TOUCH", "Touch test button clicked!");
 }
 
 void example_lvgl_demo_ui(lv_display_t *disp)
@@ -153,4 +154,14 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_anim_set_duration(&a, 2800);
     lv_anim_set_playback_duration(&a, 1800);
     lv_anim_start(&a);
+
+    /* Touch test button */
+    lv_obj_t *btn = lv_button_create(parent);
+    lv_obj_set_size(btn, 300, 120);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -40);
+    lv_obj_add_event_cb(btn, touch_test_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, "Touch Test");
+    lv_obj_center(label);
 }

@@ -7,6 +7,7 @@
 #pragma once
 
 #include "driver/gpio.h"
+#include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -35,9 +36,20 @@
 
 #define DISPLAY_PIN_NUM_BK_LIGHT                GPIO_NUM_23
 #define DISPLAY_PIN_NUM_LCD_RST                 GPIO_NUM_27
+#define DISPLAY_PIN_NUM_TOUCH_RST               GPIO_NUM_22
+#define DISPLAY_PIN_NUM_TOUCH_INT               GPIO_NUM_21
 #define DISPLAY_LCD_LEDC_CH                     LEDC_CHANNEL_0
 #define DISPLAY_LCD_LEDC_TIMER                  LEDC_TIMER_1
 #define DISPLAY_LCD_LEDC_MODE                   LEDC_LOW_SPEED_MODE
+
+#define DISPLAY_TOUCH_I2C_NUM                   I2C_NUM_1
+#define DISPLAY_TOUCH_I2C_SDA                   GPIO_NUM_7
+#define DISPLAY_TOUCH_I2C_SCL                   GPIO_NUM_8
+#define DISPLAY_TOUCH_I2C_CLK_HZ                400000
+
+/* GT911 touch panel native resolution, needs scaling to DISPLAY_PANEL_H_RES x DISPLAY_PANEL_V_RES */
+#define DISPLAY_TOUCH_NATIVE_H_RES              800
+#define DISPLAY_TOUCH_NATIVE_V_RES              480
 
 #if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
 #define DISPLAY_PIN_NUM_REFRESH_MONITOR         GPIO_NUM_20
