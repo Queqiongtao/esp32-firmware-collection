@@ -8,7 +8,11 @@
 
 ## 关键模块
 
-- `main/mipi_dsi_lcd_example_main.c`：显示初始化、MIPI DSI/DPI 配置、LVGL 任务、背光控制。
+- `main/mipi_dsi_lcd_example_main.c`：应用入口，按顺序初始化 board、panel、LVGL 端口并加载 demo UI。
+- `main/display_board.c`：MIPI DSI PHY 供电、背光 PWM/GPIO、刷新监视 GPIO。
+- `main/display_panel.c`：MIPI DSI 总线、DPI 接口、JD9165 面板创建。
+- `main/display_lvgl.c`：LVGL 任务、draw buffer、flush 回调。
+- `main/display_config.h`：集中定义分辨率、lane rate、DPI clock、framebuffer 数量、引脚等显示参数。
 - `main/lvgl_demo_ui.c`：当前 LVGL 示例界面和动画负载。
 - `components/esp_lcd_jd9165/`：本地 JD9165 面板驱动和初始化序列。
 - `main/Kconfig.projbuild`：工程级显示选项，例如 DMA2D、刷新监视、背光诊断。
