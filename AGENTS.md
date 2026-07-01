@@ -6,6 +6,7 @@
 - 实际工程目录：
   - `esp32p4/hello_world`：最小示例，无 `dev.sh`，直接使用 `idf.py`。
   - `esp32p4/mipi_dsi`：JD9165 MIPI DSI 显示工程，提供 `dev.sh`（使用 `eim`）。
+  - `esp32p4/JC1060P470`：ESP32-P4 综合测试工程（显示+触摸+外设测试，由 `mipi_dsi` 衍生），提供 `dev.sh`（使用 `eim`）。
   - `esp32s3/blink`：最小示例，无 `dev.sh`，直接使用 `idf.py`。
   - `esp32s3/clock`：AMOLED 时钟工程，提供 `dev.sh`（使用 `eim`）。
 - 根目录 `README.md` 中的目录结构已过时（例如把 `esp32p4/hello_world` 写成 `esp32p4/blink`），以实际目录和本文为准。
@@ -23,8 +24,9 @@
   ./dev.sh ports
   ```
 
-- `dev.sh` 通过 `eim` 调用 ESP-IDF。两个 `dev.sh` 的端口传法不同：
+- `dev.sh` 通过 `eim` 调用 ESP-IDF。各 `dev.sh` 的端口传法不同：
   - `esp32p4/mipi_dsi`：无默认端口，使用 idf.py 风格传参：`./dev.sh flash -p /dev/ttyUSB0`；`eim` 日志默认写入 `/tmp/eim-mipi_dsi.log`，可用 `EIM_LOG_FILE` 覆盖。
+  - `esp32p4/JC1060P470`：无默认端口，使用 idf.py 风格传参：`./dev.sh flash -p /dev/ttyUSB0`；`eim` 日志默认写入 `/tmp/eim-JC1060P470.log`，可用 `EIM_LOG_FILE` 覆盖。
   - `esp32s3/clock`：默认端口 `/dev/ttyACM0`，可用 `-p PORT` 或 `PORT=` 环境变量覆盖。
 - 无 `dev.sh` 的工程使用标准 ESP-IDF 命令：
 

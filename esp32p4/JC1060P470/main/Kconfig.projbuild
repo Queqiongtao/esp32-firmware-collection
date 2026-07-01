@@ -1,0 +1,50 @@
+menu "Example Configuration"
+    config EXAMPLE_USE_DMA2D_COPY_FRAME
+        bool "Use DMA2D to copy draw buffer to frame buffer"
+        default y
+        help
+            Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
+            This can save some CPU time and improve the performance.
+
+    config EXAMPLE_MONITOR_REFRESH_BY_GPIO
+        bool "Monitor Refresh Rate by GPIO"
+        default y
+        help
+            Enable this option, you can visualize the refresh rate by attaching a logic analyzer to a specific GPIO.
+            The GPIO will output a square wave with the frequency equals to half of the refresh rate.
+
+    config EXAMPLE_LCD_BACKLIGHT_BYPASS_PWM
+        bool "Bypass PWM and force backlight always on"
+        default n
+        help
+            Enable this option to drive the backlight pin as a fixed high level instead of PWM.
+            This is useful for diagnosing whether visible flicker comes from PWM dimming or from the display pipeline.
+
+    config EXAMPLE_LVGL_PERF_LOG
+        bool "Log LVGL refresh performance"
+        default y
+        help
+            Log LVGL refresh, render, and flush timing to help distinguish UI rendering FPS from panel refresh rate.
+
+    config EXAMPLE_LVGL_DRAW_BUF_LINES
+        int "LVGL draw buffer lines"
+        range 10 200
+        default 80
+        help
+            Number of LCD lines in each LVGL partial draw buffer.
+            Smaller values reduce single-buffer size and internal memory pressure.
+            Larger values reduce flush count but consume more memory.
+
+    choice
+        prompt "LVGL draw buffer memory"
+        default EXAMPLE_LVGL_DRAW_BUF_PSRAM
+        help
+            Select where the LVGL partial draw buffers are allocated from.
+
+        config EXAMPLE_LVGL_DRAW_BUF_PSRAM
+            bool "PSRAM"
+        config EXAMPLE_LVGL_DRAW_BUF_INTERNAL
+            bool "Internal RAM"
+    endchoice
+
+endmenu
