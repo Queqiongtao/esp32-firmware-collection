@@ -14,6 +14,7 @@
 #include "display_board.h"
 #include "display_config.h"
 #include "display_touch.h"
+#include "esp_cache.h"
 #include "esp_check.h"
 #include "esp_efuse.h"
 #include "esp_heap_caps.h"
@@ -135,6 +136,8 @@ static void display_lvgl_rounder_flush_area_cb(lv_event_t *event)
 static void display_lvgl_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     esp_lcd_panel_handle_t panel_handle = lv_display_get_user_data(disp);
+    esp_cache_msync(px_map, DISPLAY_PANEL_H_RES * DISPLAY_PANEL_V_RES * sizeof(lv_color_t),
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     esp_lcd_panel_draw_bitmap(panel_handle, area->x1, area->y1, area->x2 + 1, area->y2 + 1, px_map);
 }
 
@@ -172,36 +175,19 @@ static bool display_lvgl_notify_flush_ready(esp_lcd_panel_handle_t panel, esp_lc
     return false;
 }
 
-static size_t display_lvgl_get_buffer_alignment(void)
+static esp_err_t display_lvgl_allocate_buffers(lv_display_t *display, esp_lcd_panel_handle_t panel_handle)
 {
-    size_t alignment = 1;
+    void *fb0 = NULL;
+    void *fb1 = NULL;
+    const uint32_t num_fbs = DISPLAY_MIPI_DSI_FRAME_BUFFER_NUM;
+    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel_handle, num_fbs, &fb0, &fb1),
+                        TAG, "get DPI frame buffers failed");
 
-#if CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME
-    if (esp_efuse_is_flash_encryption_enabled()) {
-        alignment = SOC_GDMA_EXT_MEM_ENC_ALIGNMENT;
-        if ((DISPLAY_PANEL_H_RES % alignment) != 0) {
-            ESP_LOGW(TAG, "display width is not aligned to %u bytes, MSPI error may occur", (unsigned int)alignment);
-        }
-    }
-#endif
+    const size_t fb_size = DISPLAY_PANEL_H_RES * DISPLAY_PANEL_V_RES * sizeof(lv_color_t);
+    ESP_LOGI(TAG, "DIRECT mode: %u frame buffers, %u bytes each, fb0=%p fb1=%p",
+             (unsigned int)num_fbs, (unsigned int)fb_size, fb0, fb1);
 
-    return alignment;
-}
-
-static esp_err_t display_lvgl_allocate_buffers(lv_display_t *display)
-{
-    const size_t alignment = display_lvgl_get_buffer_alignment();
-    const size_t draw_buffer_sz = DISPLAY_PANEL_H_RES * DISPLAY_LVGL_DRAW_BUF_LINES * sizeof(lv_color_t);
-
-    ESP_LOGI(TAG, "Draw buffers: %d lines, %u bytes each, %u bytes total, %s",
-             DISPLAY_LVGL_DRAW_BUF_LINES, (unsigned int)draw_buffer_sz,
-             (unsigned int)(draw_buffer_sz * 2), DISPLAY_LVGL_DRAW_BUF_MEM_NAME);
-
-    void *buf1 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, DISPLAY_LVGL_DRAW_BUF_CAPS);
-    void *buf2 = heap_caps_aligned_calloc(alignment, 1, draw_buffer_sz, DISPLAY_LVGL_DRAW_BUF_CAPS);
-
-    ESP_RETURN_ON_FALSE(buf1 && buf2, ESP_ERR_NO_MEM, TAG, "allocate LVGL draw buffers failed");
-    lv_display_set_buffers(display, buf1, buf2, draw_buffer_sz, LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_buffers(display, fb0, fb1, fb_size, LV_DISPLAY_RENDER_MODE_DIRECT);
     return ESP_OK;
 }
 
@@ -229,7 +215,7 @@ esp_err_t display_lvgl_init(const display_panel_t *panel, display_lvgl_t *out_lv
 
     lv_display_set_user_data(display, panel->panel_handle);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
-    ESP_RETURN_ON_ERROR(display_lvgl_allocate_buffers(display), TAG, "allocate LVGL draw buffers failed");
+    ESP_RETURN_ON_ERROR(display_lvgl_allocate_buffers(display, panel->panel_handle), TAG, "allocate LVGL draw buffers failed");
     lv_display_set_flush_cb(display, display_lvgl_flush_cb);
 
 #if CONFIG_EXAMPLE_LVGL_PERF_LOG

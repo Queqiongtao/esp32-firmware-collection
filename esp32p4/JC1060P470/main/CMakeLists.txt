@@ -13,6 +13,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_timer
                                      esp_lcd
                                      esp_common
+                                     esp_mm
                                      log
                                      efuse
                                      esp_lcd_jd9165
