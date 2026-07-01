@@ -5,11 +5,13 @@
 
 这是一个基于 ESP-IDF 的 ESP32-P4 综合测试工程，由 `mipi_dsi` 工程衍生而来。工程以 MIPI DSI 显示（JD9165 1024x600）+ GT911 触摸为基础，逐步集成 SD 卡、USB、摄像头、传感器、WiFi/蓝牙（需协处理器）、音频 I2S 等外设的综合测试能力。
 
+> **芯片版本**：本工程基于 ESP32-P4 **V1.0**（`CONFIG_ESP32P4_REV_MIN_FULL=100`，`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`）。IDF 使用 `register/hw_ver1/` 寄存器定义，不兼容 V3 及以上修订。
+
 显示链路参数与 `mipi_dsi` 工程完全一致，复用本地 JD9165 面板驱动（`components/esp_lcd_jd9165/`）。
 
 ## 当前状态
 
-- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI、DMA2D、刷新监视、背光 PWM。
+- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI（DIRECT 渲染 + 双 framebuffer）、刷新监视、背光 PWM。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)。
 - **规划中**：SD 卡、USB、摄像头、传感器、WiFi/蓝牙、音频 I2S 测试模块（后续逐步添加）。
 
 ## How to use the example
@@ -137,7 +139,7 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 I (1629) display_board: MIPI DSI PHY powered on
 I (1639) display_panel: Panel=JD9165 res=1024x600 lane_rate=750Mbps dpi_clk=54MHz num_fbs=2
 I (1779) display_lvgl: Initialize LVGL
-I (1799) display_lvgl: Draw buffers: 80 lines, ...
+I (1799) display_lvgl: DIRECT mode: 2 frame buffers, 1228800 bytes each, fb0=0x... fb1=0x...
 I (1809) display_lvgl: Starting LVGL task
 I (1919) app_main: Display LVGL demo UI
 ...

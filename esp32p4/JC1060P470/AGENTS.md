@@ -13,7 +13,7 @@
 - `main/JC1060P470_main.c`：应用入口，按顺序初始化 board、panel、LVGL 端口并加载 demo UI。
 - `main/display_board.c`：MIPI DSI PHY 供电、背光 PWM/GPIO、刷新监视 GPIO。
 - `main/display_panel.c`：MIPI DSI 总线、DPI 接口、JD9165 面板创建。
-- `main/display_lvgl.c`：LVGL 任务、draw buffer、flush 回调、LVGL 输入设备（indev）注册。
+- `main/display_lvgl.c`：LVGL 任务、DIRECT 渲染模式双 fb buffer 分配、flush 回调（含整 fb `esp_cache_msync`）、LVGL 输入设备（indev）注册。渲染方案选型与问题根因详见 `docs/display_solution.md`。
 - `main/display_touch.c`：I2C master 总线、GT911 触摸控制器初始化。
 - `main/display_config.h`：集中定义分辨率、lane rate、DPI clock、framebuffer 数量、显示/触摸引脚、触摸缩放参数。
 - `main/lvgl_demo_ui.c`：当前 LVGL 示例界面和动画负载。
@@ -71,6 +71,12 @@
 - 触摸/I2C 读、Flash/PSRAM 访问等阻塞操作不得放在 LVGL tick 任务高频路径；如必须放，先用 `ESP_LOGD` 替代 `ESP_LOGI` 避免日志阻塞。
 - 初始化阶段需要的复位时序（RST 释放、INT 选址、上电延时）必须按芯片 datasheet 写完整，不依赖引脚浮空默认电平。
 
+### Cache 一致性
+
+- 涉及 PSRAM + DMA 的路径（CPU 写、DMA 读），必须由应用层显式调用 `esp_cache_msync(..., ESP_CACHE_MSYNC_FLAG_DIR_C2M)` 把 CPU 写入的数据写回 PSRAM，不依赖 LVGL 内部 cache 管理。
+- LVGL 9.4.0 的 `lv_draw_buf_copy` 不做 cache write back（源码 0 处 `esp_cache_msync` 调用，`flush_cache_cb` 默认为 NULL）。DIRECT 模式下 `refr_sync_areas` 用 CPU memcpy 同步双 fb 的 dirty 区，若不在 flush_cb 中补 `esp_cache_msync`，DMA 会读到 PSRAM 旧数据导致残影。
+- 详见 `docs/display_solution.md` 残影根因与修复章节。
+
 ### 风格一致性
 
 - 函数命名、参数顺序、日志 TAG 命名与同模块既有代码保持一致。
@@ -85,6 +91,8 @@
 ## 硬件与显示注意事项
 
 - 当前工程默认目标为 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`。
+- 当前工程芯片版本为 ESP32-P4 **V1.0**（`CONFIG_ESP32P4_REV_MIN_FULL=100`，`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`），IDF 使用 `register/hw_ver1/` 寄存器定义。
+- 当前 LVGL 渲染模式为 **DIRECT + 双 framebuffer ping-pong**，flush_cb 中做整 fb `esp_cache_msync(DIR_C2M)` 消除残影。
 - 当前板级控制引脚按工程实际定义为：
   - 背光：`GPIO23`
   - LCD 复位：`GPIO27`
