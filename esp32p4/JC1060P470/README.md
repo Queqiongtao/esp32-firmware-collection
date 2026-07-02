@@ -11,8 +11,8 @@
 
 ## 当前状态
 
-- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI（DIRECT 渲染 + 双 framebuffer）、刷新监视、背光 PWM。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)。
-- **规划中**：SD 卡、USB、摄像头、传感器、WiFi/蓝牙、音频 I2S 测试模块（后续逐步添加）。
+- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI（DIRECT 渲染 + 双 framebuffer）、刷新监视、背光 PWM、SD 卡（SDMMC SLOT_0 40MHz 4-bit）。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)，硬件引脚详见 [docs/hardware_pinout.md](./docs/hardware_pinout.md)。
+- **规划中**：USB、摄像头、传感器、WiFi/蓝牙、音频 I2S 测试模块（后续逐步添加）。
 
 ## How to use the example
 
@@ -41,6 +41,7 @@ Use the following board-level wiring for this project:
 | Touch Reset (optional) | `GPIO22` |
 | Touch INT (optional) | `GPIO21` |
 | MIPI DSI | Connect the LCD FPC to the `MIPI_DSI` connector |
+| SD Card (SDMMC) | D0-D3=`GPIO39-42`, CLK=`GPIO43`, CMD=`GPIO44` (SLOT_0, enable via menuconfig) |
 
 当前工程建议按下表连接：
 
@@ -53,6 +54,7 @@ Use the following board-level wiring for this project:
 | 触摸复位（可选） | `GPIO22` |
 | 触摸中断（可选） | `GPIO21` |
 | MIPI DSI | 屏排线接到 `MIPI_DSI` 接口 |
+| SD 卡 (SDMMC) | D0-D3=`GPIO39-42`, CLK=`GPIO43`, CMD=`GPIO44`（SLOT_0，menuconfig 启用） |
 
 Before testing the display, review the active display parameters in [main/display_config.h](./main/display_config.h).
 
