@@ -7,6 +7,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "driver/i2c_master.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
@@ -40,6 +41,17 @@ esp_err_t display_touch_init(void);
  *      - ESP_ERR_NO_MEM if the indev cannot be created
  */
 esp_err_t display_touch_register_lvgl_indev(lv_display_t *disp, lv_indev_t **out_indev);
+
+/**
+ * @brief Get the I2C master bus handle and port used by the touch module.
+ *        Allows other modules (e.g. audio codec) to reuse the same I2C bus.
+ *
+ * @param out_handle  Returns the I2C master bus handle (must not be NULL).
+ * @param out_port    Returns the I2C port number (may be NULL).
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_handle is NULL,
+ *         ESP_ERR_INVALID_STATE if touch not initialized.
+ */
+esp_err_t display_touch_get_i2c_bus(i2c_master_bus_handle_t *out_handle, int *out_port);
 
 #ifdef __cplusplus
 }

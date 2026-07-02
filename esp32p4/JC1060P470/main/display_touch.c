@@ -102,6 +102,17 @@ esp_err_t display_touch_init(void)
     return ret;
 }
 
+esp_err_t display_touch_get_i2c_bus(i2c_master_bus_handle_t *out_handle, int *out_port)
+{
+    ESP_RETURN_ON_FALSE(out_handle != NULL, ESP_ERR_INVALID_ARG, TAG, "out_handle is NULL");
+    ESP_RETURN_ON_FALSE(s_i2c_bus != NULL, ESP_ERR_INVALID_STATE, TAG, "I2C bus not initialized");
+    *out_handle = s_i2c_bus;
+    if (out_port) {
+        *out_port = DISPLAY_TOUCH_I2C_NUM;
+    }
+    return ESP_OK;
+}
+
 static void display_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;

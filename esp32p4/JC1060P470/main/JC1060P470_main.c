@@ -9,6 +9,7 @@
 #include "display_panel.h"
 #include "esp_log.h"
 #include "test_sdcard.h"
+#include "test_audio.h"
 
 extern void example_lvgl_demo_ui(lv_display_t *disp);
 
@@ -36,6 +37,16 @@ void app_main(void)
         test_sdcard_run();
     } else {
         ESP_LOGE(TAG, "SD card test module init failed: %s", esp_err_to_name(sd_ret));
+    }
+#endif
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
+    ESP_LOGI(TAG, "Initialize audio test module");
+    esp_err_t audio_ret = test_audio_init();
+    if (audio_ret == ESP_OK) {
+        test_audio_run();
+    } else {
+        ESP_LOGE(TAG, "Audio test module init failed: %s", esp_err_to_name(audio_ret));
     }
 #endif
 }

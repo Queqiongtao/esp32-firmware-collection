@@ -48,4 +48,65 @@ menu "Example Configuration"
             on the SD card, and run a read/write test at boot. Requires an SD card
             connected to the pins defined in test_config.h.
 
+    config EXAMPLE_ENABLE_TEST_AUDIO
+        bool "Enable audio (I2S + ES8311) test module"
+        default n
+        help
+            Enable this option to initialize the I2S peripheral and ES8311 codec,
+            then run an audio test at boot. The codec shares the touch I2C bus.
+            GPIO20 is used for the power amplifier enable.
+
+    choice EXAMPLE_AUDIO_MODE
+        prompt "Audio test mode"
+        depends on EXAMPLE_ENABLE_TEST_AUDIO
+        default EXAMPLE_AUDIO_MODE_MUSIC
+
+        config EXAMPLE_AUDIO_MODE_MUSIC
+            bool "music (play canon.pcm in loop)"
+        config EXAMPLE_AUDIO_MODE_ECHO
+            bool "echo (microphone to speaker)"
+    endchoice
+
+    config EXAMPLE_VOICE_VOLUME
+        int "Audio output volume"
+        range 0 100
+        default 60
+        depends on EXAMPLE_ENABLE_TEST_AUDIO
+        help
+            Set the ES8311 codec output volume (0-100).
+
+    choice EXAMPLE_MIC_GAIN
+        prompt "Microphone gain"
+        depends on EXAMPLE_AUDIO_MODE_ECHO
+        default MIC_GAIN_18DB
+
+        config MIC_GAIN_0DB
+            bool "0dB"
+        config MIC_GAIN_6DB
+            bool "6dB"
+        config MIC_GAIN_12DB
+            bool "12dB"
+        config MIC_GAIN_18DB
+            bool "18dB"
+        config MIC_GAIN_24DB
+            bool "24dB"
+        config MIC_GAIN_30DB
+            bool "30dB"
+        config MIC_GAIN_36DB
+            bool "36dB"
+        config MIC_GAIN_42DB
+            bool "42dB"
+    endchoice
+
+    config EXAMPLE_MIC_GAIN
+        int
+        default 0 if MIC_GAIN_0DB
+        default 1 if MIC_GAIN_6DB
+        default 2 if MIC_GAIN_12DB
+        default 3 if MIC_GAIN_18DB
+        default 4 if MIC_GAIN_24DB
+        default 5 if MIC_GAIN_30DB
+        default 6 if MIC_GAIN_36DB
+        default 7 if MIC_GAIN_42DB
+
 endmenu
