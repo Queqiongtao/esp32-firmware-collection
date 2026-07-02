@@ -47,4 +47,12 @@ menu "Example Configuration"
             bool "Internal RAM"
     endchoice
 
+    config EXAMPLE_ENABLE_TEST_SDCARD
+        bool "Enable SD card (SDMMC) test module"
+        default n
+        help
+            Enable this option to initialize the SDMMC host, mount a FAT filesystem
+            on the SD card, and run a read/write test at boot. Requires an SD card
+            connected to the pins defined in test_config.h.
+
 endmenu

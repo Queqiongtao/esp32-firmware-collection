@@ -8,6 +8,7 @@
 #include "display_lvgl.h"
 #include "display_panel.h"
 #include "esp_log.h"
+#include "test_sdcard.h"
 
 extern void example_lvgl_demo_ui(lv_display_t *disp);
 
@@ -27,4 +28,14 @@ void app_main(void)
     display_lvgl_lock();
     example_lvgl_demo_ui(lvgl_port.display);
     display_lvgl_unlock();
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_SDCARD
+    ESP_LOGI(TAG, "Initialize SD card test module");
+    esp_err_t sd_ret = test_sdcard_init();
+    if (sd_ret == ESP_OK) {
+        test_sdcard_run();
+    } else {
+        ESP_LOGE(TAG, "SD card test module init failed: %s", esp_err_to_name(sd_ret));
+    }
+#endif
 }
