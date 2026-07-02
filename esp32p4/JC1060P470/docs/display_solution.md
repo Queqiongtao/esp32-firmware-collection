@@ -101,7 +101,7 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| 板级 | `display_board.c/.h` | MIPI DSI PHY 供电（LDO ch3 @2.5V）、背光 PWM/GPIO、刷新监视 GPIO |
+| 板级 | `display_board.c/.h` | MIPI DSI PHY 供电（LDO ch3 @2.5V）、背光 PWM/GPIO |
 | 面板 | `display_panel.c/.h` | MIPI DSI 总线、DPI 接口、JD9165 面板创建、DMA2D hook |
 | LVGL 适配 | `display_lvgl.c/.h` | LVGL 任务、双 fb buffer 分配（DIRECT 模式）、flush 回调（含 cache msync）、tick timer、indev 注册 |
 | 触摸 | `display_touch.c/.h` | I2C master 总线、GT911 触摸初始化、坐标缩放、LVGL indev 注册 |

@@ -60,23 +60,8 @@ static esp_err_t display_board_init_backlight(void)
 #endif
 }
 
-#if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
-static esp_err_t display_board_init_refresh_monitor_io(void)
-{
-    const gpio_config_t monitor_io_conf = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << DISPLAY_PIN_NUM_REFRESH_MONITOR,
-    };
-
-    return gpio_config(&monitor_io_conf);
-}
-#endif
-
 esp_err_t display_board_init(void)
 {
-#if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
-    ESP_RETURN_ON_ERROR(display_board_init_refresh_monitor_io(), TAG, "configure refresh monitor GPIO failed");
-#endif
     ESP_RETURN_ON_ERROR(display_board_enable_dsi_phy_power(), TAG, "enable DSI PHY power failed");
     ESP_RETURN_ON_ERROR(display_board_init_backlight(), TAG, "configure backlight failed");
     return display_board_set_backlight(0);
@@ -96,17 +81,3 @@ esp_err_t display_board_set_backlight(uint32_t level)
     return ledc_update_duty(DISPLAY_LCD_LEDC_MODE, DISPLAY_LCD_LEDC_CH);
 #endif
 }
-
-#if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
-bool display_board_monitor_refresh_rate(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
-{
-    static int io_level = 0;
-
-    (void)panel;
-    (void)edata;
-    (void)user_ctx;
-    gpio_set_level(DISPLAY_PIN_NUM_REFRESH_MONITOR, io_level);
-    io_level = !io_level;
-    return false;
-}
-#endif

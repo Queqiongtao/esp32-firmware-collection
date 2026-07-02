@@ -11,14 +11,14 @@
 ### 显示基础（已就绪）
 
 - `main/JC1060P470_main.c`：应用入口，按顺序初始化 board、panel、LVGL 端口并加载 demo UI。
-- `main/display_board.c`：MIPI DSI PHY 供电、背光 PWM/GPIO、刷新监视 GPIO。
+- `main/display_board.c`：MIPI DSI PHY 供电、背光 PWM/GPIO。
 - `main/display_panel.c`：MIPI DSI 总线、DPI 接口、JD9165 面板创建。
 - `main/display_lvgl.c`：LVGL 任务、DIRECT 渲染模式双 fb buffer 分配、flush 回调（含整 fb `esp_cache_msync`）、LVGL 输入设备（indev）注册。渲染方案选型与问题根因详见 `docs/display_solution.md`。
 - `main/display_touch.c`：I2C master 总线、GT911 触摸控制器初始化。
 - `main/display_config.h`：集中定义分辨率、lane rate、DPI clock、framebuffer 数量、显示/触摸引脚、触摸缩放参数。
 - `main/lvgl_demo_ui.c`：当前 LVGL 示例界面和动画负载。
 - `components/esp_lcd_jd9165/`：本地 JD9165 面板驱动和初始化序列。
-- `main/Kconfig.projbuild`：工程级显示选项，例如 DMA2D、刷新监视、背光诊断。
+- `main/Kconfig.projbuild`：工程级显示选项，例如 DMA2D、背光诊断。
 - `sdkconfig.defaults`、`sdkconfig.defaults.esp32p4`：当前工程默认配置。
 
 ### 外设测试模块（规划中，后续逐步实现）

@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI（DIRECT 渲染 + 双 framebuffer）、刷新监视、背光 PWM、SD 卡（SDMMC SLOT_0 40MHz 4-bit）。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)，硬件引脚详见 [docs/hardware_pinout.md](./docs/hardware_pinout.md)。
+- **已就绪**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 demo UI（DIRECT 渲染 + 双 framebuffer）、背光 PWM、SD 卡（SDMMC SLOT_0 40MHz 4-bit）。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)，硬件引脚详见 [docs/hardware_pinout.md](./docs/hardware_pinout.md)。
 - **规划中**：USB、摄像头、传感器、WiFi/蓝牙、音频 I2S 测试模块（后续逐步添加）。
 
 ## How to use the example
@@ -63,8 +63,6 @@ Before testing the display, review the active display parameters in [main/displa
 Run `idf.py menuconfig` and go to `Example Configuration`:
 
 * Choose whether to `Use DMA2D to copy draw buffer to frame buffer` asynchronously. If you choose `No`, the draw buffer will be copied to the frame buffer synchronously by CPU.
-* Choose if you want to `Monitor Refresh Rate by GPIO`. If you choose `Yes`, then you can attach an oscilloscope or logic analyzer to the GPIO pin to monitor the Refresh Rate of the display.
-  Please note, the actual Refresh Rate should be **double** the square wave frequency.
 * Enable `Bypass PWM and force backlight always on` if you need to distinguish backlight PWM flicker from display timing or panel instability.
 * Adjust `LVGL draw buffer lines` and `LVGL draw buffer memory` to compare PSRAM/internal RAM tradeoffs without changing source code.
 
@@ -123,14 +121,14 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 * This project is derived from the `mipi_dsi` project and tuned for `JD9165`, `1024x600`, `RGB565`, `2-lane DSI`, `750 Mbps lane rate`, `54 MHz DPI clock`, and `2` DPI frame buffers.
 * If the screen appears to "flicker", first use `Example Configuration -> Bypass PWM and force backlight always on` to determine whether the issue is PWM dimming or display pipeline/panel instability.
 * The display stack is split into board control, panel bring-up, and LVGL port layers:
-  * [main/display_board.c](./main/display_board.c): PHY power, backlight, refresh monitor GPIO
+  * [main/display_board.c](./main/display_board.c): PHY power, backlight
   * [main/display_panel.c](./main/display_panel.c): DSI bus, DBI IO, JD9165 panel creation
   * [main/display_lvgl.c](./main/display_lvgl.c): LVGL task, draw buffers, flush callbacks
 
 * 本工程由 `mipi_dsi` 工程衍生，已按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`750 Mbps lane rate`、`54 MHz DPI clock`、`2` 个 DPI framebuffer 进行适配。
 * 如果你看到“背光闪”或者“屏幕闪”，优先启用 `Example Configuration -> Bypass PWM and force backlight always on`，先区分是 PWM 背光问题还是显示链路/时序不稳定。
 * 显示链路代码已经拆成三层：
-  * [main/display_board.c](./main/display_board.c)：PHY 供电、背光、刷新监视 GPIO
+  * [main/display_board.c](./main/display_board.c)：PHY 供电、背光
   * [main/display_panel.c](./main/display_panel.c)：DSI 总线、DBI IO、JD9165 面板创建
   * [main/display_lvgl.c](./main/display_lvgl.c)：LVGL 任务、draw buffer、flush 回调
 

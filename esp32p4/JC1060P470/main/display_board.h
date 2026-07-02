@@ -13,7 +13,3 @@
 
 esp_err_t display_board_init(void);
 esp_err_t display_board_set_backlight(uint32_t level);
-
-#if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
-bool display_board_monitor_refresh_rate(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx);
-#endif

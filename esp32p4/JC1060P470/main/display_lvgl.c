@@ -195,9 +195,6 @@ static esp_err_t display_lvgl_register_panel_callbacks(const display_panel_t *pa
 {
     esp_lcd_dpi_panel_event_callbacks_t cbs = {
         .on_color_trans_done = display_lvgl_notify_flush_ready,
-#if CONFIG_EXAMPLE_MONITOR_REFRESH_BY_GPIO
-        .on_refresh_done = display_board_monitor_refresh_rate,
-#endif
     };
 
     return esp_lcd_dpi_panel_register_event_callbacks(panel->panel_handle, &cbs, display);
