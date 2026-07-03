@@ -1,0 +1,43 @@
+menu "Board AMOLED 1.8"
+
+config BOARD_AMOLED_1_8_I2C_SDA_GPIO
+    int "I2C SDA GPIO"
+    default 15
+
+config BOARD_AMOLED_1_8_I2C_SCL_GPIO
+    int "I2C SCL GPIO"
+    default 14
+
+config BOARD_AMOLED_1_8_I2C_PORT
+    int "I2C port"
+    default 0
+
+config BOARD_AMOLED_1_8_I2C_HZ
+    int "I2C bus frequency"
+    default 400000
+
+config BOARD_AMOLED_1_8_BACKLIGHT_GPIO
+    int "Backlight GPIO"
+    default 6
+
+config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_CHANNEL
+    int "Backlight LEDC channel"
+    default 0
+
+config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_TIMER
+    int "Backlight LEDC timer"
+    default 0
+
+config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_MODE
+    int "Backlight LEDC mode"
+    default 0
+
+config BOARD_AMOLED_1_8_BACKLIGHT_FREQ_HZ
+    int "Backlight PWM frequency"
+    default 5000
+
+config BOARD_AMOLED_1_8_BACKLIGHT_INVERT
+    bool "Invert backlight duty"
+    default n
+
+endmenu
