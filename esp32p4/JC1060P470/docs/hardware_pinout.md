@@ -18,16 +18,19 @@
 
 ## 1. 已实现外设引脚（已上板验证）
 
-### 1.1 显示与触摸（`display_config.h`）
+### 1.1 显示、触摸与 RTC（`display_config.h` / `test_config.h`）
 
 | GPIO | 信号 | 说明 |
 |------|------|------|
-| 7 | I2C SDA | 触摸 I2C 总线数据线（`I2C_NUM_1`, 400kHz） |
-| 8 | I2C SCL | 触摸 I2C 总线时钟线 |
+| 7 | I2C SDA | 触摸与 RTC 共享 I2C 总线数据线（`I2C_NUM_1`, 400kHz） |
+| 8 | I2C SCL | 触摸与 RTC 共享 I2C 总线时钟线 |
 | 21 | Touch INT | GT911 触摸中断 |
 | 22 | Touch RST | GT911 触摸复位 |
 | 23 | 背光 PWM | LCD 背光（LEDC CH0, 20kHz） |
 | 27 | LCD RST | JD9165 面板复位 |
+
+- **RTC**：板载 `RX8025T-UC`，挂在触摸共享 I2C 总线（`GPIO7/8`），7-bit I2C 地址 `0x32`。启用 `CONFIG_EXAMPLE_ENABLE_TEST_RTC` 后，启动阶段读取时间/状态寄存器；若时间非法则写入固件构建时间，随后按 `TEST_RTC_READ_INTERVAL_MS`（默认 5000 ms）周期读取并打印时间。
+- **I2C 复用原则**：RTC、触摸和音频 Codec 控制口复用同一条 I2C 总线，应用层通过 `display_touch_get_i2c_bus()` 获取已初始化的 bus handle，不重复初始化 `GPIO7/8`。
 
 ### 1.2 SD 卡（`test_config.h`）
 
@@ -132,8 +135,8 @@
 | GPIO | 当前工程用途 | 参考板备用用途 | 状态 |
 |------|-------------|---------------|------|
 | 6 | — | 无线 WKUP | 未用 |
-| 7 | 触摸 I2C SDA | —（同） | 已用 |
-| 8 | 触摸 I2C SCL | —（同） | 已用 |
+| 7 | 触摸 / RTC I2C SDA | —（同） | 已用 |
+| 8 | 触摸 / RTC I2C SCL | —（同） | 已用 |
 | 9 | — | I2S DOUT | 未用 |
 | 10 | — | I2S LCLK | 未用 |
 | 11 | — | I2S DSIN | 未用 |

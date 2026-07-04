@@ -9,6 +9,7 @@
 #include "display_panel.h"
 #include "esp_log.h"
 #include "test_sdcard.h"
+#include "test_rtc.h"
 #include "test_audio.h"
 #include "test_usb.h"
 
@@ -38,6 +39,16 @@ void app_main(void)
         test_sdcard_run();
     } else {
         ESP_LOGE(TAG, "SD card test module init failed: %s", esp_err_to_name(sd_ret));
+    }
+#endif
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_RTC
+    ESP_LOGI(TAG, "Initialize RX8025T-UC RTC test module");
+    esp_err_t rtc_ret = test_rtc_init();
+    if (rtc_ret == ESP_OK) {
+        test_rtc_run();
+    } else {
+        ESP_LOGE(TAG, "RTC test module init failed: %s", esp_err_to_name(rtc_ret));
     }
 #endif
 

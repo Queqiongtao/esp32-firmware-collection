@@ -32,6 +32,16 @@
 #define TEST_SDCARD_MAX_FILES                   5
 #define TEST_SDCARD_ALLOCATION_UNIT_SIZE        (64 * 1024)
 
+/* ---------------------------- RTC (RX8025T-UC) ---------------------------- *
+ * Board wiring:
+ *   RX8025T-UC RTC shares the touch I2C bus (I2C_NUM_1, GPIO7/8) via the
+ *   display_touch module's bus handle getter. */
+
+#define TEST_RTC_CHIP_NAME                      "RX8025T-UC"
+#define TEST_RTC_I2C_ADDR                       0x32
+#define TEST_RTC_I2C_TIMEOUT_MS                 100
+#define TEST_RTC_READ_INTERVAL_MS               5000
+
 /* ---------------------------- Audio (I2S + ES8311) ------------------------- *
  * Board wiring (JC1060P470, same as ESP32-P4 Function EV Board, FIB type):
  *   I2S MCLK = GPIO13, BCLK = GPIO12, WS = GPIO10

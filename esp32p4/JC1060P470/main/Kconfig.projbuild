@@ -48,6 +48,15 @@ menu "Example Configuration"
             on the SD card, and run a read/write test at boot. Requires an SD card
             connected to the pins defined in test_config.h.
 
+    config EXAMPLE_ENABLE_TEST_RTC
+        bool "Enable RX8025T-UC RTC test module"
+        default n
+        help
+            Enable this option to probe the board-mounted RX8025T-UC RTC on
+            the shared touch I2C bus (I2C_NUM_1, GPIO7/8), read its time and
+            status registers, sync invalid time from firmware build time, and
+            start a periodic task to print decoded time every 5 seconds.
+
     config EXAMPLE_ENABLE_TEST_AUDIO
         bool "Enable audio (I2S + ES8311) test module"
         default n
