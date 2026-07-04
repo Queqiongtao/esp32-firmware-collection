@@ -1,5 +1,9 @@
 menu "Board AMOLED 1.8"
 
+config BOARD_AMOLED_1_8_I2C_PORT
+    int "I2C port"
+    default 0
+
 config BOARD_AMOLED_1_8_I2C_SDA_GPIO
     int "I2C SDA GPIO"
     default 15
@@ -8,36 +12,210 @@ config BOARD_AMOLED_1_8_I2C_SCL_GPIO
     int "I2C SCL GPIO"
     default 14
 
-config BOARD_AMOLED_1_8_I2C_PORT
-    int "I2C port"
-    default 0
-
 config BOARD_AMOLED_1_8_I2C_HZ
     int "I2C bus frequency"
     default 400000
 
-config BOARD_AMOLED_1_8_BACKLIGHT_GPIO
-    int "Backlight GPIO"
+config BOARD_AMOLED_1_8_LCD_CS_GPIO
+    int "LCD CS GPIO"
+    default 12
+
+config BOARD_AMOLED_1_8_LCD_PCLK_GPIO
+    int "LCD PCLK GPIO"
+    default 11
+
+config BOARD_AMOLED_1_8_LCD_D0_GPIO
+    int "LCD DATA0 GPIO"
+    default 4
+
+config BOARD_AMOLED_1_8_LCD_D1_GPIO
+    int "LCD DATA1 GPIO"
+    default 5
+
+config BOARD_AMOLED_1_8_LCD_D2_GPIO
+    int "LCD DATA2 GPIO"
     default 6
 
-config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_CHANNEL
-    int "Backlight LEDC channel"
+config BOARD_AMOLED_1_8_LCD_D3_GPIO
+    int "LCD DATA3 GPIO"
+    default 7
+
+config BOARD_AMOLED_1_8_LCD_TE_GPIO
+    int "LCD TE GPIO (-1 for NC)"
+    default 13
+
+config BOARD_AMOLED_1_8_LCD_RST_GPIO
+    int "LCD RST GPIO (-1 for NC)"
+    default -1
+
+config BOARD_AMOLED_1_8_LCD_POWER_EXIO_NUM
+    int "LCD power enable EXIO number (-1 for none)"
+    default 1
+
+config BOARD_AMOLED_1_8_LCD_POWER_ACTIVE_LEVEL
+    int "LCD power enable active level"
+    range 0 1
+    default 1
+
+config BOARD_AMOLED_1_8_LCD_RST_EXIO_NUM
+    int "LCD RST EXIO number (-1 for none)"
     default 0
 
-config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_TIMER
-    int "Backlight LEDC timer"
+config BOARD_AMOLED_1_8_LCD_RST_ACTIVE_LEVEL
+    int "LCD RST active level"
+    range 0 1
     default 0
 
-config BOARD_AMOLED_1_8_BACKLIGHT_LEDC_MODE
-    int "Backlight LEDC mode"
+config BOARD_AMOLED_1_8_LCD_H_RES
+    int "LCD horizontal resolution"
+    default 368
+
+config BOARD_AMOLED_1_8_LCD_V_RES
+    int "LCD vertical resolution"
+    default 448
+
+config BOARD_AMOLED_1_8_LCD_SPI_HOST
+    int "LCD SPI host (SPI2_HOST=2)"
+    default 2
+
+config BOARD_AMOLED_1_8_TOUCH_INT_GPIO
+    int "Touch INT GPIO"
+    default 21
+
+config BOARD_AMOLED_1_8_TOUCH_RST_GPIO
+    int "Touch RST GPIO (-1 for NC)"
+    default -1
+
+config BOARD_AMOLED_1_8_TOUCH_RST_EXIO_NUM
+    int "Touch RST EXIO number (-1 for none)"
+    default 2
+
+config BOARD_AMOLED_1_8_TOUCH_RST_ACTIVE_LEVEL
+    int "Touch RST active level"
+    range 0 1
     default 0
 
-config BOARD_AMOLED_1_8_BACKLIGHT_FREQ_HZ
-    int "Backlight PWM frequency"
-    default 5000
+config BOARD_AMOLED_1_8_SD_D0_GPIO
+    int "SD D0 GPIO"
+    default 3
 
-config BOARD_AMOLED_1_8_BACKLIGHT_INVERT
-    bool "Invert backlight duty"
+config BOARD_AMOLED_1_8_SD_CMD_GPIO
+    int "SD CMD GPIO"
+    default 1
+
+config BOARD_AMOLED_1_8_SD_CLK_GPIO
+    int "SD CLK GPIO"
+    default 2
+
+config BOARD_AMOLED_1_8_I2S_MCLK_GPIO
+    int "I2S MCLK GPIO"
+    default 16
+
+config BOARD_AMOLED_1_8_I2S_BCLK_GPIO
+    int "I2S BCLK GPIO"
+    default 9
+
+config BOARD_AMOLED_1_8_I2S_LRCK_GPIO
+    int "I2S LRCK GPIO"
+    default 45
+
+config BOARD_AMOLED_1_8_I2S_DOUT_GPIO
+    int "I2S DOUT GPIO"
+    default 8
+
+config BOARD_AMOLED_1_8_I2S_DIN_GPIO
+    int "I2S DIN GPIO"
+    default 10
+
+config BOARD_AMOLED_1_8_PA_ENABLE_GPIO
+    int "Power amplifier enable GPIO"
+    default 46
+
+config BOARD_AMOLED_1_8_ES8311_ADDR
+    hex "ES8311 I2C address"
+    default 0x18
+
+config BOARD_AMOLED_1_8_TCA9554_ADDR
+    hex "TCA9554 I2C address"
+    default 0x20
+
+config BOARD_AMOLED_1_8_FT3168_ADDR
+    hex "FT3168 I2C address"
+    default 0x38
+
+config BOARD_AMOLED_1_8_PCF85063_ADDR
+    hex "PCF85063 I2C address"
+    default 0x51
+
+config BOARD_AMOLED_1_8_QMI8658_ADDR
+    hex "QMI8658 I2C address"
+    default 0x6B
+
+config BOARD_AMOLED_1_8_AXP2101_ADDR
+    hex "AXP2101 I2C address"
+    default 0x34
+
+config BOARD_AMOLED_1_8_DISPLAY_ONLY_DIAG
+    bool "Display-only diagnostic mode"
     default n
+
+config BOARD_AMOLED_1_8_DISPLAY_PMU_PREPARE_DELAY_MS
+    int "Display PMU prepare delay (ms)"
+    range 0 1000
+    default 80
+
+config BOARD_AMOLED_1_8_DISPLAY_POWER_OFF_HOLD_MS
+    int "Display power-off hold delay (ms)"
+    range 0 1000
+    default 30
+
+config BOARD_AMOLED_1_8_DISPLAY_POWER_ON_SETTLE_MS
+    int "Display power-on settle delay (ms)"
+    range 0 1000
+    default 120
+
+config BOARD_AMOLED_1_8_DISPLAY_PANEL_RESET_SETTLE_MS
+    int "Display panel reset settle delay (ms)"
+    range 0 1000
+    default 150
+
+config BOARD_AMOLED_1_8_DISPLAY_PANEL_INIT_SETTLE_MS
+    int "Display panel init settle delay (ms)"
+    range 0 1000
+    default 200
+
+config BOARD_AMOLED_1_8_DISPLAY_DISP_ON_SETTLE_MS
+    int "Display disp_on settle delay (ms)"
+    range 0 1000
+    default 120
+
+config BOARD_AMOLED_1_8_DISPLAY_POST_INIT_DELAY_MS
+    int "Display post-init settle delay (ms)"
+    range 0 1000
+    default 120
+
+config BOARD_AMOLED_1_8_DISPLAY_LOW_BRIGHTNESS_PERCENT
+    int "Display staged low brightness percent"
+    range 0 100
+    default 20
+
+config BOARD_AMOLED_1_8_DISPLAY_DEFAULT_BRIGHTNESS_PERCENT
+    int "Display default brightness percent"
+    range 0 100
+    default 80
+
+config BOARD_AMOLED_1_8_DISPLAY_SELF_TEST_DELAY_MS
+    int "Display self-test pre-delay (ms)"
+    range 0 1000
+    default 150
+
+config BOARD_AMOLED_1_8_DISPLAY_BRIGHTNESS_SETTLE_DELAY_MS
+    int "Display brightness settle delay (ms)"
+    range 0 1000
+    default 50
+
+config BOARD_AMOLED_1_8_DISPLAY_DELAY_I2C_SCAN
+    bool "Delay I2C scan until after display self-test"
+    default y
 
 endmenu
