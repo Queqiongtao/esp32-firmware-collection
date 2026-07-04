@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "board_amoled_1_8.cpp"
         "board_display.cpp"
+        "board_touch_ft3168.cpp"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
     REQUIRES

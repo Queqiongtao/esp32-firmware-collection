@@ -10,6 +10,8 @@
 extern "C" {
 #endif
 
+#define BOARD_TOUCH_RELEASE_EVENT_POINT_NUM UINT8_MAX
+
 typedef struct {
     int i2c_port;
     int sda_gpio;
@@ -77,6 +79,7 @@ esp_err_t board_display_init(void);
 esp_err_t board_display_new(esp_lcd_panel_handle_t *ret_panel, esp_lcd_panel_io_handle_t *ret_io);
 esp_err_t board_backlight_set(int percent);
 esp_err_t board_touch_new(esp_lcd_touch_handle_t *ret_touch);
+esp_err_t board_touch_read(uint16_t *x, uint16_t *y, uint8_t *pressed, uint8_t *point_num);
 esp_err_t board_pmu_init(void);
 esp_err_t board_pmu_display_power_on(void);
 esp_err_t board_pmu_display_power_off(void);

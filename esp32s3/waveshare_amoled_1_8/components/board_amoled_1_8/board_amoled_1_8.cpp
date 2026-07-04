@@ -24,6 +24,7 @@
 #include "esp_io_expander_tca9554.h"
 #include "XPowersLib.h"
 #include "board_display_priv.h"
+#include "board_touch_ft3168.h"
 
 static const char *TAG = "board_amoled_1_8";
 
@@ -168,10 +169,6 @@ static bool s_i2c_ready;
 static i2c_master_bus_handle_t s_i2c_bus;
 static esp_io_expander_handle_t s_io_expander;
 static bool s_io_expander_ready;
-static esp_lcd_touch_handle_t s_touch;
-static esp_lcd_panel_io_handle_t s_touch_io;
-static bool s_touch_ready;
-static uint8_t s_touch_addr;
 
 const board_amoled_1_8_config_t *board_amoled_1_8_get_config(void)
 {
@@ -255,7 +252,7 @@ static void board_log_touch_candidates(void)
     }
 }
 
-static esp_err_t board_touch_prepare(uint8_t *touch_addr)
+static esp_err_t board_touch_prepare(void)
 {
     ESP_RETURN_ON_ERROR(board_i2c_init(), TAG, "i2c not ready");
 
@@ -268,36 +265,14 @@ static esp_err_t board_touch_prepare(uint8_t *touch_addr)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "io expander pre-init skipped: %s", esp_err_to_name(err));
     } else {
+        ESP_LOGI(TAG, "touch reset start");
         ESP_RETURN_ON_ERROR(board_touch_reset_pulse(), TAG, "touch reset pulse failed");
+        ESP_LOGI(TAG, "touch reset done");
     }
 
     board_log_touch_candidates();
-
-    const uint8_t candidates[] = {
-        s_board_cfg.ft3168_addr,
-        0x38,
-        0x14,
-        0x15,
-        0x5D,
-    };
-
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
-        const uint8_t addr = candidates[i];
-        if (!board_i2c_device_present(addr)) {
-            continue;
-        }
-        if (addr == s_board_cfg.es8311_addr || addr == s_board_cfg.tca9554_addr ||
-            addr == s_board_cfg.axp2101_addr || addr == s_board_cfg.pcf85063_addr ||
-            addr == s_board_cfg.qmi8658_addr) {
-            continue;
-        }
-        *touch_addr = addr;
-        ESP_LOGI(TAG, "touch probe selected address 0x%02X", addr);
-        return ESP_OK;
-    }
-
-    ESP_LOGE(TAG, "touch probe failed: no usable touch device found on i2c");
-    return ESP_ERR_NOT_FOUND;
+    ESP_LOGI(TAG, "touch address fixed to 0x%02X", s_board_cfg.ft3168_addr);
+    return ESP_OK;
 }
 
 esp_err_t board_backlight_set(int percent)
@@ -319,47 +294,36 @@ esp_err_t board_touch_new(esp_lcd_touch_handle_t *ret_touch)
 {
     ESP_RETURN_ON_FALSE(ret_touch != NULL, ESP_ERR_INVALID_ARG, TAG, "ret_touch is null");
 
-    if (s_touch_ready) {
-        *ret_touch = s_touch;
-        return ESP_OK;
+    if (board_touch_ft3168_is_ready()) {
+        return board_touch_ft3168_create(s_i2c_bus, NULL, ret_touch);
+    }
+    if (!board_touch_ft3168_should_retry_init()) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t touch_addr = 0;
-    ESP_RETURN_ON_ERROR(board_touch_prepare(&touch_addr), TAG, "touch prepare failed");
+    ESP_RETURN_ON_ERROR(board_touch_prepare(), TAG, "touch prepare failed");
 
-    esp_lcd_touch_config_t tp_cfg = {};
-    tp_cfg.x_max = (uint16_t)s_board_cfg.lcd_h_res;
-    tp_cfg.y_max = (uint16_t)s_board_cfg.lcd_v_res;
-    tp_cfg.rst_gpio_num = GPIO_NUM_NC;
-    tp_cfg.int_gpio_num = (gpio_num_t)s_board_cfg.touch_int_gpio;
-    tp_cfg.levels.reset = 0;
-    tp_cfg.levels.interrupt = 0;
-    tp_cfg.flags.swap_xy = 0;
-    tp_cfg.flags.mirror_x = 0;
-    tp_cfg.flags.mirror_y = 0;
+    const board_touch_ft3168_config_t touch_cfg = {
+        .i2c_addr = s_board_cfg.ft3168_addr,
+        .x_max = (uint16_t)s_board_cfg.lcd_h_res,
+        .y_max = (uint16_t)s_board_cfg.lcd_v_res,
+        .int_gpio_num = (gpio_num_t)s_board_cfg.touch_int_gpio,
+        .reset_cb = [](void *) -> esp_err_t { return board_touch_reset_pulse(); },
+        .reset_ctx = NULL,
+    };
+    return board_touch_ft3168_create(s_i2c_bus, &touch_cfg, ret_touch);
+}
 
-    esp_lcd_panel_io_i2c_config_t tp_io_cfg = {};
-    tp_io_cfg.scl_speed_hz = 100000;
-    tp_io_cfg.dev_addr = touch_addr;
-    tp_io_cfg.control_phase_bytes = 1;
-    tp_io_cfg.dc_bit_offset = 0;
-    tp_io_cfg.lcd_cmd_bits = 8;
-    tp_io_cfg.flags.disable_control_phase = 1;
-    tp_io_cfg.scl_speed_hz = s_board_cfg.i2c_hz;
+esp_err_t board_touch_read(uint16_t *x, uint16_t *y, uint8_t *pressed, uint8_t *point_num)
+{
+    ESP_RETURN_ON_FALSE(x != NULL, ESP_ERR_INVALID_ARG, TAG, "x is null");
+    ESP_RETURN_ON_FALSE(y != NULL, ESP_ERR_INVALID_ARG, TAG, "y is null");
+    ESP_RETURN_ON_FALSE(pressed != NULL, ESP_ERR_INVALID_ARG, TAG, "pressed is null");
 
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c(s_i2c_bus, &tp_io_cfg, &s_touch_io),
-                        TAG, "create touch panel io failed");
-    esp_err_t err = esp_lcd_touch_new_i2c_ft5x06(s_touch_io, &tp_cfg, &s_touch);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "touch driver init failed at 0x%02X: %s", touch_addr, esp_err_to_name(err));
-        return err;
-    }
-
-    s_touch_addr = touch_addr;
-    s_touch_ready = true;
-    *ret_touch = s_touch;
-    ESP_LOGI(TAG, "touch ready: FT3168 @ 0x%02X (via ft5x06 driver)", s_touch_addr);
-    return ESP_OK;
+    esp_lcd_touch_handle_t touch = NULL;
+    ESP_RETURN_ON_ERROR(board_touch_new(&touch), TAG, "touch init failed");
+    ESP_RETURN_ON_FALSE(touch != NULL, ESP_ERR_INVALID_STATE, TAG, "touch handle is null");
+    return board_touch_ft3168_read(x, y, pressed, point_num);
 }
 
 static XPowersAXP2101 s_pmu;

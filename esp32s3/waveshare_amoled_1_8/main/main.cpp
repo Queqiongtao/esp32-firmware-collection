@@ -12,6 +12,8 @@
 #include "freertos/task.h"
 
 static const char *TAG = "waveshare_amoled_1_8";
+static constexpr int TOUCH_POLL_INTERVAL_MS = 10;
+static constexpr int TOUCH_MOVE_THRESHOLD_PX = 2;
 
 static esp_err_t draw_solid_color(esp_lcd_panel_handle_t panel, int h_res, int v_res, uint16_t color, const char *name)
 {
@@ -109,6 +111,14 @@ static void run_display_self_test(esp_lcd_panel_handle_t panel, int h_res, int v
     ESP_LOGI(TAG, "display self-test end");
 }
 
+static bool touch_moved_significantly(uint16_t prev_x, uint16_t prev_y, uint16_t x, uint16_t y)
+{
+    const int dx = (int)x - (int)prev_x;
+    const int dy = (int)y - (int)prev_y;
+    return (dx >= TOUCH_MOVE_THRESHOLD_PX || dx <= -TOUCH_MOVE_THRESHOLD_PX ||
+            dy >= TOUCH_MOVE_THRESHOLD_PX || dy <= -TOUCH_MOVE_THRESHOLD_PX);
+}
+
 extern "C" void app_main(void)
 {
     esp_chip_info_t chip_info{};
@@ -157,7 +167,53 @@ extern "C" void app_main(void)
         }
     }
 
+    esp_lcd_touch_handle_t touch = NULL;
+    err = board_touch_new(&touch);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "board touch new failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "touch self-test armed");
+    }
+
+    bool touch_active = false;
+    uint16_t last_touch_x = 0;
+    uint16_t last_touch_y = 0;
+
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (touch != NULL) {
+            uint16_t touch_x = 0;
+            uint16_t touch_y = 0;
+            uint8_t pressed = 0;
+            uint8_t point_num = 0;
+            err = board_touch_read(&touch_x, &touch_y, &pressed, &point_num);
+            const bool release_event = (!pressed && point_num == BOARD_TOUCH_RELEASE_EVENT_POINT_NUM);
+            if (err != ESP_OK) {
+                if (touch_active) {
+                    ESP_LOGI(TAG, "touch up(interrupted): last_x=%u last_y=%u", last_touch_x, last_touch_y);
+                }
+                ESP_LOGW(TAG, "touch read failed: %s", esp_err_to_name(err));
+                touch_active = false;
+            } else if (pressed) {
+                if (!touch_active) {
+                    ESP_LOGI(TAG, "touch down: x=%u y=%u points=%u", touch_x, touch_y, point_num);
+                } else if (touch_moved_significantly(last_touch_x, last_touch_y, touch_x, touch_y)) {
+                    ESP_LOGI(TAG, "touch move: x=%u y=%u points=%u", touch_x, touch_y, point_num);
+                }
+                touch_active = true;
+                last_touch_x = touch_x;
+                last_touch_y = touch_y;
+            } else if (touch_active || release_event) {
+                const uint16_t release_x = release_event ? touch_x : last_touch_x;
+                const uint16_t release_y = release_event ? touch_y : last_touch_y;
+                if (!touch_active && release_event) {
+                    ESP_LOGI(TAG, "touch up(resync): last_x=%u last_y=%u", release_x, release_y);
+                } else {
+                    ESP_LOGI(TAG, "touch up: last_x=%u last_y=%u", release_x, release_y);
+                }
+                touch_active = false;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(TOUCH_POLL_INTERVAL_MS));
     }
 }
