@@ -27,6 +27,7 @@
 * ESP32-P4 开发板，建议使用与 ESP32-P4 Function-EV-Board 接线兼容的硬件
 * 1024x600 的 JD9165 MIPI 屏或配套子板
 * USB 线，用于供电、烧录和串口日志输出
+* 当前板上有两个独立的 USB Device 口：`Full-Speed USB Device`（`GPIO49/50`）和 `High-Speed USB Device`（`GPIO52/53`）
 
 ### Hardware Connection
 
@@ -55,6 +56,7 @@ Use the following board-level wiring for this project:
 | 触摸中断（可选） | `GPIO21` |
 | MIPI DSI | 屏排线接到 `MIPI_DSI` 接口 |
 | SD 卡 (SDMMC) | D0-D3=`GPIO39-42`, CLK=`GPIO43`, CMD=`GPIO44`（SLOT_0，menuconfig 启用） |
+| USB Device | `High-Speed USB Device` 口用于当前 TinyUSB CDC-ACM echo 测试；`Full-Speed USB Device` 口当前未被本工程使用 |
 
 Before testing the display, review the active display parameters in [main/display_config.h](./main/display_config.h).
 
@@ -115,6 +117,7 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 * 屏子板与 ESP32-P4 开发板必须共地。
 * 当前工程默认使用内部 `LDO channel 3` 输出 `2.5V` 作为 MIPI DPHY 供电。
 * 烧录和看日志时，先连接开发板 `USB-UART`，再按正常顺序上电。
+* 当前板上两个 USB Device 口都可能在主机侧表现为 USB 设备；本工程的 CDC echo 测试请连接 `High-Speed USB Device` 口（`GPIO52/53`），不要把它和烧录/日志口混用。
 
 ## Project Notes / 工程说明
 

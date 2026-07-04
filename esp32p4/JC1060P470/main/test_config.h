@@ -52,6 +52,9 @@
 #define TEST_AUDIO_SAMPLE_RATE                  16000
 #define TEST_AUDIO_MCLK_MULTIPLE                384
 #define TEST_AUDIO_RECV_BUF_SIZE                (2400)
+#define TEST_AUDIO_TASK_STACK_SIZE              4096
+#define TEST_AUDIO_TASK_PRIORITY                4
+#define TEST_AUDIO_TASK_CORE_ID                 tskNO_AFFINITY
 #ifdef CONFIG_EXAMPLE_VOICE_VOLUME
 #define TEST_AUDIO_VOICE_VOLUME                 CONFIG_EXAMPLE_VOICE_VOLUME
 #else
@@ -64,3 +67,30 @@
 #define TEST_AUDIO_MIC_GAIN                     3
 #endif
 #endif
+
+/* ---------------------------- USB Device CDC-ACM --------------------------- *
+ * Board wiring (JC1060P470, FIB type, two USB Type-C ports):
+ *   The current board exposes two dedicated USB Device ports:
+ *   - Full-Speed USB Device: GPIO49(DM)/GPIO50(DP)
+ *   - High-Speed USB Device: GPIO52(DM)/GPIO53(DP)
+ *   The CDC-ACM demo uses the High-Speed USB Device port. esp_tinyusb's
+ *   TINYUSB_DEFAULT_CONFIG() selects the ESP32-P4 high-speed device controller
+ *   automatically, and tinyusb_driver_install() configures the PHY and spawns
+ *   the TinyUSB backend task.
+ *
+ * NOTE: The USB Device CDC demo port and the USB Serial/JTAG download/log port
+ *   may both enumerate as serial devices on the host side, but they serve
+ *   different purposes. Do not confuse the CDC demo port with the download/log
+ *   interface.
+ *
+ * Demo behavior:
+ *   The board enumerates as a single CDC-ACM serial device. Data received
+ *   from the host is dumped in hex and then echoed back unchanged. */
+
+#define TEST_USB_CDC_PORT                       TINYUSB_CDC_ACM_0
+#define TEST_USB_CDC_EVENT_QUEUE_LEN            16
+#define TEST_USB_CDC_RX_BUF_SIZE                64
+#define TEST_USB_CDC_TX_FLUSH_TIMEOUT_TICKS     0
+#define TEST_USB_CDC_TASK_STACK_SIZE            4096
+#define TEST_USB_CDC_TASK_PRIORITY              4
+#define TEST_USB_CDC_TASK_CORE_ID               tskNO_AFFINITY

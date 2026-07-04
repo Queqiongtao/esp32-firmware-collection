@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "test_sdcard.h"
 #include "test_audio.h"
+#include "test_usb.h"
 
 extern void example_lvgl_demo_ui(lv_display_t *disp);
 
@@ -47,6 +48,16 @@ void app_main(void)
         test_audio_run();
     } else {
         ESP_LOGE(TAG, "Audio test module init failed: %s", esp_err_to_name(audio_ret));
+    }
+#endif
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_USB
+    ESP_LOGI(TAG, "Initialize USB Device CDC-ACM test module");
+    esp_err_t usb_ret = test_usb_init();
+    if (usb_ret == ESP_OK) {
+        test_usb_run();
+    } else {
+        ESP_LOGE(TAG, "USB test module init failed: %s", esp_err_to_name(usb_ret));
     }
 #endif
 }

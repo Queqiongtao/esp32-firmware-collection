@@ -6,6 +6,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                             "lvgl_demo_ui.c"
                             "test_sdcard.c"
                             "test_audio.c"
+                            "test_usb.c"
                        INCLUDE_DIRS "."
                        REQUIRES lvgl
                        PRIV_REQUIRES esp_driver_gpio
@@ -25,4 +26,5 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_codec_dev
                                      esp_lcd_jd9165
                                      esp_lcd_touch_gt911
+                                     esp_tinyusb
                        EMBED_FILES "canon.pcm")

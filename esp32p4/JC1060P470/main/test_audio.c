@@ -28,7 +28,10 @@ extern const uint8_t canon_pcm_end[]   asm("_binary_canon_pcm_end");
 static i2s_chan_handle_t s_tx_handle = NULL;
 static i2s_chan_handle_t s_rx_handle = NULL;
 static esp_codec_dev_handle_t s_codec_dev = NULL;
+static TaskHandle_t s_audio_task_handle = NULL;
 static bool s_initialized = false;
+static bool s_running = false;
+static bool s_stopping = false;
 
 static esp_err_t test_audio_i2s_driver_init(void)
 {
@@ -153,10 +156,13 @@ static esp_err_t test_audio_play_music(void)
     data_ptr += bytes_write;
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_handle), TAG, "enable tx failed");
 
-    while (1) {
+    while (!s_stopping) {
         esp_err_t ret = i2s_channel_write(s_tx_handle, data_ptr,
-                                          canon_pcm_end - data_ptr, &bytes_write, portMAX_DELAY);
+                                          canon_pcm_end - data_ptr, &bytes_write, pdMS_TO_TICKS(1000));
         if (ret != ESP_OK) {
+            if (s_stopping && ret == ESP_ERR_TIMEOUT) {
+                break;
+            }
             ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             return ret;
         }
@@ -179,11 +185,14 @@ static esp_err_t test_audio_echo(void)
     size_t bytes_read = 0;
     size_t bytes_write = 0;
 
-    while (1) {
+    while (!s_stopping) {
         memset(mic_data, 0, TEST_AUDIO_RECV_BUF_SIZE);
         esp_err_t ret = i2s_channel_read(s_rx_handle, mic_data,
                                          TEST_AUDIO_RECV_BUF_SIZE, &bytes_read, 1000);
         if (ret != ESP_OK) {
+            if (s_stopping && ret == ESP_ERR_TIMEOUT) {
+                break;
+            }
             ESP_LOGE(TAG, "i2s read failed: %s", esp_err_to_name(ret));
             free(mic_data);
             return ret;
@@ -191,6 +200,9 @@ static esp_err_t test_audio_echo(void)
         ret = i2s_channel_write(s_tx_handle, mic_data,
                                 TEST_AUDIO_RECV_BUF_SIZE, &bytes_write, 1000);
         if (ret != ESP_OK) {
+            if (s_stopping && ret == ESP_ERR_TIMEOUT) {
+                break;
+            }
             ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
             free(mic_data);
             return ret;
@@ -204,7 +216,49 @@ static esp_err_t test_audio_echo(void)
 }
 #endif
 
+static esp_err_t test_audio_worker_run(void);
+
+static void test_audio_task(void *arg)
+{
+    (void)arg;
+
+    esp_err_t ret = test_audio_worker_run();
+    if (ret != ESP_OK && !s_stopping) {
+        ESP_LOGE(TAG, "Audio worker exited with error: %s", esp_err_to_name(ret));
+    }
+
+    s_running = false;
+    s_audio_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
 esp_err_t test_audio_run(void)
+{
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Audio not initialized, call test_audio_init first");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_running) {
+        ESP_LOGI(TAG, "Audio test already running");
+        return ESP_OK;
+    }
+
+    s_stopping = false;
+    BaseType_t task_created = xTaskCreatePinnedToCore(test_audio_task,
+                                                      "audio_test",
+                                                      TEST_AUDIO_TASK_STACK_SIZE,
+                                                      NULL,
+                                                      TEST_AUDIO_TASK_PRIORITY,
+                                                      &s_audio_task_handle,
+                                                      TEST_AUDIO_TASK_CORE_ID);
+    ESP_RETURN_ON_FALSE(task_created == pdTRUE, ESP_ERR_NO_MEM, TAG, "create audio worker task failed");
+    s_running = true;
+    ESP_LOGI(TAG, "Audio test worker started");
+    return ESP_OK;
+}
+
+static esp_err_t test_audio_worker_run(void)
 {
     if (!s_initialized) {
         ESP_LOGE(TAG, "Audio not initialized, call test_audio_init first");
@@ -224,6 +278,19 @@ esp_err_t test_audio_deinit(void)
         return ESP_OK;
     }
 
+    s_stopping = true;
+    if (s_audio_task_handle != NULL) {
+        for (int i = 0; i < 10 && s_audio_task_handle != NULL; ++i) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        if (s_audio_task_handle != NULL) {
+            ESP_LOGW(TAG, "Audio worker task did not exit in time, deleting it");
+            vTaskDelete(s_audio_task_handle);
+            s_audio_task_handle = NULL;
+        }
+    }
+    s_running = false;
+
     if (s_codec_dev) {
         esp_codec_dev_close(s_codec_dev);
         esp_codec_dev_delete(s_codec_dev);
@@ -242,6 +309,7 @@ esp_err_t test_audio_deinit(void)
     }
 
     s_initialized = false;
+    s_stopping = false;
     ESP_LOGI(TAG, "Audio deinitialized");
     return ESP_OK;
 }

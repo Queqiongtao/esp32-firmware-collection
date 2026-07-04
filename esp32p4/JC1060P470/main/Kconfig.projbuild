@@ -109,4 +109,15 @@ menu "Example Configuration"
         default 6 if MIC_GAIN_36DB
         default 7 if MIC_GAIN_42DB
 
+    config EXAMPLE_ENABLE_TEST_USB
+        bool "Enable USB Device CDC-ACM (virtual serial) test module"
+        default n
+        help
+            Enable this option to install a TinyUSB CDC-ACM Device echo demo on
+            the board's High-Speed USB Device port. The board enumerates as a
+            virtual serial port on the PC side, dumps received data in hex, and
+            echoes it back unchanged. On ESP32-P4 the demo uses the internal
+            high-speed USB device controller, so no GPIO assignment is needed
+            in application code.
+
 endmenu

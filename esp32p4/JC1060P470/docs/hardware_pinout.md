@@ -12,6 +12,8 @@
 
 > 引脚参数在源码中集中定义：显示/触摸见 `main/display_config.h`，外设测试见 `main/test_config.h`。源文件不出现裸 GPIO 号。
 
+> 当前板上有两个独立的 USB Device 口：`Full-Speed USB Device` 连接 `GPIO49/50`，`High-Speed USB Device` 连接 `GPIO52/53`。本文档中的 USB 描述均以该实物板连接为准，不再把板上接口直接命名为 `OTG` 口。
+
 ---
 
 ## 1. 已实现外设引脚（已上板验证）
@@ -55,14 +57,25 @@
 
 ---
 
-## 3. 专用接口（非 GPIO）
+## 3. 专用接口与板级专用连接
+
+### 3.1 专用接口（非 GPIO）
 
 | 接口 | 说明 |
 |------|------|
 | MIPI DSI | 2-lane，750 Mbps lane rate，54 MHz DPI clock → JD9165 1024x600 RGB565 LCD |
-| USB OTG | ESP32-P4 内置 USB OTG PHY（`SOC_USB_OTG_PERIPH_NUM=2`），专用引脚 |
-| USB Serial JTAG | 烧录与串口日志输出（`USB-UART` 口） |
 | MIPI CSI | 摄像头输入（`SOC_MIPI_CSI_SUPPORTED=1`），当前未用 |
+
+### 3.2 USB Device 口（当前板级实物连接）
+
+| 接口 | 板级连接 | 说明 |
+|------|----------|------|
+| Full-Speed USB Device | `GPIO49 (DM)` / `GPIO50 (DP)` | 板上独立的 Full-Speed USB Device 口。可用于芯片 USB Device 相关功能，但当前工程的 TinyUSB CDC-ACM demo 不使用这个口。 |
+| High-Speed USB Device | `GPIO52 (DM)` / `GPIO53 (DP)` | 板上独立的 High-Speed USB Device 口。当前工程的 TinyUSB CDC-ACM echo demo 默认使用这个口，主机侧会枚举为虚拟串口。 |
+
+- 当前 `USB Device CDC-ACM` echo 测试请连接 `High-Speed USB Device` 口。
+- `USB Serial/JTAG` 下载/日志口和 `USB Device CDC-ACM` 在主机侧都可能表现为串口设备，但二者功能不同；前者用于烧录/日志，后者是应用层 CDC 数据口。
+- 芯片底层控制器/PHY 能力仍由 ESP32-P4 USB 子系统决定，但本工程板级文档只按当前实物接口角色记录为 `USB Device` 口。
 
 ---
 
@@ -149,8 +162,12 @@
 | 46 | — | Probe IO | 未用 |
 | 47 | — | Probe IO | 未用 |
 | 48 | — | Probe IO | 未用 |
+| 49 | Full-Speed USB Device DM | — | 板级专用 |
+| 50 | Full-Speed USB Device DP | — | 板级专用 |
+| 52 | High-Speed USB Device DM | — | 板级专用 |
+| 53 | High-Speed USB Device DP | — | 板级专用 |
 
-> 未列出的 GPIO（0-5, 24-26, 28-31, 34-38, 49-54）在 FIB 板型中未定义用途，默认空闲。
+> 未列出的 GPIO（0-5, 24-25, 26, 28-31, 34-38, 51, 54）在当前板级文档中未定义用途，默认空闲。
 
 ---
 

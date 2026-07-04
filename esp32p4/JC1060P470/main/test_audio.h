@@ -17,16 +17,17 @@
 esp_err_t test_audio_init(void);
 
 /**
- * @brief Run the audio test. In music mode, plays the embedded canon.pcm in
- *        a loop. In echo mode, reads from microphone and writes to speaker.
+ * @brief Start the audio test in the background. In music mode, a worker task
+ *        plays the embedded canon.pcm in a loop. In echo mode, a worker task
+ *        reads from microphone and writes to speaker.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
 esp_err_t test_audio_run(void);
 
 /**
- * @brief Stop audio playback/recording, disable I2S channels, and release
- *        the codec. Safe to call when audio has not been initialized.
+ * @brief Stop the audio worker task, disable I2S channels, and release the
+ *        codec. Safe to call when audio has not been initialized.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
