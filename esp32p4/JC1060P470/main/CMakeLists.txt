@@ -10,7 +10,10 @@ idf_component_register(SRCS "JC1060P470_main.c"
                             "test_audio.c"
                             "test_usb.c"
                             "test_battery.c"
+                            "test_wireless.c"
                        INCLUDE_DIRS "."
+                       PRIV_INCLUDE_DIRS "../managed_components/espressif__esp_hosted/host"
+                                         "../managed_components/espressif__esp_hosted/host/api/include"
                        REQUIRES lvgl
                        PRIV_REQUIRES esp_driver_gpio
                                      esp_driver_ledc
@@ -23,6 +26,11 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_lcd
                                      esp_common
                                      esp_mm
+                                     esp_event
+                                     esp_netif
+                                     esp_wifi
+                                     espressif__esp_hosted
+                                     nvs_flash
                                      log
                                      efuse
                                      fatfs

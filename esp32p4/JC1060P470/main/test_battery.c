@@ -213,8 +213,9 @@ esp_err_t test_battery_init(void)
 
 esp_err_t test_battery_run(void)
 {
-    ESP_RETURN_ON_FALSE(s_status.initialized, ESP_ERR_INVALID_STATE, TAG,
-                        "battery module not initialized");
+    if (!s_status.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     int64_t now_ms = esp_timer_get_time() / 1000;
     if (s_status.sample_valid && (now_ms - s_status.last_update_ms) < TEST_BATTERY_UPDATE_PERIOD_MS) {

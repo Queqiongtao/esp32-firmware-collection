@@ -135,3 +135,26 @@
 #define TEST_USB_CDC_TASK_STACK_SIZE            4096
 #define TEST_USB_CDC_TASK_PRIORITY              4
 #define TEST_USB_CDC_TASK_CORE_ID               tskNO_AFFINITY
+
+/* ---------------------------- Wireless (ESP32-C6 hosted) ------------------ *
+ * Board wiring:
+ *   ESP32-P4 <-> ESP32-C6 SDIO
+ *   D0 = GPIO14, D1 = GPIO15, D2 = GPIO16, D3 = GPIO17, CLK = GPIO18, CMD = GPIO19
+ *
+ * Current software status:
+ *   - WiFi station test path is brought up through esp_hosted + esp_wifi_remote
+ *   - BLE state is exposed to UI, but no BLE hosted transport is integrated yet */
+
+#define TEST_WIRELESS_SDIO_PIN_D0               GPIO_NUM_14
+#define TEST_WIRELESS_SDIO_PIN_D1               GPIO_NUM_15
+#define TEST_WIRELESS_SDIO_PIN_D2               GPIO_NUM_16
+#define TEST_WIRELESS_SDIO_PIN_D3               GPIO_NUM_17
+#define TEST_WIRELESS_SDIO_PIN_CLK              GPIO_NUM_18
+#define TEST_WIRELESS_SDIO_PIN_CMD              GPIO_NUM_19
+
+#define TEST_WIRELESS_SDIO_BUS_WIDTH            4
+#define TEST_WIRELESS_SDIO_CLOCK_KHZ            25000
+#define TEST_WIRELESS_CMD_TIMEOUT_MS            1000
+#define TEST_WIRELESS_WIFI_SCAN_TIMEOUT_MS      10000
+#define TEST_WIRELESS_WIFI_CONNECT_RETRY        3
+#define TEST_WIRELESS_BLE_SCAN_TIME_MS          5000

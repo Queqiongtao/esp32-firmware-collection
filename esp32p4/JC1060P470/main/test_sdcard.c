@@ -12,6 +12,7 @@
 #include "driver/sdmmc_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "esp_check.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include <stdio.h>
 #include <string.h>
@@ -24,11 +25,32 @@ static sdmmc_card_t *s_card = NULL;
 static sd_pwr_ctrl_handle_t s_pwr_ctrl_handle = NULL;
 static bool s_mounted = false;
 
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE && (ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0))
+#define TEST_SDCARD_WORKAROUND_HOSTED_SDMMC_HOST_INIT 1
+#else
+#define TEST_SDCARD_WORKAROUND_HOSTED_SDMMC_HOST_INIT 0
+#endif
+
+#if TEST_SDCARD_WORKAROUND_HOSTED_SDMMC_HOST_INIT
+static esp_err_t test_sdcard_sdmmc_host_init_dummy(void)
+{
+    return ESP_OK;
+}
+
+static esp_err_t test_sdcard_sdmmc_host_deinit_dummy(void)
+{
+    return ESP_OK;
+}
+#endif
+
 esp_err_t test_sdcard_init(void)
 {
     esp_err_t ret = ESP_OK;
 
-    ESP_LOGI(TAG, "Initializing SD card (SDMMC peripheral)");
+    ESP_LOGI(TAG, "Initializing SD card (SDMMC peripheral, slot=%d width=%d)",
+             SDMMC_HOST_SLOT_0, TEST_SDCARD_BUS_WIDTH);
+    ESP_LOGI(TAG, "Hosted+SDMMC workaround: %s",
+             TEST_SDCARD_WORKAROUND_HOSTED_SDMMC_HOST_INIT ? "enabled" : "disabled");
 
     sd_pwr_ctrl_ldo_config_t ldo_config = {
         .ldo_chan_id = TEST_SDCARD_PWR_LDO_CHAN,
@@ -40,6 +62,11 @@ esp_err_t test_sdcard_init(void)
     host.slot = SDMMC_HOST_SLOT_0;
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
     host.pwr_ctrl_handle = s_pwr_ctrl_handle;
+#if TEST_SDCARD_WORKAROUND_HOSTED_SDMMC_HOST_INIT
+    // ESP-Hosted already manages the shared SDMMC host controller when C6 uses SDIO.
+    host.init = test_sdcard_sdmmc_host_init_dummy;
+    host.deinit = test_sdcard_sdmmc_host_deinit_dummy;
+#endif
 
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
     slot_config.width = TEST_SDCARD_BUS_WIDTH;
@@ -49,6 +76,7 @@ esp_err_t test_sdcard_init(void)
     slot_config.d1 = TEST_SDCARD_PIN_D1;
     slot_config.d2 = TEST_SDCARD_PIN_D2;
     slot_config.d3 = TEST_SDCARD_PIN_D3;
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
@@ -61,6 +89,9 @@ esp_err_t test_sdcard_init(void)
     if (ret != ESP_OK) {
         if (ret == ESP_FAIL) {
             ESP_LOGE(TAG, "Failed to mount filesystem. If you want the card to be formatted, enable format option");
+        } else if (ret == ESP_ERR_NOT_FOUND) {
+            ESP_LOGE(TAG, "Failed to acquire SDMMC host/card (%s). In Hosted+SDMMC mode, verify slot_0 wiring, pull-ups, and shared-host workaround",
+                     esp_err_to_name(ret));
         } else {
             ESP_LOGE(TAG, "Failed to initialize the card (%s). Make sure SD card lines have pull-up resistors",
                      esp_err_to_name(ret));

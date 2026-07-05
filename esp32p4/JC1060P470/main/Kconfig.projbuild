@@ -128,4 +128,74 @@ menu "Example Configuration"
             high-speed USB device controller, so no GPIO assignment is needed
             in application code.
 
+    config EXAMPLE_ENABLE_TEST_WIRELESS
+        bool "Enable WiFi/BLE test module"
+        default y
+        help
+            Enable this option to expose the board-level ESP32-P4 <-> ESP32-C6
+            wireless test module. The current implementation brings up the
+            hosted WiFi station path over SDIO by using esp_hosted +
+            esp_wifi_remote. BLE status is kept in the UI model, but the BLE
+            hosted data path is not integrated yet.
+
+    config EXAMPLE_WIRELESS_ENABLE_WIFI
+        bool "Enable WiFi status/actions in wireless module"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS
+        default y
+        help
+            Keep WiFi actions and status visible in the wireless demo card.
+
+    config EXAMPLE_WIRELESS_ENABLE_BLE
+        bool "Enable BLE status/actions in wireless module"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS
+        default y
+        help
+            Keep BLE actions and status visible in the wireless demo card.
+
+    config EXAMPLE_WIRELESS_DEFAULT_WIFI_SSID
+        string "Default WiFi SSID for demo connect action"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS && EXAMPLE_WIRELESS_ENABLE_WIFI
+        default ""
+        help
+            Optional default SSID used by the demo "WiFi Join" action.
+
+    config EXAMPLE_WIRELESS_DEFAULT_WIFI_PASSWORD
+        string "Default WiFi password for demo connect action"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS && EXAMPLE_WIRELESS_ENABLE_WIFI
+        default ""
+        help
+            Optional default password used by the demo "WiFi Join" action.
+
+    config EXAMPLE_WIRELESS_MAXIMUM_RETRY
+        int "Wireless WiFi maximum retry"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS && EXAMPLE_WIRELESS_ENABLE_WIFI
+        default 5
+        help
+            Maximum reconnect attempts used by the WiFi STA demo path.
+
+    choice EXAMPLE_WIRELESS_SCAN_AUTH_MODE_THRESHOLD
+        prompt "Wireless WiFi scan auth mode threshold"
+        depends on EXAMPLE_ENABLE_TEST_WIRELESS && EXAMPLE_WIRELESS_ENABLE_WIFI
+        default EXAMPLE_WIRELESS_AUTH_WPA2_PSK
+        help
+            Weakest AP auth mode accepted by the demo WiFi station logic.
+
+        config EXAMPLE_WIRELESS_AUTH_OPEN
+            bool "OPEN"
+        config EXAMPLE_WIRELESS_AUTH_WEP
+            bool "WEP"
+        config EXAMPLE_WIRELESS_AUTH_WPA_PSK
+            bool "WPA PSK"
+        config EXAMPLE_WIRELESS_AUTH_WPA2_PSK
+            bool "WPA2 PSK"
+        config EXAMPLE_WIRELESS_AUTH_WPA_WPA2_PSK
+            bool "WPA/WPA2 PSK"
+        config EXAMPLE_WIRELESS_AUTH_WPA3_PSK
+            bool "WPA3 PSK"
+        config EXAMPLE_WIRELESS_AUTH_WPA2_WPA3_PSK
+            bool "WPA2/WPA3 PSK"
+        config EXAMPLE_WIRELESS_AUTH_WAPI_PSK
+            bool "WAPI PSK"
+    endchoice
+
 endmenu

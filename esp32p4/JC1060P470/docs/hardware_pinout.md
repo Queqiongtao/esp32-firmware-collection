@@ -48,6 +48,8 @@
 - **频率**：40MHz（`SDMMC_FREQ_HIGHSPEED`）
 - **电源**：内部 LDO channel 4（`LDO_VO4`, 3.3V）
 - **上拉**：依赖板载外部 10k 上拉，不启用内部上拉
+- **与 Hosted 共存注意事项**：当前板上 `ESP32-C6` hosted WiFi 使用 `SDMMC Slot 1`；SD 卡使用 `Slot 0`。在 ESP-IDF `v6.0.x` 下，SD 卡路径需要复用 ESP-Hosted 已完成的 SDMMC host controller 初始化，避免重复初始化共享 SDMMC host controller。
+- **当前软件状态**：`Slot 0` SD 卡与 `Slot 1` Hosted 已完成共存验证，当前工程已上板验证文件系统挂载与读写回环通过。
 
 ### 1.3 音频 I2S（`test_config.h` / `test_audio.c`）
 
@@ -75,8 +77,26 @@
 - **USB Device 卡片**：当前 `CDC-ACM` echo demo 使用板上的 `High-Speed USB Device` 口（信号 GPIO `GPIO24/25`，封装脚 `52/53`）。
 - **音频卡片**：播放/录音链路使用 ES8311 + 板载模拟 MIC + 扬声器功放，对应 I2S 引脚为 `GPIO9/10/11/12/13`，功放使能为 `GPIO20`。
 - **电量卡片**：`GPIO52` 接在 BAT 分压点，分压关系为 `BAT -> 68K -> GPIO52 -> 100K -> GND`，软件通过 ADC2 通道读取分压点并换算为电池电压与估算百分比。
+- **WiFi 卡片**：已接入 hosted WiFi 扫描与连接路径，基于 `ESP32-P4 <-> ESP32-C6` SDIO 链路工作。
+- **BLE 卡片**：当前仅展示 hosted 状态，BLE 业务路径尚未接入。
 
 该映射仅说明“当前页面上的功能块对应哪类硬件资源”，不替代具体 UI 文案或布局说明；页面结构和交互以 `main/lvgl_demo_ui.c` 为准。
+
+### 1.5 无线协处理器连接（板级已连接，WiFi 已接入）
+
+当前板子为 `ESP32-P4 + ESP32-C6` 组合，`ESP32-P4` 与 `ESP32-C6` 之间通过 `SDIO` 连接。当前工程已基于这组板级连接接入 hosted WiFi 测试路径；BLE hosted 仍未接入。
+
+| GPIO | 信号 | 说明 |
+|------|------|------|
+| 14 | SDIO D0 | `ESP32-P4 -> ESP32-C6` SDIO 数据线 0 |
+| 15 | SDIO D1 | `ESP32-P4 -> ESP32-C6` SDIO 数据线 1 |
+| 16 | SDIO D2 | `ESP32-P4 -> ESP32-C6` SDIO 数据线 2 |
+| 17 | SDIO D3 | `ESP32-P4 -> ESP32-C6` SDIO 数据线 3 |
+| 18 | SDIO CLK | `ESP32-P4 -> ESP32-C6` SDIO 时钟 |
+| 19 | SDIO CMD | `ESP32-P4 -> ESP32-C6` SDIO 命令线 |
+
+- **当前软件状态**：Hosted transport 与 WiFi STA 路径已接入当前工程并完成上板验证；启动日志中仍可能出现协处理器版本/RPC 元信息告警。
+- **当前限制**：BLE hosted 业务路径尚未接入，当前 BLE 卡片不代表 BLE 功能已完成。
 
 ---
 
@@ -133,6 +153,12 @@
 | 11 | I2S DSIN | 已用 |
 | 12 | I2S SCLK / BCLK | 已用 |
 | 13 | I2S MCLK | 已用 |
+| 14 | ESP32-C6 SDIO D0 | 已用 |
+| 15 | ESP32-C6 SDIO D1 | 已用 |
+| 16 | ESP32-C6 SDIO D2 | 已用 |
+| 17 | ESP32-C6 SDIO D3 | 已用 |
+| 18 | ESP32-C6 SDIO CLK | 已用 |
+| 19 | ESP32-C6 SDIO CMD | 已用 |
 | 20 | 功放使能 | 已用 |
 | 21 | 触摸 INT | 已用 |
 | 22 | 触摸 RST | 已用 |
@@ -161,4 +187,5 @@
 | GPIO | 复用关系 | 说明 |
 |------|---------|------|
 | 7 / 8 | 触摸 / RTC / 音频 Codec 共用 I2C 总线 | 应用层通过 `display_touch_get_i2c_bus()` 获取已初始化的 bus handle，不重复创建总线 |
+| 14 / 15 / 16 / 17 / 18 / 19 | `ESP32-P4 <-> ESP32-C6` SDIO 板级连接 | 当前板上已接到 `ESP32-C6`，后续实现无线模块时不应再挪作它用 |
 | 52 | BAT 采样输入，与 HS USB 封装脚号 52 容易混淆 | 当前工程中 `GPIO52` 仅表示 ADC 采样 GPIO，不表示 HS USB 信号 GPIO |
