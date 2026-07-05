@@ -6,12 +6,26 @@
 
 #include "lvgl.h"
 #include "esp_log.h"
+#include "test_audio.h"
 
 static lv_style_t style_bullet;
 static lv_obj_t *scale1;
 static lv_obj_t *label_revenue;
 static lv_obj_t *label_sales;
 static lv_obj_t *label_costs;
+static lv_obj_t *s_audio_record_btn;
+static lv_obj_t *s_audio_play_btn;
+static lv_obj_t *s_audio_status_label;
+static lv_obj_t *s_audio_size_label;
+static lv_obj_t *s_audio_peak_label;
+static lv_obj_t *s_audio_input_label;
+static lv_obj_t *s_audio_record_label;
+static lv_obj_t *s_audio_play_label;
+static test_audio_state_t s_audio_last_state = TEST_AUDIO_STATE_UNINITIALIZED;
+static size_t s_audio_last_record_size = SIZE_MAX;
+static uint16_t s_audio_last_record_peak = UINT16_MAX;
+static size_t s_audio_last_nonzero_samples = SIZE_MAX;
+static esp_err_t s_audio_last_error = ESP_OK;
 static const lv_font_t *font_normal = &lv_font_montserrat_16;
 
 static lv_obj_t *create_scale_box(lv_obj_t *parent, const char *text1, const char *text2, const char *text3)
@@ -80,10 +94,113 @@ static void scale1_indic3_anim_cb(void *var, int32_t v)
     lv_label_set_text_fmt(label_costs, "Costs: %"LV_PRId32" %%", v);
 }
 
-static void touch_test_btn_cb(lv_event_t *e)
+static const char *audio_state_to_text(test_audio_state_t state)
+{
+    switch (state) {
+    case TEST_AUDIO_STATE_UNINITIALIZED:
+        return "Audio: uninitialized";
+    case TEST_AUDIO_STATE_IDLE:
+        return "Audio: idle";
+    case TEST_AUDIO_STATE_RECORDING:
+        return "Audio: recording";
+    case TEST_AUDIO_STATE_RECORDED:
+        return "Audio: recorded";
+    case TEST_AUDIO_STATE_PLAYING:
+        return "Audio: playing";
+    case TEST_AUDIO_STATE_ERROR:
+        return "Audio: error";
+    default:
+        return "Audio: unknown";
+    }
+}
+
+static const char *audio_input_level_text(uint16_t peak, size_t nonzero_samples)
+{
+    if (peak == 0 || nonzero_samples == 0) {
+        return "Input: silent";
+    }
+    if (peak < 256) {
+        return "Input: weak";
+    }
+    return "Input: active";
+}
+
+static void audio_ui_update(void)
+{
+    test_audio_state_t state = test_audio_get_state();
+    size_t record_size = test_audio_get_last_record_size();
+    uint16_t record_peak = test_audio_get_last_record_peak();
+    size_t nonzero_samples = test_audio_get_last_record_nonzero_count();
+    esp_err_t last_error = test_audio_get_last_error();
+    bool can_record = false;
+    bool can_play = false;
+
+    if (!s_audio_status_label || !s_audio_size_label || !s_audio_peak_label || !s_audio_input_label ||
+        !s_audio_record_btn || !s_audio_play_btn) {
+        return;
+    }
+
+    can_record = (state == TEST_AUDIO_STATE_IDLE || state == TEST_AUDIO_STATE_RECORDED || state == TEST_AUDIO_STATE_ERROR);
+    can_play = (state == TEST_AUDIO_STATE_RECORDED && record_size > 0);
+
+    if (state == s_audio_last_state && record_size == s_audio_last_record_size &&
+        record_peak == s_audio_last_record_peak && nonzero_samples == s_audio_last_nonzero_samples &&
+        last_error == s_audio_last_error) {
+        return;
+    }
+
+    if (state == TEST_AUDIO_STATE_ERROR) {
+        lv_label_set_text_fmt(s_audio_status_label, "Audio: error (0x%x)", (unsigned int)last_error);
+    } else {
+        lv_label_set_text(s_audio_status_label, audio_state_to_text(state));
+    }
+    lv_label_set_text_fmt(s_audio_size_label, "Recorded: %u bytes", (unsigned int)record_size);
+    lv_label_set_text_fmt(s_audio_peak_label, "Peak: %u", (unsigned int)record_peak);
+    lv_label_set_text(s_audio_input_label, audio_input_level_text(record_peak, nonzero_samples));
+
+    if (can_record) {
+        lv_obj_clear_state(s_audio_record_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_audio_record_btn, LV_STATE_DISABLED);
+    }
+
+    if (can_play) {
+        lv_obj_clear_state(s_audio_play_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_audio_play_btn, LV_STATE_DISABLED);
+    }
+
+    s_audio_last_state = state;
+    s_audio_last_record_size = record_size;
+    s_audio_last_record_peak = record_peak;
+    s_audio_last_nonzero_samples = nonzero_samples;
+    s_audio_last_error = last_error;
+}
+
+static void audio_ui_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    audio_ui_update();
+}
+
+static void audio_record_btn_cb(lv_event_t *e)
 {
     (void)e;
-    ESP_LOGI("TOUCH", "Touch test button clicked!");
+    esp_err_t ret = test_audio_start_record();
+    if (ret != ESP_OK) {
+        ESP_LOGE("AUDIO_UI", "start record failed: %s", esp_err_to_name(ret));
+    }
+    audio_ui_update();
+}
+
+static void audio_play_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    esp_err_t ret = test_audio_start_playback();
+    if (ret != ESP_OK) {
+        ESP_LOGE("AUDIO_UI", "start playback failed: %s", esp_err_to_name(ret));
+    }
+    audio_ui_update();
 }
 
 void example_lvgl_demo_ui(lv_display_t *disp)
@@ -155,13 +272,42 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_anim_set_playback_duration(&a, 1800);
     lv_anim_start(&a);
 
-    /* Touch test button */
-    lv_obj_t *btn = lv_button_create(parent);
-    lv_obj_set_size(btn, 300, 120);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -40);
-    lv_obj_add_event_cb(btn, touch_test_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *audio_panel = lv_obj_create(parent);
+    lv_obj_set_size(audio_panel, 420, 210);
+    lv_obj_align(audio_panel, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_style_pad_all(audio_panel, 16, 0);
+    lv_obj_set_style_radius(audio_panel, 8, 0);
 
-    lv_obj_t *label = lv_label_create(btn);
-    lv_label_set_text(label, "Touch Test");
-    lv_obj_center(label);
+    s_audio_status_label = lv_label_create(audio_panel);
+    lv_obj_align(s_audio_status_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    s_audio_size_label = lv_label_create(audio_panel);
+    lv_obj_align(s_audio_size_label, LV_ALIGN_TOP_LEFT, 0, 28);
+
+    s_audio_peak_label = lv_label_create(audio_panel);
+    lv_obj_align(s_audio_peak_label, LV_ALIGN_TOP_LEFT, 0, 56);
+
+    s_audio_input_label = lv_label_create(audio_panel);
+    lv_obj_align(s_audio_input_label, LV_ALIGN_TOP_LEFT, 0, 84);
+
+    s_audio_record_btn = lv_button_create(audio_panel);
+    lv_obj_set_size(s_audio_record_btn, 170, 52);
+    lv_obj_align(s_audio_record_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_add_event_cb(s_audio_record_btn, audio_record_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_audio_record_label = lv_label_create(s_audio_record_btn);
+    lv_label_set_text(s_audio_record_label, "Start Record");
+    lv_obj_center(s_audio_record_label);
+
+    s_audio_play_btn = lv_button_create(audio_panel);
+    lv_obj_set_size(s_audio_play_btn, 170, 52);
+    lv_obj_align(s_audio_play_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_add_event_cb(s_audio_play_btn, audio_play_btn_cb, LV_EVENT_CLICKED, NULL);
+
+    s_audio_play_label = lv_label_create(s_audio_play_btn);
+    lv_label_set_text(s_audio_play_label, "Play Recording");
+    lv_obj_center(s_audio_play_label);
+
+    audio_ui_update();
+    lv_timer_create(audio_ui_timer_cb, 500, NULL);
 }

@@ -8,6 +8,9 @@
 
 #include "driver/gpio.h"
 
+#define TEST_AUDIO_BYTES_PER_SAMPLE             2
+#define TEST_AUDIO_CHANNELS                     2
+
 /* ---------------------------- SD card (SDMMC) ------------------------------ *
  * Board wiring (JC1060P470, same as ESP32-P4 Function EV Board):
  *   D0-D3 = GPIO39-42, CLK = GPIO43, CMD = GPIO44
@@ -62,6 +65,9 @@
 #define TEST_AUDIO_SAMPLE_RATE                  16000
 #define TEST_AUDIO_MCLK_MULTIPLE                384
 #define TEST_AUDIO_RECV_BUF_SIZE                (2400)
+#define TEST_AUDIO_RECORD_SECONDS               5
+#define TEST_AUDIO_RECORD_BUF_SIZE              (TEST_AUDIO_SAMPLE_RATE * TEST_AUDIO_BYTES_PER_SAMPLE * \
+                                                 TEST_AUDIO_CHANNELS * TEST_AUDIO_RECORD_SECONDS)
 #define TEST_AUDIO_TASK_STACK_SIZE              4096
 #define TEST_AUDIO_TASK_PRIORITY                4
 #define TEST_AUDIO_TASK_CORE_ID                 tskNO_AFFINITY
@@ -70,7 +76,7 @@
 #else
 #define TEST_AUDIO_VOICE_VOLUME                 60
 #endif
-#if CONFIG_EXAMPLE_AUDIO_MODE_ECHO
+#if CONFIG_EXAMPLE_AUDIO_MODE_ECHO || CONFIG_EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
 #ifdef CONFIG_EXAMPLE_MIC_GAIN
 #define TEST_AUDIO_MIC_GAIN                     CONFIG_EXAMPLE_MIC_GAIN
 #else

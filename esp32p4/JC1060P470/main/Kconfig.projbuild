@@ -68,12 +68,14 @@ menu "Example Configuration"
     choice EXAMPLE_AUDIO_MODE
         prompt "Audio test mode"
         depends on EXAMPLE_ENABLE_TEST_AUDIO
-        default EXAMPLE_AUDIO_MODE_MUSIC
+        default EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
 
         config EXAMPLE_AUDIO_MODE_MUSIC
             bool "music (play canon.pcm in loop)"
         config EXAMPLE_AUDIO_MODE_ECHO
             bool "echo (microphone to speaker)"
+        config EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
+            bool "record/playback (record to memory then replay)"
     endchoice
 
     config EXAMPLE_VOICE_VOLUME
@@ -86,7 +88,7 @@ menu "Example Configuration"
 
     choice EXAMPLE_MIC_GAIN
         prompt "Microphone gain"
-        depends on EXAMPLE_AUDIO_MODE_ECHO
+        depends on EXAMPLE_AUDIO_MODE_ECHO || EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
         default MIC_GAIN_18DB
 
         config MIC_GAIN_0DB

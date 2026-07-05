@@ -151,6 +151,8 @@ static void display_lvgl_port_task(void *arg)
 {
     (void)arg;
     ESP_LOGI(TAG, "Starting LVGL task");
+    ESP_LOGI(TAG, "LVGL task stack high water mark: %u bytes",
+             (unsigned int)uxTaskGetStackHighWaterMark(NULL));
 
     while (1) {
         uint32_t time_till_next_ms;
