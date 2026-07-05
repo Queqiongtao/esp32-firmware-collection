@@ -11,6 +11,7 @@
 #include "test_sdcard.h"
 #include "test_rtc.h"
 #include "test_audio.h"
+#include "test_battery.h"
 #include "test_usb.h"
 
 extern void example_lvgl_demo_ui(lv_display_t *disp);
@@ -54,6 +55,16 @@ void app_main(void)
         test_audio_run();
     } else {
         ESP_LOGE(TAG, "Audio test module init failed: %s", esp_err_to_name(audio_ret));
+    }
+#endif
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_BATTERY
+    ESP_LOGI(TAG, "Initialize battery monitor test module");
+    esp_err_t battery_ret = test_battery_init();
+    if (battery_ret == ESP_OK) {
+        test_battery_run();
+    } else {
+        ESP_LOGE(TAG, "Battery test module init failed: %s", esp_err_to_name(battery_ret));
     }
 #endif
 

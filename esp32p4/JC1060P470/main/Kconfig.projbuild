@@ -67,6 +67,14 @@ menu "Example Configuration"
             recorded audio. The codec shares the touch I2C bus. GPIO20 is used
             for the power amplifier enable.
 
+    config EXAMPLE_ENABLE_TEST_BATTERY
+        bool "Enable battery voltage monitor test module"
+        default y
+        help
+            Enable this option to initialize ADC2 channel 3 on GPIO52, sample
+            the BAT divider midpoint (68K/100K), and expose battery voltage and
+            percent state to the integrated LVGL demo.
+
     config EXAMPLE_VOICE_VOLUME
         int "Audio output volume"
         range 0 100

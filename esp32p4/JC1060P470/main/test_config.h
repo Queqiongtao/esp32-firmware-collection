@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "esp_adc/adc_oneshot.h"
 #include "driver/gpio.h"
 
 #define TEST_AUDIO_BYTES_PER_SAMPLE             2
@@ -82,15 +83,41 @@
 #define TEST_AUDIO_MIC_GAIN                     3
 #endif
 
+/* ---------------------------- Battery monitor ------------------------------ *
+ * Board wiring:
+ *   BAT -> 68K -> GPIO52(sample point) -> 100K -> GND
+ *
+ * The ADC sees the divider midpoint. Battery voltage is recovered in software
+ * with: Vbat = Vadc * (68K + 100K) / 100K = Vadc * 1.68
+ *
+ * The first-stage percent estimate is only for demo observation. It linearly
+ * maps 3.3V to 0% and 4.2V to 100%; it is not a precision fuel gauge. */
+
+#define TEST_BATTERY_ADC_UNIT                    ADC_UNIT_2
+#define TEST_BATTERY_ADC_CHANNEL                 ADC_CHANNEL_3
+#define TEST_BATTERY_ADC_GPIO                    52
+#define TEST_BATTERY_ADC_ATTEN                   ADC_ATTEN_DB_12
+#define TEST_BATTERY_ADC_BITWIDTH                ADC_BITWIDTH_DEFAULT
+#define TEST_BATTERY_ADC_RAW_FULL_SCALE          4095
+#define TEST_BATTERY_ADC_FALLBACK_REF_MV         3300
+
+#define TEST_BATTERY_DIVIDER_R_TOP_OHM           68000
+#define TEST_BATTERY_DIVIDER_R_BOTTOM_OHM        100000
+
+#define TEST_BATTERY_SAMPLE_COUNT                16
+#define TEST_BATTERY_UPDATE_PERIOD_MS            1000
+#define TEST_BATTERY_EMPTY_MV                    3300
+#define TEST_BATTERY_FULL_MV                     4200
+
 /* ---------------------------- USB Device CDC-ACM --------------------------- *
  * Board wiring (JC1060P470, FIB type, two USB Type-C ports):
  *   The current board exposes two dedicated USB Device ports:
- *   - Full-Speed USB Device: GPIO49(DM)/GPIO50(DP)
- *   - High-Speed USB Device: GPIO52(DM)/GPIO53(DP)
+ *   - Full-Speed USB Device: routed to dedicated USB package pins 49/50 (DM/DP)
+ *   - High-Speed USB Device: GPIO24/25, routed to package pins 52/53
  *   The CDC-ACM demo uses the High-Speed USB Device port. esp_tinyusb's
  *   TINYUSB_DEFAULT_CONFIG() selects the ESP32-P4 high-speed device controller
  *   automatically, and tinyusb_driver_install() configures the PHY and spawns
- *   the TinyUSB backend task.
+ *   the TinyUSB backend task. No application GPIO assignment is required. 
  *
  * NOTE: The USB Device CDC demo port and the USB Serial/JTAG download/log port
  *   may both enumerate as serial devices on the host side, but they serve

@@ -9,6 +9,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                             "test_rtc.c"
                             "test_audio.c"
                             "test_usb.c"
+                            "test_battery.c"
                        INCLUDE_DIRS "."
                        REQUIRES lvgl
                        PRIV_REQUIRES esp_driver_gpio
@@ -16,6 +17,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_driver_i2c
                                      esp_driver_i2s
                                      esp_driver_sdmmc
+                                     esp_adc
                                      esp_hw_support
                                      esp_timer
                                      esp_lcd

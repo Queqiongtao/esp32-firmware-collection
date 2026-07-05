@@ -12,7 +12,7 @@
 
 > 引脚参数在源码中集中定义：显示/触摸见 `main/display_config.h`，外设测试见 `main/test_config.h`。源文件不出现裸 GPIO 号。
 
-> 当前板上有两个独立的 USB Device 口：`Full-Speed USB Device` 连接 `GPIO49/50`，`High-Speed USB Device` 连接 `GPIO52/53`。本文档中的 USB 描述均以该实物板连接为准，不再把板上接口直接命名为 `OTG` 口。
+> 当前板上有两个独立的 USB Device 口：`Full-Speed USB Device` 连接专用 USB 封装脚 `49/50`；`High-Speed USB Device` 的信号 GPIO 为 `GPIO24/25`，对应芯片封装脚 `52/53`。本文档以下统一区分“GPIO 编号”和“封装物理脚号”，避免把 `GPIO52/53` 误写成 HS USB GPIO。
 
 ---
 
@@ -72,8 +72,9 @@
 
 - **显示与触摸卡片**：显示链路使用 JD9165 MIPI DSI 屏幕；触摸输入来自 GT911（`GPIO21/22` + `GPIO7/8` I2C）。
 - **RTC 卡片**：数据来自板载 `RX8025T-UC` RTC（复用 `GPIO7/8` I2C）。
-- **USB Device 卡片**：当前 `CDC-ACM` echo demo 使用板上的 `High-Speed USB Device` 口（`GPIO52/53`）。
+- **USB Device 卡片**：当前 `CDC-ACM` echo demo 使用板上的 `High-Speed USB Device` 口（信号 GPIO `GPIO24/25`，封装脚 `52/53`）。
 - **音频卡片**：播放/录音链路使用 ES8311 + 板载模拟 MIC + 扬声器功放，对应 I2S 引脚为 `GPIO9/10/11/12/13`，功放使能为 `GPIO20`。
+- **电量卡片**：`GPIO52` 接在 BAT 分压点，分压关系为 `BAT -> 68K -> GPIO52 -> 100K -> GND`，软件通过 ADC2 通道读取分压点并换算为电池电压与估算百分比。
 
 该映射仅说明“当前页面上的功能块对应哪类硬件资源”，不替代具体 UI 文案或布局说明；页面结构和交互以 `main/lvgl_demo_ui.c` 为准。
 
@@ -101,12 +102,23 @@
 
 | 接口 | 板级连接 | 说明 |
 |------|----------|------|
-| Full-Speed USB Device | `GPIO49 (DM)` / `GPIO50 (DP)` | 板上独立的 Full-Speed USB Device 口。可用于芯片 USB Device 相关功能，但当前工程的 TinyUSB CDC-ACM demo 不使用这个口。 |
-| High-Speed USB Device | `GPIO52 (DM)` / `GPIO53 (DP)` | 板上独立的 High-Speed USB Device 口。当前工程的 TinyUSB CDC-ACM echo demo 默认使用这个口，主机侧会枚举为虚拟串口。 |
+| Full-Speed USB Device | 封装脚 `49 (DM)` / `50 (DP)` | 板上独立的 Full-Speed USB Device 口。可用于芯片 USB Device 相关功能，但当前工程的 TinyUSB CDC-ACM demo 不使用这个口。 |
+| High-Speed USB Device | 信号 GPIO `GPIO24/25`，对应封装脚 `52/53` | 板上独立的 High-Speed USB Device 口。当前工程的 TinyUSB CDC-ACM echo demo 默认使用这个口，主机侧会枚举为虚拟串口。 |
 
 - 当前 `USB Device CDC-ACM` echo 测试请连接 `High-Speed USB Device` 口。
 - `USB Serial/JTAG` 下载/日志口和 `USB Device CDC-ACM` 在主机侧都可能表现为串口设备，但二者功能不同；前者用于烧录/日志，后者是应用层 CDC 数据口。
 - 芯片底层控制器/PHY 能力仍由 ESP32-P4 USB 子系统决定，但本工程板级文档只按当前实物接口角色记录为 `USB Device` 口。
+
+### 3.3 电池分压采样
+
+| GPIO | 信号 | 说明 |
+|------|------|------|
+| 52 | BAT_SENSE | 连接在 `68K` 与 `100K` 分压电阻中点，作为电池电压 ADC 采样输入 |
+
+- 分压关系：`BAT -> 68K -> GPIO52(sample point) -> 100K -> GND`
+- ADC 资源：`ADC_UNIT_2` / `ADC_CHANNEL_3`
+- 软件换算：`Vbat = Vadc * (68K + 100K) / 100K = Vadc * 1.68`
+- 当前页面第 5 张“电量”卡片显示 ADC 电压、电池电压与线性估算百分比，仅用于 demo 功能验证，不等价于精准电量计
 
 ---
 
@@ -182,12 +194,12 @@
 | 46 | — | Probe IO | 未用 |
 | 47 | — | Probe IO | 未用 |
 | 48 | — | Probe IO | 未用 |
-| 49 | Full-Speed USB Device DM | — | 板级专用 |
-| 50 | Full-Speed USB Device DP | — | 板级专用 |
-| 52 | High-Speed USB Device DM | — | 板级专用 |
-| 53 | High-Speed USB Device DP | — | 板级专用 |
+| 49 | Full-Speed USB Device DM（封装脚） | — | 板级专用 |
+| 50 | Full-Speed USB Device DP（封装脚） | — | 板级专用 |
+| 52 | BAT 分压采样输入 | HS USB 封装脚 52 | 已用 / 与封装脚号概念易混淆 |
+| 53 | — | HS USB 封装脚 53 | 未用 / 与封装脚号概念易混淆 |
 
-> 未列出的 GPIO（0-5, 24-25, 26, 28-31, 34-38, 51, 54）在当前板级文档中未定义用途，默认空闲。
+> 未列出的 GPIO 中，`GPIO24/25` 为当前板 High-Speed USB Device 信号 GPIO；其余 `0-5, 26, 28-31, 34-38, 51, 54` 在当前板级文档中未定义用途，默认空闲。
 
 ---
 

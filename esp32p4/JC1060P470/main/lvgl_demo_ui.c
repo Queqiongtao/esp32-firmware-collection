@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "lvgl_demo_font_patch.h"
 #include "test_audio.h"
+#include "test_battery.h"
 #include "test_rtc.h"
 #include "test_usb.h"
 
@@ -46,6 +47,12 @@ static lv_obj_t *s_audio_input_label;
 static lv_obj_t *s_audio_music_btn;
 static lv_obj_t *s_audio_record_btn;
 static lv_obj_t *s_audio_play_btn;
+
+static lv_obj_t *s_battery_status_label;
+static lv_obj_t *s_battery_adc_label;
+static lv_obj_t *s_battery_voltage_label;
+static lv_obj_t *s_battery_percent_label;
+static lv_obj_t *s_battery_hint_label;
 
 static demo_touch_state_t s_touch_state;
 
@@ -283,6 +290,48 @@ static void demo_update_audio_card(void)
     }
 }
 
+static void demo_update_battery_card(void)
+{
+    if (s_battery_status_label == NULL) {
+        return;
+    }
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_BATTERY
+    esp_err_t ret = test_battery_run();
+    const test_battery_status_t *status = test_battery_get_status();
+    if (ret != ESP_OK || status == NULL || !status->initialized) {
+        lv_label_set_text(s_battery_status_label, "状态: 未初始化");
+        lv_label_set_text(s_battery_adc_label, "ADC值: --");
+        lv_label_set_text(s_battery_voltage_label, "BAT值: --");
+        lv_label_set_text(s_battery_percent_label, "BAT%: --");
+        lv_label_set_text(s_battery_hint_label, "GPIO52 BAT 点");
+        return;
+    }
+
+    if (!status->sample_valid) {
+        lv_label_set_text_fmt(s_battery_status_label, "状态: 错误(0x%x)", (unsigned int)status->last_error);
+        lv_label_set_text(s_battery_adc_label, "ADC值: --");
+        lv_label_set_text(s_battery_voltage_label, "BAT值: --");
+        lv_label_set_text(s_battery_percent_label, "BAT%: --");
+    } else {
+        lv_label_set_text_fmt(s_battery_status_label, "状态: %s", status->calibration_enabled ? "运行中(CAL)" : "运行中(RAW)");
+        lv_label_set_text_fmt(s_battery_adc_label, "ADC值: %d.%03d V",
+                              status->adc_voltage_mv / 1000, status->adc_voltage_mv % 1000);
+        lv_label_set_text_fmt(s_battery_voltage_label, "BAT值: %d.%03d V",
+                              status->battery_voltage_mv / 1000, status->battery_voltage_mv % 1000);
+        lv_label_set_text_fmt(s_battery_percent_label, "BAT%%: %d%%", status->battery_percent);
+    }
+
+    lv_label_set_text_fmt(s_battery_hint_label, "次数: %" PRIu32, status->sample_count);
+#else
+    lv_label_set_text(s_battery_status_label, "状态: 未开");
+    lv_label_set_text(s_battery_adc_label, "ADC值: --");
+    lv_label_set_text(s_battery_voltage_label, "BAT值: --");
+    lv_label_set_text(s_battery_percent_label, "BAT%: --");
+    lv_label_set_text(s_battery_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_BATTERY");
+#endif
+}
+
 static void demo_ui_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -290,6 +339,7 @@ static void demo_ui_timer_cb(lv_timer_t *timer)
     demo_update_rtc_card();
     demo_update_usb_card();
     demo_update_audio_card();
+    demo_update_battery_card();
 }
 
 void example_lvgl_demo_ui(lv_display_t *disp)
@@ -330,7 +380,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_style_text_font(title, demo_get_ui_font(), 0);
 
     lv_obj_t *subtitle = lv_label_create(header);
-    lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频播放录音回放");
+    lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频 + BAT");
 
     lv_obj_t *row = lv_obj_create(screen);
     lv_obj_set_width(row, lv_pct(100));
@@ -417,9 +467,18 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_label_set_text(play_label, "播放录音");
     lv_obj_center(play_label);
 
+    lv_obj_t *battery_card = demo_create_card(row, "5. BAT", 488, 230);
+    s_battery_status_label = lv_label_create(battery_card);
+    s_battery_adc_label = lv_label_create(battery_card);
+    s_battery_voltage_label = lv_label_create(battery_card);
+    s_battery_percent_label = lv_label_create(battery_card);
+    s_battery_hint_label = lv_label_create(battery_card);
+    lv_obj_set_style_text_color(s_battery_hint_label, lv_color_hex(0x5E4C38), 0);
+
     demo_update_touch_card();
     demo_update_rtc_card();
     demo_update_usb_card();
     demo_update_audio_card();
+    demo_update_battery_card();
     lv_timer_create(demo_ui_timer_cb, 250, NULL);
 }
