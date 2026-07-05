@@ -1,186 +1,145 @@
 /*
- * SPDX-FileCopyrightText: 2023-2024 Espressif Systems (Shanghai) CO LTD
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
  *
  * SPDX-License-Identifier: CC0-1.0
  */
 
 #include "lvgl.h"
-#include "esp_log.h"
-#include "test_audio.h"
 
-static lv_style_t style_bullet;
-static lv_obj_t *scale1;
-static lv_obj_t *label_revenue;
-static lv_obj_t *label_sales;
-static lv_obj_t *label_costs;
-static lv_obj_t *s_audio_record_btn;
-static lv_obj_t *s_audio_play_btn;
+#include <inttypes.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include "esp_err.h"
+#include "esp_log.h"
+#include "lvgl_demo_font_patch.h"
+#include "test_audio.h"
+#include "test_rtc.h"
+#include "test_usb.h"
+
+static const char *TAG = "demo_ui";
+
+typedef struct {
+    uint32_t touch_count;
+    uint32_t last_touch_ms;
+    lv_point_t last_point;
+    bool touch_active;
+} demo_touch_state_t;
+
+static lv_obj_t *s_touch_status_label;
+static lv_obj_t *s_touch_count_label;
+static lv_obj_t *s_touch_point_label;
+static lv_obj_t *s_touch_hint_label;
+
+static lv_obj_t *s_rtc_status_label;
+static lv_obj_t *s_rtc_time_label;
+static lv_obj_t *s_rtc_sync_label;
+
+static lv_obj_t *s_usb_status_label;
+static lv_obj_t *s_usb_line_label;
+static lv_obj_t *s_usb_stats_label;
+static lv_obj_t *s_usb_hint_label;
+
 static lv_obj_t *s_audio_status_label;
 static lv_obj_t *s_audio_size_label;
 static lv_obj_t *s_audio_peak_label;
 static lv_obj_t *s_audio_input_label;
-static lv_obj_t *s_audio_record_label;
-static lv_obj_t *s_audio_play_label;
-static test_audio_state_t s_audio_last_state = TEST_AUDIO_STATE_UNINITIALIZED;
-static size_t s_audio_last_record_size = SIZE_MAX;
-static uint16_t s_audio_last_record_peak = UINT16_MAX;
-static size_t s_audio_last_nonzero_samples = SIZE_MAX;
-static esp_err_t s_audio_last_error = ESP_OK;
-static const lv_font_t *font_normal = &lv_font_montserrat_16;
+static lv_obj_t *s_audio_music_btn;
+static lv_obj_t *s_audio_record_btn;
+static lv_obj_t *s_audio_play_btn;
 
-static lv_obj_t *create_scale_box(lv_obj_t *parent, const char *text1, const char *text2, const char *text3)
+static demo_touch_state_t s_touch_state;
+
+static const lv_font_t *demo_get_ui_font(void)
 {
-    lv_obj_t *scale = lv_scale_create(parent);
-    lv_obj_center(scale);
-    lv_obj_set_size(scale, 600, 600);
-    lv_scale_set_mode(scale, LV_SCALE_MODE_ROUND_OUTER);
-    lv_scale_set_label_show(scale, false);
-    lv_scale_set_post_draw(scale, true);
-    lv_obj_set_width(scale, LV_PCT(100));
-    lv_obj_set_style_pad_all(scale, 30, 0);
-
-    lv_obj_t *bullet1 = lv_obj_create(parent);
-    lv_obj_set_size(bullet1, 13, 13);
-    lv_obj_remove_style(bullet1, NULL, LV_PART_SCROLLBAR);
-    lv_obj_add_style(bullet1, &style_bullet, 0);
-    lv_obj_set_style_bg_color(bullet1, lv_palette_main(LV_PALETTE_RED), 0);
-    label_revenue = lv_label_create(parent);
-    lv_label_set_text(label_revenue, text1);
-
-    lv_obj_t *bullet2 = lv_obj_create(parent);
-    lv_obj_set_size(bullet2, 13, 13);
-    lv_obj_remove_style(bullet2, NULL, LV_PART_SCROLLBAR);
-    lv_obj_add_style(bullet2, &style_bullet, 0);
-    lv_obj_set_style_bg_color(bullet2, lv_palette_main(LV_PALETTE_BLUE), 0);
-    label_sales = lv_label_create(parent);
-    lv_label_set_text(label_sales, text2);
-
-    lv_obj_t *bullet3 = lv_obj_create(parent);
-    lv_obj_set_size(bullet3, 13, 13);
-    lv_obj_remove_style(bullet3,  NULL, LV_PART_SCROLLBAR);
-    lv_obj_add_style(bullet3, &style_bullet, 0);
-    lv_obj_set_style_bg_color(bullet3, lv_palette_main(LV_PALETTE_GREEN), 0);
-    label_costs = lv_label_create(parent);
-    lv_label_set_text(label_costs, text3);
-
-    static int32_t grid_col_dsc[] = {LV_GRID_CONTENT, LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
-    static int32_t grid_row_dsc[] = {LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_CONTENT, LV_GRID_TEMPLATE_LAST};
-    lv_obj_set_grid_dsc_array(parent, grid_col_dsc, grid_row_dsc);
-    lv_obj_set_grid_cell(scale, LV_GRID_ALIGN_START, 0, 2, LV_GRID_ALIGN_START, 1, 1);
-    lv_obj_set_grid_cell(bullet1, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 2, 1);
-    lv_obj_set_grid_cell(bullet2, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 3, 1);
-    lv_obj_set_grid_cell(bullet3, LV_GRID_ALIGN_START, 0, 1, LV_GRID_ALIGN_START, 4, 1);
-    lv_obj_set_grid_cell(label_revenue, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 2, 1);
-    lv_obj_set_grid_cell(label_sales, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 3, 1);
-    lv_obj_set_grid_cell(label_costs, LV_GRID_ALIGN_STRETCH, 1, 1, LV_GRID_ALIGN_START, 4, 1);
-    return scale;
+    return &lvgl_demo_font_patch_16;
 }
 
-static void scale1_indic1_anim_cb(void *var, int32_t v)
+static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_t width, lv_coord_t height)
 {
-    lv_arc_set_value(var, v);
-    lv_label_set_text_fmt(label_revenue, "Revenue: %"LV_PRId32" %%", v);
-}
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_size(card, width, height);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x1E3A5F), 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0xF8F2E7), 0);
+    lv_obj_set_style_pad_all(card, 16, 0);
+    lv_obj_set_style_pad_row(card, 10, 0);
+    lv_obj_set_layout(card, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
-static void scale1_indic2_anim_cb(void *var, int32_t v)
-{
-    lv_arc_set_value(var, v);
-    lv_label_set_text_fmt(label_sales, "Sales: %"LV_PRId32" %%", v);
-}
-
-static void scale1_indic3_anim_cb(void *var, int32_t v)
-{
-    lv_arc_set_value(var, v);
-    lv_label_set_text_fmt(label_costs, "Costs: %"LV_PRId32" %%", v);
+    lv_obj_t *title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_style_text_font(title_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0x132238), 0);
+    return card;
 }
 
 static const char *audio_state_to_text(test_audio_state_t state)
 {
     switch (state) {
     case TEST_AUDIO_STATE_UNINITIALIZED:
-        return "Audio: uninitialized";
+        return "未初始化";
     case TEST_AUDIO_STATE_IDLE:
-        return "Audio: idle";
+        return "空闲";
     case TEST_AUDIO_STATE_RECORDING:
-        return "Audio: recording";
+        return "录音中";
     case TEST_AUDIO_STATE_RECORDED:
-        return "Audio: recorded";
+        return "已录音";
     case TEST_AUDIO_STATE_PLAYING:
-        return "Audio: playing";
+        return "播放录音中";
+    case TEST_AUDIO_STATE_MUSIC_PLAYING:
+        return "播放内置音乐中";
     case TEST_AUDIO_STATE_ERROR:
-        return "Audio: error";
+        return "错误";
     default:
-        return "Audio: unknown";
+        return "未知";
     }
 }
 
 static const char *audio_input_level_text(uint16_t peak, size_t nonzero_samples)
 {
     if (peak == 0 || nonzero_samples == 0) {
-        return "Input: silent";
+        return "静音";
     }
     if (peak < 256) {
-        return "Input: weak";
+        return "弱";
     }
-    return "Input: active";
+    return "活跃";
 }
 
-static void audio_ui_update(void)
+static void demo_touch_area_event_cb(lv_event_t *e)
 {
-    test_audio_state_t state = test_audio_get_state();
-    size_t record_size = test_audio_get_last_record_size();
-    uint16_t record_peak = test_audio_get_last_record_peak();
-    size_t nonzero_samples = test_audio_get_last_record_nonzero_count();
-    esp_err_t last_error = test_audio_get_last_error();
-    bool can_record = false;
-    bool can_play = false;
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *target = lv_event_get_target_obj(e);
+    lv_indev_t *indev = lv_event_get_indev(e);
 
-    if (!s_audio_status_label || !s_audio_size_label || !s_audio_peak_label || !s_audio_input_label ||
-        !s_audio_record_btn || !s_audio_play_btn) {
+    if (indev == NULL) {
         return;
     }
 
-    can_record = (state == TEST_AUDIO_STATE_IDLE || state == TEST_AUDIO_STATE_RECORDED || state == TEST_AUDIO_STATE_ERROR);
-    can_play = (state == TEST_AUDIO_STATE_RECORDED && record_size > 0);
+    lv_indev_get_point(indev, &s_touch_state.last_point);
 
-    if (state == s_audio_last_state && record_size == s_audio_last_record_size &&
-        record_peak == s_audio_last_record_peak && nonzero_samples == s_audio_last_nonzero_samples &&
-        last_error == s_audio_last_error) {
-        return;
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING) {
+        s_touch_state.touch_active = true;
+        lv_obj_set_style_bg_color(target, lv_color_hex(0xF4B942), 0);
+    } else if (code == LV_EVENT_RELEASED) {
+        s_touch_state.touch_active = false;
+        lv_obj_set_style_bg_color(target, lv_color_hex(0x8EC5A4), 0);
+    } else if (code == LV_EVENT_CLICKED) {
+        s_touch_state.touch_count++;
+        s_touch_state.last_touch_ms = lv_tick_get();
+        lv_obj_set_style_bg_color(target, lv_color_hex(0xD97A3A), 0);
     }
-
-    if (state == TEST_AUDIO_STATE_ERROR) {
-        lv_label_set_text_fmt(s_audio_status_label, "Audio: error (0x%x)", (unsigned int)last_error);
-    } else {
-        lv_label_set_text(s_audio_status_label, audio_state_to_text(state));
-    }
-    lv_label_set_text_fmt(s_audio_size_label, "Recorded: %u bytes", (unsigned int)record_size);
-    lv_label_set_text_fmt(s_audio_peak_label, "Peak: %u", (unsigned int)record_peak);
-    lv_label_set_text(s_audio_input_label, audio_input_level_text(record_peak, nonzero_samples));
-
-    if (can_record) {
-        lv_obj_clear_state(s_audio_record_btn, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(s_audio_record_btn, LV_STATE_DISABLED);
-    }
-
-    if (can_play) {
-        lv_obj_clear_state(s_audio_play_btn, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(s_audio_play_btn, LV_STATE_DISABLED);
-    }
-
-    s_audio_last_state = state;
-    s_audio_last_record_size = record_size;
-    s_audio_last_record_peak = record_peak;
-    s_audio_last_nonzero_samples = nonzero_samples;
-    s_audio_last_error = last_error;
 }
 
-static void audio_ui_timer_cb(lv_timer_t *timer)
+static void audio_music_btn_cb(lv_event_t *e)
 {
-    (void)timer;
-    audio_ui_update();
+    (void)e;
+    esp_err_t ret = test_audio_start_music();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "start music failed: %s", esp_err_to_name(ret));
+    }
 }
 
 static void audio_record_btn_cb(lv_event_t *e)
@@ -188,9 +147,8 @@ static void audio_record_btn_cb(lv_event_t *e)
     (void)e;
     esp_err_t ret = test_audio_start_record();
     if (ret != ESP_OK) {
-        ESP_LOGE("AUDIO_UI", "start record failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "start record failed: %s", esp_err_to_name(ret));
     }
-    audio_ui_update();
 }
 
 static void audio_play_btn_cb(lv_event_t *e)
@@ -198,116 +156,270 @@ static void audio_play_btn_cb(lv_event_t *e)
     (void)e;
     esp_err_t ret = test_audio_start_playback();
     if (ret != ESP_OK) {
-        ESP_LOGE("AUDIO_UI", "start playback failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "start playback failed: %s", esp_err_to_name(ret));
     }
-    audio_ui_update();
+}
+
+static void demo_update_touch_card(void)
+{
+    if (s_touch_status_label == NULL) {
+        return;
+    }
+
+    lv_label_set_text_fmt(s_touch_status_label, "状态: %s", s_touch_state.touch_active ? "按下中" : "待触摸");
+    lv_label_set_text_fmt(s_touch_count_label, "点击次数: %" PRIu32, s_touch_state.touch_count);
+    lv_label_set_text_fmt(s_touch_point_label, "最近坐标: (%" PRId32 ", %" PRId32 ")",
+                          s_touch_state.last_point.x, s_touch_state.last_point.y);
+
+    if (s_touch_state.last_touch_ms == 0) {
+        lv_label_set_text(s_touch_hint_label, "在下方触摸区点击，验证显示与触摸联动");
+    } else {
+        lv_label_set_text_fmt(s_touch_hint_label, "最近点击: %" PRIu32 " ms", s_touch_state.last_touch_ms);
+    }
+}
+
+static void demo_update_rtc_card(void)
+{
+    if (s_rtc_status_label == NULL) {
+        return;
+    }
+
+    test_rtc_status_t status = {0};
+    esp_err_t ret = test_rtc_get_status(&status);
+    if (ret != ESP_OK || !status.initialized) {
+        lv_label_set_text(s_rtc_status_label, "状态: 未初始化");
+        lv_label_set_text(s_rtc_time_label, "时间: --");
+        lv_label_set_text(s_rtc_sync_label, "同步: --");
+        return;
+    }
+
+    if (status.time_valid) {
+        lv_label_set_text(s_rtc_status_label, "状态: 运行中");
+        lv_label_set_text_fmt(s_rtc_time_label, "时间: %04u-%02u-%02u %02u:%02u:%02u",
+                              status.year, status.month, status.mday,
+                              status.hour, status.min, status.sec);
+    } else {
+        lv_label_set_text_fmt(s_rtc_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+        lv_label_set_text(s_rtc_time_label, "时间: 无有效值");
+    }
+
+    lv_label_set_text_fmt(s_rtc_sync_label, "同步: %s",
+                          status.synced_from_build_time ? "曾从固件构建时间写入" : "保持 RTC 原值");
+}
+
+static void demo_update_usb_card(void)
+{
+    if (s_usb_status_label == NULL) {
+        return;
+    }
+
+    test_usb_status_t status = {0};
+    esp_err_t ret = test_usb_get_status(&status);
+    if (ret != ESP_OK || !status.initialized) {
+        lv_label_set_text(s_usb_status_label, "状态: 未初始化");
+        lv_label_set_text(s_usb_line_label, "线路: --");
+        lv_label_set_text(s_usb_stats_label, "收发: --");
+        return;
+    }
+
+    if (status.last_error != ESP_OK) {
+        lv_label_set_text_fmt(s_usb_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+    } else {
+        lv_label_set_text_fmt(s_usb_status_label, "状态: %s", status.attached ? "已连接主机" : "等待枚举");
+    }
+
+    lv_label_set_text_fmt(s_usb_line_label, "DTR=%d RTS=%d 最近收包=%uB 最近发包=%uB",
+                          status.dtr, status.rts,
+                          (unsigned int)status.last_rx_size, (unsigned int)status.last_tx_size);
+    lv_label_set_text_fmt(s_usb_stats_label, "RX %" PRIu32 " 包/%" PRIu32 " B  TX %" PRIu32 " 包/%" PRIu32 " B",
+                          status.rx_packets, status.rx_bytes, status.tx_packets, status.tx_bytes);
+    lv_label_set_text(s_usb_hint_label, "连接 HS USB Device 口，用串口工具发送数据验证 CDC 回显");
+}
+
+static void demo_update_audio_card(void)
+{
+    if (s_audio_status_label == NULL) {
+        return;
+    }
+
+    test_audio_status_t status = {0};
+    esp_err_t ret = test_audio_get_status(&status);
+    if (ret != ESP_OK || !status.initialized) {
+        lv_label_set_text(s_audio_status_label, "状态: 未初始化");
+        lv_label_set_text(s_audio_size_label, "录音数据: --");
+        lv_label_set_text(s_audio_peak_label, "峰值: --");
+        lv_label_set_text(s_audio_input_label, "输入电平: --");
+        return;
+    }
+
+    if (status.state == TEST_AUDIO_STATE_ERROR) {
+        lv_label_set_text_fmt(s_audio_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+    } else {
+        lv_label_set_text_fmt(s_audio_status_label, "状态: %s", audio_state_to_text(status.state));
+    }
+
+    lv_label_set_text_fmt(s_audio_size_label, "录音数据: %u B", (unsigned int)status.last_record_size);
+    lv_label_set_text_fmt(s_audio_peak_label, "峰值: %u", (unsigned int)status.last_record_peak);
+    lv_label_set_text_fmt(s_audio_input_label, "输入电平: %s", audio_input_level_text(status.last_record_peak,
+                                                                                      status.last_record_nonzero_count));
+
+    bool can_start_new = (status.state == TEST_AUDIO_STATE_IDLE ||
+                          status.state == TEST_AUDIO_STATE_RECORDED ||
+                          status.state == TEST_AUDIO_STATE_ERROR);
+    bool can_play_record = (status.state == TEST_AUDIO_STATE_RECORDED && status.last_record_size > 0);
+
+    if (can_start_new) {
+        lv_obj_clear_state(s_audio_music_btn, LV_STATE_DISABLED);
+        lv_obj_clear_state(s_audio_record_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_audio_music_btn, LV_STATE_DISABLED);
+        lv_obj_add_state(s_audio_record_btn, LV_STATE_DISABLED);
+    }
+
+    if (can_play_record) {
+        lv_obj_clear_state(s_audio_play_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_audio_play_btn, LV_STATE_DISABLED);
+    }
+}
+
+static void demo_ui_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    demo_update_touch_card();
+    demo_update_rtc_card();
+    demo_update_usb_card();
+    demo_update_audio_card();
 }
 
 void example_lvgl_demo_ui(lv_display_t *disp)
 {
-    // init default theme
-    lv_theme_default_init(disp, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_RED), LV_THEME_DEFAULT_DARK,
-                          font_normal);
-    // bullet style
-    lv_style_init(&style_bullet);
-    lv_style_set_border_width(&style_bullet, 0);
-    lv_style_set_radius(&style_bullet, LV_RADIUS_CIRCLE);
+    lv_theme_default_init(disp,
+                          lv_color_hex(0x1F5C8A),
+                          lv_color_hex(0xD97A3A),
+                          false,
+                          demo_get_ui_font());
 
-    lv_obj_t *parent = lv_display_get_screen_active(disp);
+    lv_obj_t *screen = lv_display_get_screen_active(disp);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xE6D8C2), 0);
+    lv_obj_set_style_bg_grad_color(screen, lv_color_hex(0xF6EFE4), 0);
+    lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_VER, 0);
+    lv_obj_set_style_pad_all(screen, 18, 0);
+    lv_obj_set_style_pad_row(screen, 16, 0);
+    lv_obj_set_layout(screen, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(screen, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_text_font(screen, demo_get_ui_font(), 0);
 
-    // create scale widget
-    scale1 = create_scale_box(parent, "Revenue", "Sales", "Costs");
+    lv_obj_t *header = lv_obj_create(screen);
+    lv_obj_set_width(header, lv_pct(100));
+    lv_obj_set_height(header, LV_SIZE_CONTENT);
+    lv_obj_set_style_radius(header, 20, 0);
+    lv_obj_set_style_bg_color(header, lv_color_hex(0x17324D), 0);
+    lv_obj_set_style_text_color(header, lv_color_hex(0xFFF8ED), 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 16, 0);
+    lv_obj_set_style_pad_row(header, 8, 0);
+    lv_obj_set_layout(header, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_COLUMN);
+    lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
 
-    // create arc indicators
-    lv_obj_t *arc;
-    arc = lv_arc_create(scale1);
-    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
-    lv_obj_remove_style(arc, NULL, LV_PART_MAIN);
-    lv_obj_set_size(arc, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_arc_opa(arc, 0, 0);
-    lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, lv_palette_main(LV_PALETTE_BLUE), LV_PART_INDICATOR);
-    lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *title = lv_label_create(header);
+    lv_label_set_text(title, "JC1060P470 综合验证 Demo");
+    lv_obj_set_style_text_font(title, demo_get_ui_font(), 0);
 
-    // animation
-    lv_anim_t a;
-    lv_anim_init(&a);
-    lv_anim_set_values(&a, 20, 100);
-    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
-    lv_anim_set_exec_cb(&a, scale1_indic1_anim_cb);
-    lv_anim_set_var(&a, arc);
-    lv_anim_set_duration(&a, 4100);
-    lv_anim_set_playback_duration(&a, 2700);
-    lv_anim_start(&a);
+    lv_obj_t *subtitle = lv_label_create(header);
+    lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频播放录音回放");
 
-    arc = lv_arc_create(scale1);
-    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
-    lv_obj_set_size(arc, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_margin_all(arc, 20, 0);
-    lv_obj_set_style_arc_opa(arc, 0, 0);
-    lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, lv_palette_main(LV_PALETTE_RED), LV_PART_INDICATOR);
-    lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(arc);
+    lv_obj_t *row = lv_obj_create(screen);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 16, 0);
+    lv_obj_set_style_pad_row(row, 16, 0);
+    lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_anim_set_exec_cb(&a, scale1_indic2_anim_cb);
-    lv_anim_set_var(&a, arc);
-    lv_anim_set_duration(&a, 2600);
-    lv_anim_set_playback_duration(&a, 3200);
-    lv_anim_start(&a);
+    lv_obj_t *touch_card = demo_create_card(row, "1. 显示与触摸", 488, 304);
+    s_touch_status_label = lv_label_create(touch_card);
+    s_touch_count_label = lv_label_create(touch_card);
+    s_touch_point_label = lv_label_create(touch_card);
+    s_touch_hint_label = lv_label_create(touch_card);
 
-    arc = lv_arc_create(scale1);
-    lv_obj_remove_style(arc, NULL, LV_PART_KNOB);
-    lv_obj_set_size(arc, lv_pct(100), lv_pct(100));
-    lv_obj_set_style_margin_all(arc, 40, 0);
-    lv_obj_set_style_arc_opa(arc, 0, 0);
-    lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, lv_palette_main(LV_PALETTE_GREEN), LV_PART_INDICATOR);
-    lv_obj_remove_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_center(arc);
+    lv_obj_t *touch_pad = lv_obj_create(touch_card);
+    lv_obj_set_size(touch_pad, lv_pct(100), 110);
+    lv_obj_set_style_radius(touch_pad, 14, 0);
+    lv_obj_set_style_bg_color(touch_pad, lv_color_hex(0x8EC5A4), 0);
+    lv_obj_set_style_border_width(touch_pad, 2, 0);
+    lv_obj_set_style_border_color(touch_pad, lv_color_hex(0x3E6B55), 0);
+    lv_obj_clear_flag(touch_pad, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(touch_pad, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(touch_pad, demo_touch_area_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(touch_pad, demo_touch_area_event_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(touch_pad, demo_touch_area_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(touch_pad, demo_touch_area_event_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_anim_set_exec_cb(&a, scale1_indic3_anim_cb);
-    lv_anim_set_var(&a, arc);
-    lv_anim_set_duration(&a, 2800);
-    lv_anim_set_playback_duration(&a, 1800);
-    lv_anim_start(&a);
+    lv_obj_t *touch_pad_label = lv_label_create(touch_pad);
+    lv_label_set_text(touch_pad_label, "触摸这里");
+    lv_obj_center(touch_pad_label);
 
-    lv_obj_t *audio_panel = lv_obj_create(parent);
-    lv_obj_set_size(audio_panel, 420, 210);
-    lv_obj_align(audio_panel, LV_ALIGN_BOTTOM_MID, 0, -24);
-    lv_obj_set_style_pad_all(audio_panel, 16, 0);
-    lv_obj_set_style_radius(audio_panel, 8, 0);
+    lv_obj_t *rtc_card = demo_create_card(row, "2. RTC", 488, 230);
+    s_rtc_status_label = lv_label_create(rtc_card);
+    s_rtc_time_label = lv_label_create(rtc_card);
+    s_rtc_sync_label = lv_label_create(rtc_card);
 
-    s_audio_status_label = lv_label_create(audio_panel);
-    lv_obj_align(s_audio_status_label, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_t *usb_card = demo_create_card(row, "3. USB Device", 488, 230);
+    s_usb_status_label = lv_label_create(usb_card);
+    s_usb_line_label = lv_label_create(usb_card);
+    s_usb_stats_label = lv_label_create(usb_card);
+    s_usb_hint_label = lv_label_create(usb_card);
+    lv_obj_set_style_text_color(s_usb_hint_label, lv_color_hex(0x5E4C38), 0);
 
-    s_audio_size_label = lv_label_create(audio_panel);
-    lv_obj_align(s_audio_size_label, LV_ALIGN_TOP_LEFT, 0, 28);
+    lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 230);
+    s_audio_status_label = lv_label_create(audio_card);
+    s_audio_size_label = lv_label_create(audio_card);
+    s_audio_peak_label = lv_label_create(audio_card);
+    s_audio_input_label = lv_label_create(audio_card);
 
-    s_audio_peak_label = lv_label_create(audio_panel);
-    lv_obj_align(s_audio_peak_label, LV_ALIGN_TOP_LEFT, 0, 56);
+    lv_obj_t *audio_btn_row = lv_obj_create(audio_card);
+    lv_obj_set_width(audio_btn_row, lv_pct(100));
+    lv_obj_set_height(audio_btn_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(audio_btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(audio_btn_row, 0, 0);
+    lv_obj_set_style_pad_all(audio_btn_row, 0, 0);
+    lv_obj_set_style_pad_column(audio_btn_row, 10, 0);
+    lv_obj_set_layout(audio_btn_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(audio_btn_row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_clear_flag(audio_btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_audio_input_label = lv_label_create(audio_panel);
-    lv_obj_align(s_audio_input_label, LV_ALIGN_TOP_LEFT, 0, 84);
+    s_audio_music_btn = lv_button_create(audio_btn_row);
+    lv_obj_set_size(s_audio_music_btn, 135, 46);
+    lv_obj_add_event_cb(s_audio_music_btn, audio_music_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *music_label = lv_label_create(s_audio_music_btn);
+    lv_label_set_text(music_label, "播放内置音乐");
+    lv_obj_center(music_label);
 
-    s_audio_record_btn = lv_button_create(audio_panel);
-    lv_obj_set_size(s_audio_record_btn, 170, 52);
-    lv_obj_align(s_audio_record_btn, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    s_audio_record_btn = lv_button_create(audio_btn_row);
+    lv_obj_set_size(s_audio_record_btn, 110, 46);
     lv_obj_add_event_cb(s_audio_record_btn, audio_record_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *record_label = lv_label_create(s_audio_record_btn);
+    lv_label_set_text(record_label, "开始录音");
+    lv_obj_center(record_label);
 
-    s_audio_record_label = lv_label_create(s_audio_record_btn);
-    lv_label_set_text(s_audio_record_label, "Start Record");
-    lv_obj_center(s_audio_record_label);
-
-    s_audio_play_btn = lv_button_create(audio_panel);
-    lv_obj_set_size(s_audio_play_btn, 170, 52);
-    lv_obj_align(s_audio_play_btn, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    s_audio_play_btn = lv_button_create(audio_btn_row);
+    lv_obj_set_size(s_audio_play_btn, 110, 46);
     lv_obj_add_event_cb(s_audio_play_btn, audio_play_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *play_label = lv_label_create(s_audio_play_btn);
+    lv_label_set_text(play_label, "播放录音");
+    lv_obj_center(play_label);
 
-    s_audio_play_label = lv_label_create(s_audio_play_btn);
-    lv_label_set_text(s_audio_play_label, "Play Recording");
-    lv_obj_center(s_audio_play_label);
-
-    audio_ui_update();
-    lv_timer_create(audio_ui_timer_cb, 500, NULL);
+    demo_update_touch_card();
+    demo_update_rtc_card();
+    demo_update_usb_card();
+    demo_update_audio_card();
+    lv_timer_create(demo_ui_timer_cb, 250, NULL);
 }

@@ -34,6 +34,16 @@ static QueueHandle_t s_event_queue;
 static TaskHandle_t s_worker_task_handle;
 static bool s_initialized;
 static bool s_stopping;
+static bool s_attached;
+static bool s_dtr;
+static bool s_rts;
+static uint32_t s_rx_packets;
+static uint32_t s_tx_packets;
+static uint32_t s_rx_bytes;
+static uint32_t s_tx_bytes;
+static size_t s_last_rx_size;
+static size_t s_last_tx_size;
+static esp_err_t s_last_error = ESP_OK;
 
 static void usb_device_event_callback(tinyusb_event_t *event, void *arg)
 {
@@ -41,9 +51,11 @@ static void usb_device_event_callback(tinyusb_event_t *event, void *arg)
 
     switch (event->id) {
     case TINYUSB_EVENT_ATTACHED:
+        s_attached = true;
         ESP_LOGI(TAG, "USB device attached on rhport %" PRIu8, event->rhport);
         break;
     case TINYUSB_EVENT_DETACHED:
+        s_attached = false;
         ESP_LOGI(TAG, "USB device detached on rhport %" PRIu8, event->rhport);
         break;
     default:
@@ -54,6 +66,8 @@ static void usb_device_event_callback(tinyusb_event_t *event, void *arg)
 
 static void usb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
 {
+    s_dtr = event->line_state_changed_data.dtr;
+    s_rts = event->line_state_changed_data.rts;
     ESP_LOGI(TAG, "CDC port %d line state changed: DTR=%d RTS=%d",
              itf,
              event->line_state_changed_data.dtr,
@@ -86,6 +100,7 @@ static void usb_echo_rx_data(tinyusb_cdcacm_itf_t cdc_port)
     do {
         esp_err_t ret = tinyusb_cdcacm_read(cdc_port, rx_buf, sizeof(rx_buf), &rx_size);
         if (ret != ESP_OK) {
+            s_last_error = ret;
             ESP_LOGE(TAG, "CDC read failed on port %d: %s", cdc_port, esp_err_to_name(ret));
             return;
         }
@@ -96,6 +111,9 @@ static void usb_echo_rx_data(tinyusb_cdcacm_itf_t cdc_port)
 
         ESP_LOGI(TAG, "CDC RX %u bytes on port %d", (unsigned int)rx_size, cdc_port);
         ESP_LOG_BUFFER_HEXDUMP(TAG, rx_buf, rx_size, ESP_LOG_INFO);
+        s_rx_packets++;
+        s_rx_bytes += (uint32_t)rx_size;
+        s_last_rx_size = rx_size;
 
         size_t queued = tinyusb_cdcacm_write_queue(cdc_port, rx_buf, rx_size);
         if (queued != rx_size) {
@@ -105,9 +123,14 @@ static void usb_echo_rx_data(tinyusb_cdcacm_itf_t cdc_port)
 
         ret = tinyusb_cdcacm_write_flush(cdc_port, TEST_USB_CDC_TX_FLUSH_TIMEOUT_TICKS);
         if (ret != ESP_OK && ret != ESP_ERR_NOT_FINISHED) {
+            s_last_error = ret;
             ESP_LOGE(TAG, "CDC write flush failed on port %d: %s", cdc_port, esp_err_to_name(ret));
             return;
         }
+        s_tx_packets++;
+        s_tx_bytes += (uint32_t)queued;
+        s_last_tx_size = queued;
+        s_last_error = ESP_OK;
     } while (rx_size == sizeof(rx_buf));
 }
 
@@ -183,6 +206,16 @@ esp_err_t test_usb_init(void)
                       err_deinit_cdc, TAG, "register line state callback failed");
 
     s_initialized = true;
+    s_attached = false;
+    s_dtr = false;
+    s_rts = false;
+    s_rx_packets = 0;
+    s_tx_packets = 0;
+    s_rx_bytes = 0;
+    s_tx_bytes = 0;
+    s_last_rx_size = 0;
+    s_last_tx_size = 0;
+    s_last_error = ESP_OK;
     ESP_LOGI(TAG, "USB CDC-ACM initialized on High-Speed USB Device port, waiting for host enumeration");
     return ESP_OK;
 
@@ -199,6 +232,26 @@ esp_err_t test_usb_run(void)
 {
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG,
                         "USB not initialized, call test_usb_init first");
+    return ESP_OK;
+}
+
+esp_err_t test_usb_get_status(test_usb_status_t *out_status)
+{
+    ESP_RETURN_ON_FALSE(out_status != NULL, ESP_ERR_INVALID_ARG, TAG, "out_status is NULL");
+
+    *out_status = (test_usb_status_t) {
+        .initialized = s_initialized,
+        .attached = s_attached,
+        .dtr = s_dtr,
+        .rts = s_rts,
+        .rx_packets = s_rx_packets,
+        .tx_packets = s_tx_packets,
+        .rx_bytes = s_rx_bytes,
+        .tx_bytes = s_tx_bytes,
+        .last_rx_size = s_last_rx_size,
+        .last_tx_size = s_last_tx_size,
+        .last_error = s_last_error,
+    };
     return ESP_OK;
 }
 
@@ -233,6 +286,16 @@ esp_err_t test_usb_deinit(void)
     usb_cleanup_app_resources();
     s_initialized = false;
     s_stopping = false;
+    s_attached = false;
+    s_dtr = false;
+    s_rts = false;
+    s_rx_packets = 0;
+    s_tx_packets = 0;
+    s_rx_bytes = 0;
+    s_tx_bytes = 0;
+    s_last_rx_size = 0;
+    s_last_tx_size = 0;
+    s_last_error = ESP_OK;
     ESP_LOGI(TAG, "USB Device CDC-ACM deinitialized");
     return ESP_OK;
 }

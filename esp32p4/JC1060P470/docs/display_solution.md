@@ -4,6 +4,8 @@
 
 本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。LVGL 9.4.0 作为 UI 框架，采用 **DIRECT 渲染模式 + 双 framebuffer ping-pong + flush 回调中整 fb cache write back** 的方案，在无撕裂、无残影的前提下保持可接受的帧率。
 
+当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是一个面向板级联调的 **综合验证 Demo**。应用入口 `app_main()` 先完成 `board -> panel -> LVGL` 初始化，再按 Kconfig 选项初始化 `RTC / Audio / USB / SD` 等测试模块，最后加载 `example_lvgl_demo_ui()` 页面。
+
 ## 显示链路参数
 
 集中定义于 `main/display_config.h`：
@@ -21,6 +23,35 @@
 | H/V 时序 | HSW=40 HBP=160 HFP=160 / VSW=10 VBP=23 VFP=12 | H_total=1384, V_total=645 |
 
 刷新率注释中 "54MHz" 描述的是 expect 值；real DPI 时钟由 240MHz 整分频为 60MHz，IDF 通过 bridge HFP 补偿把每行多塞 154 个 DPI 周期来对齐刷新率到 expect 值。
+
+## 当前综合 Demo UI
+
+当前页面由 `main/lvgl_demo_ui.c` 构建，统一使用自定义中文字体，并以纵向滚动页面承载多个验证卡片。
+
+### 页面结构
+
+- **页面根容器**：`screen` 使用 `LV_LAYOUT_FLEX + LV_FLEX_FLOW_COLUMN`，开启 `LV_DIR_VER` 纵向滚动，适配单屏无法一次容纳全部内容的场景。
+- **标题区**：`header` 使用纵向 flex 布局，包含两行文案：
+  - `JC1060P470 综合验证 Demo`
+  - `显示/触摸 + RTC + USB Device CDC + 音频播放录音回放`
+- **功能卡片区**：`row` 使用 `ROW_WRAP` 布局，当前包含 4 张卡片：
+  - `1. 显示与触摸`
+  - `2. RTC`
+  - `3. USB Device`
+  - `4. 音频`
+
+### 当前交互与布局状态
+
+- **显示与触摸卡片**：展示触摸状态、点击次数、最近坐标和提示文案，并提供一个独立触摸区用于验证 GT911 输入与 LVGL 刷新联动。
+- **RTC 卡片**：周期展示初始化状态、当前时间和同步来源。
+- **USB Device 卡片**：展示 CDC-ACM 枚举状态、DTR/RTS、最近收发包和累计统计。
+- **音频卡片**：展示音频状态、录音数据量、峰值和输入电平，并提供“播放内置音乐 / 开始录音 / 播放录音”三个操作按钮。
+
+最近几轮 UI 结构修复如下：
+
+- 页面已开启纵向滚动，解决“向下滑动不了”的问题。
+- 标题区 `header` 已改为纵向 flex 布局，避免标题与副标题重叠。
+- 第一张“显示与触摸”卡片高度已从 `230` 调整为 `304`，用于容纳 4 行状态文案、提示文案和 `110` 高触摸区，避免“触摸这里”超出卡片边界。
 
 ## 渲染架构
 
@@ -107,6 +138,35 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 | 触摸 | `display_touch.c/.h` | I2C master 总线、GT911 触摸初始化、坐标缩放、LVGL indev 注册 |
 
 公共参数集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。
+
+## 中文显示问题处理
+
+当前综合 Demo 的中文显示不再依赖 `LV_FONT_DEFAULT` fallback，而是使用 `main/lvgl_demo_font_patch.c` 提供的一份 **完整 demo 静态字库**。
+
+### 问题背景
+
+- 工程已启用 `CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y` 与 `CONFIG_LV_FONT_DEFAULT_SOURCE_HAN_SANS_SC_16_CJK=y`。
+- 但当前综合 Demo 页面使用的实际汉字集合超过了内建 `Source Han Sans SC 16 CJK` 的覆盖范围，直接使用默认字体会出现缺字或乱码。
+- 早期尝试过“补丁字库 + fallback”方案，但在标题、副标题等混排场景下表现不稳定，出现过只显示部分字的现象。
+
+### 当前方案
+
+- 已启用 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`，允许较大的静态 `lv_font_fmt_txt` 数据表。
+- `main/lvgl_demo_font_patch.c` 现在承载的是 **完整 demo 字符集**，覆盖：
+  - 当前页面实际使用的中文
+  - 对应 ASCII、数字和常用标点
+- `main/lvgl_demo_ui.c` 通过 `demo_get_ui_font()` 统一返回该字体，页面主题和关键控件使用同一字体路径，不再依赖运行时 fallback 混排中文。
+
+### 已处理的显示问题
+
+- **中文缺字/乱码**：通过完整静态字库替代 fallback 方案处理。
+- **中文只显示上半部分**：修正静态字库的垂直度量 `ofs_y` 计算，避免字形整体下压。
+- **标题首行异常**：经排查主要由标题区两行 label 重叠引起，现已通过 `header` 纵向 flex 布局修复。
+
+### 当前验证边界
+
+- 上述字体与 UI 修复已经完成 **编译验证**。
+- 本文档不把最近几轮字体/UI 调整表述为“全部上板验证通过”；若无额外说明，应理解为“问题已定位并完成静态修改，需以上板结果做最终确认”。
 
 ## 后续优化方向
 

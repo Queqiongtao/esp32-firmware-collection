@@ -62,21 +62,10 @@ menu "Example Configuration"
         default n
         help
             Enable this option to initialize the I2S peripheral and ES8311 codec,
-            then run an audio test at boot. The codec shares the touch I2C bus.
-            GPIO20 is used for the power amplifier enable.
-
-    choice EXAMPLE_AUDIO_MODE
-        prompt "Audio test mode"
-        depends on EXAMPLE_ENABLE_TEST_AUDIO
-        default EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
-
-        config EXAMPLE_AUDIO_MODE_MUSIC
-            bool "music (play canon.pcm in loop)"
-        config EXAMPLE_AUDIO_MODE_ECHO
-            bool "echo (microphone to speaker)"
-        config EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
-            bool "record/playback (record to memory then replay)"
-    endchoice
+            start the audio backend task, and expose three UI-triggered actions:
+            play embedded canon.pcm, record audio into memory, and replay the
+            recorded audio. The codec shares the touch I2C bus. GPIO20 is used
+            for the power amplifier enable.
 
     config EXAMPLE_VOICE_VOLUME
         int "Audio output volume"
@@ -88,7 +77,7 @@ menu "Example Configuration"
 
     choice EXAMPLE_MIC_GAIN
         prompt "Microphone gain"
-        depends on EXAMPLE_AUDIO_MODE_ECHO || EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
+        depends on EXAMPLE_ENABLE_TEST_AUDIO
         default MIC_GAIN_18DB
 
         config MIC_GAIN_0DB

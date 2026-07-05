@@ -6,6 +6,9 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include "esp_err.h"
 
 typedef enum {
@@ -14,8 +17,19 @@ typedef enum {
     TEST_AUDIO_STATE_RECORDING,
     TEST_AUDIO_STATE_RECORDED,
     TEST_AUDIO_STATE_PLAYING,
+    TEST_AUDIO_STATE_MUSIC_PLAYING,
     TEST_AUDIO_STATE_ERROR,
 } test_audio_state_t;
+
+typedef struct {
+    bool initialized;
+    bool running;
+    test_audio_state_t state;
+    size_t last_record_size;
+    uint16_t last_record_peak;
+    size_t last_record_nonzero_count;
+    esp_err_t last_error;
+} test_audio_status_t;
 
 /**
  * @brief Initialize I2S peripheral, ES8311 codec (via shared I2C bus), and
@@ -26,10 +40,9 @@ typedef enum {
 esp_err_t test_audio_init(void);
 
 /**
- * @brief Start the audio test backend. In music mode, a worker task plays the
- *        embedded canon.pcm in a loop. In echo mode, a worker task reads from
- *        microphone and writes to speaker. In record/playback mode, the module
- *        enters idle state and waits for UI-triggered actions.
+ * @brief Start the audio backend task. The worker stays idle until the UI
+ *        triggers one of the supported actions: play embedded canon.pcm,
+ *        record audio into memory, or replay the last recording.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
@@ -50,11 +63,26 @@ esp_err_t test_audio_start_record(void);
 esp_err_t test_audio_start_playback(void);
 
 /**
+ * @brief Start playback of the embedded canon.pcm music asset.
+ *
+ * @return ESP_OK on success, otherwise an error code describing the failure.
+ */
+esp_err_t test_audio_start_music(void);
+
+/**
  * @brief Get current audio test state.
  *
  * @return Current state of the audio module.
  */
 test_audio_state_t test_audio_get_state(void);
+
+/**
+ * @brief Get a snapshot of the audio module state.
+ *
+ * @param out_status  Output status buffer.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL.
+ */
+esp_err_t test_audio_get_status(test_audio_status_t *out_status);
 
 /**
  * @brief Get byte count of the last successful recording.

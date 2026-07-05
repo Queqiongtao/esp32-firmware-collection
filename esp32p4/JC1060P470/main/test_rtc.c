@@ -35,6 +35,9 @@ static const char *TAG = "test_rtc";
 static i2c_master_dev_handle_t s_rtc_dev = NULL;
 static TaskHandle_t s_rtc_task_handle = NULL;
 static bool s_initialized = false;
+static bool s_time_valid = false;
+static bool s_synced_from_build_time = false;
+static esp_err_t s_last_error = ESP_OK;
 
 typedef struct {
     uint8_t sec;
@@ -45,6 +48,8 @@ typedef struct {
     uint8_t month;
     uint16_t year;
 } rtc_time_t;
+
+static rtc_time_t s_last_time = {0};
 
 static uint8_t rtc_bcd_to_dec(uint8_t val)
 {
@@ -206,6 +211,14 @@ static void rtc_log_time(const char *prefix, const rtc_time_t *time)
              time->year, time->month, time->mday, time->hour, time->min, time->sec, time->wday_mask);
 }
 
+static void rtc_store_time(const rtc_time_t *time, bool valid)
+{
+    if (time != NULL) {
+        s_last_time = *time;
+    }
+    s_time_valid = valid;
+}
+
 static esp_err_t rtc_read_time_and_status(uint8_t *time_regs, uint8_t *status_regs)
 {
     ESP_RETURN_ON_ERROR(rtc_read_regs(RX8025_REG_SEC, time_regs, RX8025_TIME_REG_COUNT),
@@ -227,6 +240,7 @@ static esp_err_t rtc_read_and_log_time(const char *prefix)
     ESP_RETURN_ON_ERROR(rtc_read_regs(RX8025_REG_SEC, time_regs, RX8025_TIME_REG_COUNT),
                         TAG, "read RTC time registers failed");
     ESP_RETURN_ON_ERROR(rtc_decode_time(time_regs, &rtc_time), TAG, "decode RTC time failed");
+    rtc_store_time(&rtc_time, true);
     rtc_log_time(prefix, &rtc_time);
     return ESP_OK;
 }
@@ -244,7 +258,11 @@ static void rtc_periodic_task(void *arg)
 
         esp_err_t ret = rtc_read_and_log_time("");
         if (ret != ESP_OK) {
+            s_last_error = ret;
+            s_time_valid = false;
             ESP_LOGE(TAG, "periodic RTC read failed: %s", esp_err_to_name(ret));
+        } else {
+            s_last_error = ESP_OK;
         }
     }
 }
@@ -294,6 +312,7 @@ esp_err_t test_rtc_init(void)
                         TAG, "add RTC I2C device failed");
 
     s_initialized = true;
+    s_last_error = ESP_OK;
     ESP_LOGI(TAG, "%s initialized on shared I2C port %d address 0x%02X",
              TEST_RTC_CHIP_NAME, i2c_port, TEST_RTC_I2C_ADDR);
     return ESP_OK;
@@ -307,11 +326,18 @@ esp_err_t test_rtc_run(void)
     uint8_t time_regs[RX8025_TIME_REG_COUNT] = {0};
     uint8_t status_regs[RX8025_STATUS_REG_COUNT] = {0};
 
-    ESP_RETURN_ON_ERROR(rtc_read_time_and_status(time_regs, status_regs), TAG, "read RTC failed");
+    esp_err_t ret = rtc_read_time_and_status(time_regs, status_regs);
+    if (ret != ESP_OK) {
+        s_last_error = ret;
+        return ret;
+    }
 
     rtc_time_t rtc_time = {0};
-    esp_err_t ret = rtc_decode_time(time_regs, &rtc_time);
+    ret = rtc_decode_time(time_regs, &rtc_time);
     if (ret == ESP_OK) {
+        rtc_store_time(&rtc_time, true);
+        s_synced_from_build_time = false;
+        s_last_error = ESP_OK;
         rtc_log_time("", &rtc_time);
         return rtc_start_periodic_task();
     }
@@ -324,8 +350,31 @@ esp_err_t test_rtc_run(void)
 
     ESP_RETURN_ON_ERROR(rtc_read_time_and_status(time_regs, status_regs), TAG, "read RTC after sync failed");
     ESP_RETURN_ON_ERROR(rtc_decode_time(time_regs, &rtc_time), TAG, "RTC time still invalid after sync");
+    rtc_store_time(&rtc_time, true);
+    s_synced_from_build_time = true;
+    s_last_error = ESP_OK;
     rtc_log_time("synced ", &rtc_time);
     return rtc_start_periodic_task();
+}
+
+esp_err_t test_rtc_get_status(test_rtc_status_t *out_status)
+{
+    ESP_RETURN_ON_FALSE(out_status != NULL, ESP_ERR_INVALID_ARG, TAG, "out_status is NULL");
+
+    *out_status = (test_rtc_status_t) {
+        .initialized = s_initialized,
+        .time_valid = s_time_valid,
+        .synced_from_build_time = s_synced_from_build_time,
+        .last_error = s_last_error,
+        .year = s_last_time.year,
+        .month = s_last_time.month,
+        .mday = s_last_time.mday,
+        .hour = s_last_time.hour,
+        .min = s_last_time.min,
+        .sec = s_last_time.sec,
+        .wday_mask = s_last_time.wday_mask,
+    };
+    return ESP_OK;
 }
 
 esp_err_t test_rtc_deinit(void)
@@ -342,6 +391,10 @@ esp_err_t test_rtc_deinit(void)
     }
 
     s_initialized = false;
+    s_time_valid = false;
+    s_synced_from_build_time = false;
+    s_last_error = ESP_OK;
+    s_last_time = (rtc_time_t) {0};
     ESP_LOGI(TAG, "%s deinitialized", TEST_RTC_CHIP_NAME);
     return ESP_OK;
 }

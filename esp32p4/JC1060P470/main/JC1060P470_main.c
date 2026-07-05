@@ -27,11 +27,6 @@ void app_main(void)
     ESP_ERROR_CHECK(display_board_set_backlight(100));
     ESP_ERROR_CHECK(display_lvgl_init(&panel, &lvgl_port));
 
-    ESP_LOGI(TAG, "Display LVGL demo UI");
-    display_lvgl_lock();
-    example_lvgl_demo_ui(lvgl_port.display);
-    display_lvgl_unlock();
-
 #if CONFIG_EXAMPLE_ENABLE_TEST_SDCARD
     ESP_LOGI(TAG, "Initialize SD card test module");
     esp_err_t sd_ret = test_sdcard_init();
@@ -71,4 +66,9 @@ void app_main(void)
         ESP_LOGE(TAG, "USB test module init failed: %s", esp_err_to_name(usb_ret));
     }
 #endif
+
+    ESP_LOGI(TAG, "Display LVGL integrated demo UI");
+    display_lvgl_lock();
+    example_lvgl_demo_ui(lvgl_port.display);
+    display_lvgl_unlock();
 }

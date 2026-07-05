@@ -76,12 +76,10 @@
 #else
 #define TEST_AUDIO_VOICE_VOLUME                 60
 #endif
-#if CONFIG_EXAMPLE_AUDIO_MODE_ECHO || CONFIG_EXAMPLE_AUDIO_MODE_RECORD_PLAYBACK
 #ifdef CONFIG_EXAMPLE_MIC_GAIN
 #define TEST_AUDIO_MIC_GAIN                     CONFIG_EXAMPLE_MIC_GAIN
 #else
 #define TEST_AUDIO_MIC_GAIN                     3
-#endif
 #endif
 
 /* ---------------------------- USB Device CDC-ACM --------------------------- *

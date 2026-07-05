@@ -29,13 +29,12 @@ static const char *TAG = "test_audio";
 #define TEST_AUDIO_ES8311_ADC_REG17            0x17
 #define TEST_AUDIO_ES8311_GPIO_REG44           0x44
 
-#if CONFIG_EXAMPLE_AUDIO_MODE_MUSIC
 extern const uint8_t canon_pcm_start[] asm("_binary_canon_pcm_start");
 extern const uint8_t canon_pcm_end[]   asm("_binary_canon_pcm_end");
-#endif
 
 typedef enum {
     TEST_AUDIO_ACTION_NONE = 0,
+    TEST_AUDIO_ACTION_MUSIC,
     TEST_AUDIO_ACTION_RECORD,
     TEST_AUDIO_ACTION_PLAYBACK,
 } test_audio_action_t;
@@ -136,6 +135,11 @@ static void test_audio_latch_error(esp_err_t err)
     test_audio_set_state(TEST_AUDIO_STATE_ERROR);
 }
 
+static test_audio_state_t test_audio_get_idle_state_after_action(void)
+{
+    return s_record_size > 0 ? TEST_AUDIO_STATE_RECORDED : TEST_AUDIO_STATE_IDLE;
+}
+
 static esp_err_t test_audio_i2s_driver_init(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(TEST_AUDIO_I2S_NUM, I2S_ROLE_MASTER);
@@ -227,9 +231,7 @@ static esp_err_t test_audio_codec_init(void)
     };
     ESP_RETURN_ON_ERROR(esp_codec_dev_open(s_codec_dev, &sample_cfg), TAG, "open codec device failed");
     ESP_RETURN_ON_ERROR(esp_codec_dev_set_out_vol(s_codec_dev, TEST_AUDIO_VOICE_VOLUME), TAG, "set output volume failed");
-#if !CONFIG_EXAMPLE_AUDIO_MODE_MUSIC
     ESP_RETURN_ON_ERROR(esp_codec_dev_set_in_gain(s_codec_dev, TEST_AUDIO_MIC_GAIN), TAG, "set input gain failed");
-#endif
     test_audio_dump_input_regs("codec_init");
     return ESP_OK;
 }
@@ -332,92 +334,62 @@ static esp_err_t test_audio_playback_once(void)
     return ESP_OK;
 }
 
-#if CONFIG_EXAMPLE_AUDIO_MODE_MUSIC
-static esp_err_t test_audio_play_music(void)
+static esp_err_t test_audio_play_music_once(void)
 {
-    ESP_LOGI(TAG, "Playing canon.pcm (%d bytes) in loop", (int)(canon_pcm_end - canon_pcm_start));
+    const uint8_t *music_data = canon_pcm_start;
+    size_t remaining = (size_t)(canon_pcm_end - canon_pcm_start);
 
-    uint8_t *data_ptr = (uint8_t *)canon_pcm_start;
-    size_t bytes_write = 0;
+    test_audio_set_state(TEST_AUDIO_STATE_MUSIC_PLAYING);
+    s_last_error = ESP_OK;
+    ESP_LOGI(TAG, "Start music playback: %d bytes", (int)remaining);
 
-    ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx_handle), TAG, "disable tx failed");
-    ESP_RETURN_ON_ERROR(i2s_channel_preload_data(s_tx_handle, data_ptr,
-                         canon_pcm_end - data_ptr, &bytes_write), TAG, "preload data failed");
-    data_ptr += bytes_write;
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx_handle), TAG, "enable tx failed");
-
-    while (!s_stopping) {
-        esp_err_t ret = i2s_channel_write(s_tx_handle, data_ptr,
-                                          canon_pcm_end - data_ptr, &bytes_write, pdMS_TO_TICKS(1000));
-        if (ret != ESP_OK) {
-            if (s_stopping && ret == ESP_ERR_TIMEOUT) {
-                break;
-            }
-            ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        if (bytes_write > 0) {
-            ESP_LOGI(TAG, "i2s music played, %d bytes written", (int)bytes_write);
-        }
-        data_ptr = (uint8_t *)canon_pcm_start;
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-    return ESP_OK;
-}
-#elif CONFIG_EXAMPLE_AUDIO_MODE_ECHO
-static esp_err_t test_audio_echo(void)
-{
-    ESP_LOGI(TAG, "Echo mode: microphone -> speaker");
-
-    uint8_t *mic_data = malloc(TEST_AUDIO_RECV_BUF_SIZE);
-    ESP_RETURN_ON_FALSE(mic_data, ESP_ERR_NO_MEM, TAG, "no memory for read buffer");
-
-    while (!s_stopping) {
-        size_t bytes_read = 0;
+    while (!s_stopping && remaining > 0) {
         size_t bytes_write = 0;
-        memset(mic_data, 0, TEST_AUDIO_RECV_BUF_SIZE);
-        esp_err_t ret = i2s_channel_read(s_rx_handle, mic_data,
-                                         TEST_AUDIO_RECV_BUF_SIZE, &bytes_read, pdMS_TO_TICKS(1000));
+        size_t bytes_to_write = remaining;
+        if (bytes_to_write > TEST_AUDIO_RECV_BUF_SIZE) {
+            bytes_to_write = TEST_AUDIO_RECV_BUF_SIZE;
+        }
+
+        esp_err_t ret = i2s_channel_write(s_tx_handle, music_data,
+                                          bytes_to_write, &bytes_write, pdMS_TO_TICKS(1000));
         if (ret != ESP_OK) {
             if (s_stopping && ret == ESP_ERR_TIMEOUT) {
                 break;
             }
-            ESP_LOGE(TAG, "i2s read failed: %s", esp_err_to_name(ret));
-            free(mic_data);
+            ESP_LOGE(TAG, "i2s write failed during music playback: %s", esp_err_to_name(ret));
+            test_audio_latch_error(ret);
             return ret;
         }
-        if (bytes_read == 0) {
+        if (bytes_write == 0) {
             continue;
         }
-        ret = i2s_channel_write(s_tx_handle, mic_data,
-                                bytes_read, &bytes_write, pdMS_TO_TICKS(1000));
-        if (ret != ESP_OK) {
-            if (s_stopping && ret == ESP_ERR_TIMEOUT) {
-                break;
-            }
-            ESP_LOGE(TAG, "i2s write failed: %s", esp_err_to_name(ret));
-            free(mic_data);
-            return ret;
-        }
-        if (bytes_read != bytes_write) {
-            ESP_LOGW(TAG, "%d bytes read but only %d bytes written", (int)bytes_read, (int)bytes_write);
-        }
+        music_data += bytes_write;
+        remaining -= bytes_write;
     }
-    free(mic_data);
+
+    if (s_stopping) {
+        return ESP_OK;
+    }
+
+    test_audio_set_state(test_audio_get_idle_state_after_action());
+    ESP_LOGI(TAG, "Music playback finished");
     return ESP_OK;
 }
-#else
-static esp_err_t test_audio_record_playback_service(void)
+
+static esp_err_t test_audio_service(void)
 {
     test_audio_set_state(TEST_AUDIO_STATE_IDLE);
     s_last_error = ESP_OK;
-    ESP_LOGI(TAG, "Record/playback mode ready");
+    ESP_LOGI(TAG, "Audio action service ready");
 
     while (!s_stopping) {
         test_audio_action_t action = test_audio_take_pending_action();
         esp_err_t ret = ESP_OK;
 
         switch (action) {
+        case TEST_AUDIO_ACTION_MUSIC:
+            ret = test_audio_play_music_once();
+            break;
         case TEST_AUDIO_ACTION_RECORD:
             ret = test_audio_record_once();
             break;
@@ -434,16 +406,18 @@ static esp_err_t test_audio_record_playback_service(void)
             return ret;
         }
 
-        if (!s_stopping && test_audio_get_state() == TEST_AUDIO_STATE_RECORDING) {
-            test_audio_set_state(TEST_AUDIO_STATE_IDLE);
-        } else if (!s_stopping && test_audio_get_state() == TEST_AUDIO_STATE_PLAYING) {
-            test_audio_set_state(TEST_AUDIO_STATE_RECORDED);
+        if (!s_stopping) {
+            test_audio_state_t state = test_audio_get_state();
+            if (state == TEST_AUDIO_STATE_RECORDING ||
+                state == TEST_AUDIO_STATE_PLAYING ||
+                state == TEST_AUDIO_STATE_MUSIC_PLAYING) {
+                test_audio_set_state(test_audio_get_idle_state_after_action());
+            }
         }
     }
 
     return ESP_OK;
 }
-#endif
 
 static esp_err_t test_audio_worker_run(void)
 {
@@ -452,13 +426,7 @@ static esp_err_t test_audio_worker_run(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-#if CONFIG_EXAMPLE_AUDIO_MODE_MUSIC
-    return test_audio_play_music();
-#elif CONFIG_EXAMPLE_AUDIO_MODE_ECHO
-    return test_audio_echo();
-#else
-    return test_audio_record_playback_service();
-#endif
+    return test_audio_service();
 }
 
 static void test_audio_task(void *arg)
@@ -541,10 +509,6 @@ esp_err_t test_audio_run(void)
 
 esp_err_t test_audio_start_record(void)
 {
-#if CONFIG_EXAMPLE_AUDIO_MODE_MUSIC || CONFIG_EXAMPLE_AUDIO_MODE_ECHO
-    ESP_LOGW(TAG, "Record command ignored in current audio mode");
-    return ESP_ERR_NOT_SUPPORTED;
-#else
     if (!s_initialized || !s_running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -556,15 +520,10 @@ esp_err_t test_audio_start_record(void)
     s_last_error = ESP_OK;
     test_audio_set_pending_action(TEST_AUDIO_ACTION_RECORD);
     return ESP_OK;
-#endif
 }
 
 esp_err_t test_audio_start_playback(void)
 {
-#if CONFIG_EXAMPLE_AUDIO_MODE_MUSIC || CONFIG_EXAMPLE_AUDIO_MODE_ECHO
-    ESP_LOGW(TAG, "Playback command ignored in current audio mode");
-    return ESP_ERR_NOT_SUPPORTED;
-#else
     if (!s_initialized || !s_running) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -577,7 +536,21 @@ esp_err_t test_audio_start_playback(void)
     s_last_error = ESP_OK;
     test_audio_set_pending_action(TEST_AUDIO_ACTION_PLAYBACK);
     return ESP_OK;
-#endif
+}
+
+esp_err_t test_audio_start_music(void)
+{
+    if (!s_initialized || !s_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    test_audio_state_t state = test_audio_get_state();
+    ESP_RETURN_ON_FALSE(state == TEST_AUDIO_STATE_IDLE || state == TEST_AUDIO_STATE_RECORDED || state == TEST_AUDIO_STATE_ERROR,
+                        ESP_ERR_INVALID_STATE, TAG, "audio busy, current state=%d", state);
+
+    s_last_error = ESP_OK;
+    test_audio_set_pending_action(TEST_AUDIO_ACTION_MUSIC);
+    return ESP_OK;
 }
 
 test_audio_state_t test_audio_get_state(void)
@@ -588,6 +561,22 @@ test_audio_state_t test_audio_get_state(void)
     state = s_state;
     portEXIT_CRITICAL(&s_audio_lock);
     return state;
+}
+
+esp_err_t test_audio_get_status(test_audio_status_t *out_status)
+{
+    ESP_RETURN_ON_FALSE(out_status != NULL, ESP_ERR_INVALID_ARG, TAG, "out_status is NULL");
+
+    *out_status = (test_audio_status_t) {
+        .initialized = s_initialized,
+        .running = s_running,
+        .state = test_audio_get_state(),
+        .last_record_size = s_record_size,
+        .last_record_peak = s_record_peak,
+        .last_record_nonzero_count = s_record_nonzero_samples,
+        .last_error = s_last_error,
+    };
+    return ESP_OK;
 }
 
 size_t test_audio_get_last_record_size(void)
