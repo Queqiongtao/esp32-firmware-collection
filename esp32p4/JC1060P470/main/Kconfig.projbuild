@@ -1,4 +1,11 @@
 menu "Example Configuration"
+    config EXAMPLE_FONT_FILE_NAME
+        string "External UI font file name"
+        default "NotoSansSC-Regular.ttf"
+        help
+            Subset TTF font stored in the dedicated font SPIFFS partition and
+            loaded through LVGL Tiny TTF backend.
+
     config EXAMPLE_USE_DMA2D_COPY_FRAME
         bool "Use DMA2D to copy draw buffer to frame buffer"
         default y

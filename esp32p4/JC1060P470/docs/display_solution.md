@@ -148,7 +148,35 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 ## 中文显示问题处理
 
-当前综合 Demo 的中文显示不再依赖 `LV_FONT_DEFAULT` fallback，而是使用 `main/lvgl_demo_font_patch.c` 提供的一份 **按当前页面文案裁剪的静态字库**。
+## 字体分区与 Tiny TTF 方案
+
+当前工程使用独立字体分区承载运行时子集 `TTF`，优先解决 WiFi 动态中文 SSID 缺字问题，并保留后续扩充字符集和字号的空间。
+
+### 当前方案
+
+- `partitions.csv` 新增 `font` SPIFFS 分区，当前大小 `2M`
+- `assets/fonts/NotoSansSC-Regular.ttf` 是正式运行时资源，内容为按当前 UI 与常见无线场景裁剪后的子集 `TTF`
+- LVGL 启用 `Tiny TTF + Font Manager + FS_STDIO`
+- `main/display_font.c/.h` 负责：
+  - 挂载字体分区
+  - 检查字体文件存在
+  - 初始化 Tiny TTF / Font Manager
+  - 创建 `16px` UI 字体
+- `main/lvgl_demo_ui.c` 统一通过 `display_font_get_ui_font()` 取字体
+- `assets/fonts/build_subset.py` 负责：
+  - 扫描 `main/*.c`、`main/*.h` 里的 C 字符串字面量
+  - 固定保留全部可打印 ASCII
+  - 合并 `assets/fonts/ui_font_extra_chars.txt` 里的额外字符
+  - 生成 `ui_font_charset.txt` 并调用 `pyftsubset`
+
+### 当前验证边界
+
+- 当前只规划并实现 `16px` 单字号
+- 当前不支持任意字号请求
+- 当前若字体分区未烧录或字体文件缺失，会回退到 `lvgl_demo_font_patch_16`
+- 若无额外说明，应理解为“需经过编译验证和上板验证”，而不是“已长期稳定”
+
+当前综合 Demo 的中文主路径不再依赖 `LV_FONT_DEFAULT` fallback，而是优先走运行时子集 `TTF`；`main/lvgl_demo_font_patch.c` 保留为加载失败时的静态回退字库。
 
 ### 问题背景
 
@@ -158,25 +186,26 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 ### 当前方案
 
-- 已启用 `CONFIG_LV_FONT_FMT_TXT_LARGE=y`，允许较大的静态 `lv_font_fmt_txt` 数据表。
-- `main/lvgl_demo_font_patch.c` 现在承载的是 **当前页面文案对应的字符集**，覆盖：
+- 已启用 `CONFIG_LV_USE_TINY_TTF=y`、`CONFIG_LV_USE_FONT_MANAGER=y` 与 `CONFIG_LV_USE_FS_STDIO=y`
+- 子集 `TTF` 覆盖：
   - 当前页面实际使用的中文
-  - 对应 ASCII、数字和常用标点
-- `main/lvgl_demo_ui.c` 通过 `demo_get_ui_font()` 统一返回该字体，页面主题和关键控件使用同一字体路径，不再依赖运行时 fallback 混排中文。
+  - 全部可打印 ASCII、数字和常用标点
+  - `ui_font_extra_chars.txt` 中额外保留的一小批常见无线相关中文
+- `main/lvgl_demo_ui.c` 通过 `demo_get_ui_font()` 统一返回运行时字体；若加载失败，再回退到 `lvgl_demo_font_patch_16`
 
 ### 已处理的显示问题
 
-- **中文缺字/乱码**：通过完整静态字库替代 fallback 方案处理。
-- **中文只显示上半部分**：修正静态字库的垂直度量 `ofs_y` 计算，避免字形整体下压。
+- **中文缺字/乱码**：主路径改为运行时子集 `TTF`，避免继续维护完整静态字库。
+- **中文只显示上半部分**：历史上已修正静态回退字库的垂直度量 `ofs_y` 计算，避免回退场景下字形整体下压。
 - **标题首行异常**：经排查主要由标题区两行 label 重叠引起，现已通过 `header` 纵向 flex 布局修复。
 
 ### 新增文案的维护约束
 
-- 这份字体补丁不是通用中文字体，而是按 `lvgl_demo_ui.c` 的实际文案裁剪出来的静态字库。
-- 因此，后续新增 UI 中文文案时，若出现乱码，优先判断是否为“新增字符未进入 `lvgl_demo_font_patch.c`”这一类缺字问题。
-- 最近一次“BAT/电量”卡片新增后出现的乱码，根因就属于这一类：新增字符超出了现有补丁字库覆盖范围，而不是显示链路、触摸或 LVGL 布局问题。
-- 若需要继续使用新增中文文案，必须同步重生成字体补丁；若想保持最小改动，也可以像当前版本一样把新增文案收敛到现有已覆盖字符和 ASCII。
-- 最近新增的无线卡片采用了同样的维护原则：标题继续走现有补丁字库，按钮和部分状态词尽量使用 `WiFi/BLE/Scan/Join/host NA` 这类 ASCII 文案。当前卡片中 WiFi 按钮已接到真实 hosted WiFi 路径，BLE 卡片仍保持“待接入”状态，避免在 BLE 尚未接入时制造“可用”假象。
+- 当前正式字库不是完整中文字体，而是按 `main/` 里的实际字符串和额外补集裁剪出的子集 `TTF`。
+- 因此，后续新增 UI 中文文案时，若出现乱码，优先判断是否为“新增字符未进入子集字符集”这一类缺字问题。
+- 若新增的是固定 UI 文案，重新运行 `assets/fonts/build_subset.py` 即可自动纳入。
+- 若新增的是动态文本场景常用字，例如 WiFi SSID / 设备名里的高频中文，应补到 `assets/fonts/ui_font_extra_chars.txt` 后再重生成子集。
+- `lvgl_demo_font_patch_16` 仅作为失败回退保留，不再作为日常增量维护的主路径。
 
 ### 当前验证边界
 

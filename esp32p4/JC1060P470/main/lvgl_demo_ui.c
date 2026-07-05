@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include "display_font.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl_demo_font_patch.h"
@@ -77,7 +78,7 @@ static char s_selected_wifi_ssid[TEST_WIRELESS_SSID_MAX_LEN + 1];
 
 static const lv_font_t *demo_get_ui_font(void)
 {
-    return &lvgl_demo_font_patch_16;
+    return display_font_get_ui_font();
 }
 
 static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_t width, lv_coord_t height)

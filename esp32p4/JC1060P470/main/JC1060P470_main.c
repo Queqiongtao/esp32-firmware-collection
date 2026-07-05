@@ -5,6 +5,7 @@
  */
 
 #include "display_board.h"
+#include "display_font.h"
 #include "display_lvgl.h"
 #include "display_panel.h"
 #include "esp_cpu.h"
@@ -132,6 +133,10 @@ void app_main(void)
     ESP_ERROR_CHECK(display_panel_init(&panel));
     ESP_ERROR_CHECK(display_board_set_backlight(100));
     ESP_ERROR_CHECK(display_lvgl_init(&panel, &lvgl_port));
+    esp_err_t font_ret = display_font_init();
+    if (font_ret != ESP_OK) {
+        ESP_LOGW(TAG, "display font init failed, fallback to built-in patch font: %s", esp_err_to_name(font_ret));
+    }
 
     ESP_LOGI(TAG, "Display LVGL integrated demo UI");
     display_lvgl_lock();

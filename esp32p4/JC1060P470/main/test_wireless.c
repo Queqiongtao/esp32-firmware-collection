@@ -46,6 +46,24 @@ static EventGroupHandle_t s_hosted_event_group;
 #define WIRELESS_HOSTED_EVENT_DOWN_BIT           BIT3
 #define WIRELESS_HOSTED_READY_BITS               (WIRELESS_HOSTED_EVENT_TRANSPORT_UP_BIT | WIRELESS_HOSTED_EVENT_CP_INIT_BIT)
 #define WIRELESS_HOSTED_WAIT_READY_MS            5000
+#define WIRELESS_EXPECTED_CP_TARGET              "esp32c6"
+#define WIRELESS_EXPECTED_RESET_GPIO             54
+
+static void wireless_log_expected_config(void)
+{
+    ESP_LOGI(TAG, "Expected hosted config: target=%s transport=SDIO slot=%d width=%d clk=%d kHz D0=%d D1=%d D2=%d D3=%d CLK=%d CMD=%d RST=%d",
+             WIRELESS_EXPECTED_CP_TARGET,
+             1,
+             TEST_WIRELESS_SDIO_BUS_WIDTH,
+             TEST_WIRELESS_SDIO_CLOCK_KHZ,
+             TEST_WIRELESS_SDIO_PIN_D0,
+             TEST_WIRELESS_SDIO_PIN_D1,
+             TEST_WIRELESS_SDIO_PIN_D2,
+             TEST_WIRELESS_SDIO_PIN_D3,
+             TEST_WIRELESS_SDIO_PIN_CLK,
+             TEST_WIRELESS_SDIO_PIN_CMD,
+             WIRELESS_EXPECTED_RESET_GPIO);
+}
 
 static void wireless_set_hint(const char *hint)
 {
@@ -59,6 +77,91 @@ static void wireless_set_transport_error(esp_err_t err, const char *hint)
     s_status.wifi_state = TEST_WIRELESS_WIFI_ERROR;
     s_status.last_error = err;
     wireless_set_hint(hint);
+}
+
+static esp_err_t wireless_validate_hosted_config(void)
+{
+#if !CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+    ESP_LOGE(TAG, "Hosted config mismatch: expected SDIO host interface, but current config is not SDIO");
+    wireless_log_expected_config();
+#if CONFIG_ESP_HOSTED_SPI_HOST_INTERFACE
+    ESP_LOGE(TAG, "Current hosted config: target=%s transport=SPI MOSI=%d MISO=%d CLK=%d CS=%d RST=%d",
+             CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET,
+             CONFIG_ESP_HOSTED_SPI_GPIO_MOSI,
+             CONFIG_ESP_HOSTED_SPI_GPIO_MISO,
+             CONFIG_ESP_HOSTED_SPI_GPIO_CLK,
+             CONFIG_ESP_HOSTED_SPI_GPIO_CS,
+             CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE);
+#else
+    ESP_LOGE(TAG, "Current hosted config: target=%s transport=non-SDIO",
+             CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET);
+#endif
+    wireless_set_transport_error(ESP_ERR_INVALID_STATE, "cfg mismatch: need c6 sdio");
+    return ESP_ERR_INVALID_STATE;
+#endif
+
+    bool valid = true;
+
+    if (strcmp(CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET, WIRELESS_EXPECTED_CP_TARGET) != 0) {
+        ESP_LOGE(TAG, "Hosted config mismatch: target=%s expected=%s",
+                 CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET, WIRELESS_EXPECTED_CP_TARGET);
+        valid = false;
+    }
+    if (CONFIG_ESP_HOSTED_SDIO_SLOT != 1) {
+        ESP_LOGE(TAG, "Hosted config mismatch: SDIO slot=%d expected=1", CONFIG_ESP_HOSTED_SDIO_SLOT);
+        valid = false;
+    }
+    if (CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH != TEST_WIRELESS_SDIO_BUS_WIDTH) {
+        ESP_LOGE(TAG, "Hosted config mismatch: SDIO width=%d expected=%d",
+                 CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH, TEST_WIRELESS_SDIO_BUS_WIDTH);
+        valid = false;
+    }
+    if (CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ != TEST_WIRELESS_SDIO_CLOCK_KHZ) {
+        ESP_LOGE(TAG, "Hosted config mismatch: SDIO clk=%d expected=%d",
+                 CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ, TEST_WIRELESS_SDIO_CLOCK_KHZ);
+        valid = false;
+    }
+    if (CONFIG_ESP_HOSTED_SDIO_PIN_D0 != TEST_WIRELESS_SDIO_PIN_D0 ||
+        CONFIG_ESP_HOSTED_SDIO_PIN_D1 != TEST_WIRELESS_SDIO_PIN_D1 ||
+        CONFIG_ESP_HOSTED_SDIO_PIN_D2 != TEST_WIRELESS_SDIO_PIN_D2 ||
+        CONFIG_ESP_HOSTED_SDIO_PIN_D3 != TEST_WIRELESS_SDIO_PIN_D3 ||
+        CONFIG_ESP_HOSTED_SDIO_PIN_CLK != TEST_WIRELESS_SDIO_PIN_CLK ||
+        CONFIG_ESP_HOSTED_SDIO_PIN_CMD != TEST_WIRELESS_SDIO_PIN_CMD) {
+        ESP_LOGE(TAG, "Hosted config mismatch: SDIO pins current D0=%d D1=%d D2=%d D3=%d CLK=%d CMD=%d",
+                 CONFIG_ESP_HOSTED_SDIO_PIN_D0,
+                 CONFIG_ESP_HOSTED_SDIO_PIN_D1,
+                 CONFIG_ESP_HOSTED_SDIO_PIN_D2,
+                 CONFIG_ESP_HOSTED_SDIO_PIN_D3,
+                 CONFIG_ESP_HOSTED_SDIO_PIN_CLK,
+                 CONFIG_ESP_HOSTED_SDIO_PIN_CMD);
+        valid = false;
+    }
+    if (CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE != WIRELESS_EXPECTED_RESET_GPIO) {
+        ESP_LOGE(TAG, "Hosted config mismatch: slave reset gpio=%d expected=%d",
+                 CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE, WIRELESS_EXPECTED_RESET_GPIO);
+        valid = false;
+    }
+
+    if (!valid) {
+        wireless_log_expected_config();
+        wireless_set_transport_error(ESP_ERR_INVALID_STATE, "cfg mismatch: need c6 sdio");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Hosted transport config: SDIO, target=%s, slot=%d, width=%d, clk=%d kHz",
+             CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET,
+             CONFIG_ESP_HOSTED_SDIO_SLOT,
+             CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH,
+             CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ);
+    ESP_LOGI(TAG, "Hosted SDIO pins: D0=%d D1=%d D2=%d D3=%d CLK=%d CMD=%d RST=%d",
+             CONFIG_ESP_HOSTED_SDIO_PIN_D0,
+             CONFIG_ESP_HOSTED_SDIO_PIN_D1,
+             CONFIG_ESP_HOSTED_SDIO_PIN_D2,
+             CONFIG_ESP_HOSTED_SDIO_PIN_D3,
+             CONFIG_ESP_HOSTED_SDIO_PIN_CLK,
+             CONFIG_ESP_HOSTED_SDIO_PIN_CMD,
+             CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE);
+    return ESP_OK;
 }
 
 static esp_err_t wireless_require_initialized(void)
@@ -575,30 +678,13 @@ esp_err_t test_wireless_init(void)
     wireless_set_hint("wifi hosted init");
     s_hosted_ready = true;
 
-#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
-    ESP_LOGI(TAG, "Hosted transport config: SDIO, target=%s, slot=%d, width=%d, clk=%d kHz",
-             CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET,
-             CONFIG_ESP_HOSTED_SDIO_SLOT,
-             CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH,
-             CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ);
-    ESP_LOGI(TAG, "Hosted SDIO pins: D0=%d D1=%d D2=%d D3=%d CLK=%d CMD=%d RST=%d",
-             CONFIG_ESP_HOSTED_SDIO_PIN_D0,
-             CONFIG_ESP_HOSTED_SDIO_PIN_D1,
-             CONFIG_ESP_HOSTED_SDIO_PIN_D2,
-             CONFIG_ESP_HOSTED_SDIO_PIN_D3,
-             CONFIG_ESP_HOSTED_SDIO_PIN_CLK,
-             CONFIG_ESP_HOSTED_SDIO_PIN_CMD,
-             CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE);
-#elif CONFIG_ESP_HOSTED_SPI_HOST_INTERFACE
-    ESP_LOGW(TAG, "Hosted transport config mismatch: SPI target=%s, MOSI=%d MISO=%d CLK=%d CS=%d",
-             CONFIG_ESP_HOSTED_IDF_SLAVE_TARGET,
-             CONFIG_ESP_HOSTED_SPI_GPIO_MOSI,
-             CONFIG_ESP_HOSTED_SPI_GPIO_MISO,
-             CONFIG_ESP_HOSTED_SPI_GPIO_CLK,
-             CONFIG_ESP_HOSTED_SPI_GPIO_CS);
-#endif
+    esp_err_t ret = wireless_validate_hosted_config();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Hosted config validation failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    esp_err_t ret = wireless_prepare_stack();
+    ret = wireless_prepare_stack();
     if (ret != ESP_OK) {
         wireless_set_transport_error(ret, "stack fail");
         return ret;

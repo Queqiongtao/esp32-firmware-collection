@@ -1,5 +1,6 @@
 idf_component_register(SRCS "JC1060P470_main.c"
                             "display_board.c"
+                            "display_font.c"
                             "display_panel.c"
                             "display_lvgl.c"
                             "display_touch.c"
@@ -34,9 +35,12 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      log
                                      efuse
                                      fatfs
+                                     spiffs
                                      sdmmc
                                      esp_codec_dev
                                      esp_lcd_jd9165
                                      esp_lcd_touch_gt911
                                      esp_tinyusb
                        EMBED_FILES "canon.pcm")
+
+spiffs_create_partition_image(font ../assets/fonts FLASH_IN_PROJECT)
