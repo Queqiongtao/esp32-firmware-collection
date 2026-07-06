@@ -7,11 +7,64 @@ menu "Example Configuration"
             loaded through LVGL Tiny TTF backend.
 
     config EXAMPLE_USE_DMA2D_COPY_FRAME
-        bool "Use DMA2D to copy draw buffer to frame buffer"
+        bool "Use ESP LCD DMA2D draw_bitmap hook"
         default y
         help
-            Enable this option, DMA2D will be used to copy the LVGL draw buffer to the target frame buffer.
-            This can save some CPU time and improve the performance.
+            Enable ESP LCD DPI panel DMA2D draw_bitmap hook. This accelerates
+            draw buffer to frame buffer copies when the selected LVGL render
+            path calls esp_lcd_panel_draw_bitmap(). It is separate from LVGL's
+            STM32-only LV_USE_DRAW_DMA2D option.
+
+    choice EXAMPLE_LVGL_PORT_IMPL
+        prompt "LVGL port implementation"
+        default EXAMPLE_LVGL_PORT_ESP_ADAPTER
+        help
+            Select the LVGL display/input adapter. The ESP adapter path uses
+            Espressif's display bridge, PPA helpers, and tear avoidance modes.
+            The legacy path keeps this project's original DIRECT dual-fb port
+            as a fallback for display bring-up.
+
+        config EXAMPLE_LVGL_PORT_ESP_ADAPTER
+            bool "Espressif esp_lvgl_adapter"
+        config EXAMPLE_LVGL_PORT_CUSTOM_LEGACY
+            bool "Project legacy LVGL port"
+    endchoice
+
+    choice EXAMPLE_LVGL_ADAPTER_TEAR_MODE
+        prompt "esp_lvgl_adapter tear avoidance mode"
+        depends on EXAMPLE_LVGL_PORT_ESP_ADAPTER
+        default EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_DIRECT
+        help
+            DOUBLE_DIRECT is closest to the previous stable DIRECT dual
+            framebuffer path. TRIPLE_PARTIAL follows the adapter's high
+            resolution default and gives DMA2D draw_bitmap more copy work, but
+            uses more PSRAM.
+
+        config EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_DIRECT
+            bool "DOUBLE_DIRECT"
+        config EXAMPLE_LVGL_ADAPTER_TEAR_TRIPLE_PARTIAL
+            bool "TRIPLE_PARTIAL"
+        config EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_FULL
+            bool "DOUBLE_FULL"
+    endchoice
+
+    config EXAMPLE_LVGL_ADAPTER_FORCE_PARTIAL_DMA2D_TEST
+        bool "Force adapter TRIPLE_PARTIAL for DMA2D copy testing"
+        depends on EXAMPLE_LVGL_PORT_ESP_ADAPTER
+        default n
+        help
+            Force TRIPLE_PARTIAL mode regardless of the selected tear mode.
+            Use this only for comparing DMA2D draw_bitmap copy load against
+            DIRECT mode.
+
+    config EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL
+        bool "Enable esp_lvgl_adapter PPA acceleration hints"
+        depends on EXAMPLE_LVGL_PORT_ESP_ADAPTER
+        default y
+        help
+            Pass enable_ppa_accel to esp_lvgl_adapter display profile and keep
+            LVGL's built-in Espressif PPA draw backend disabled. The adapter
+            owns the PPA acceleration hooks for this project.
 
     config EXAMPLE_LCD_BACKLIGHT_BYPASS_PWM
         bool "Bypass PWM and force backlight always on"

@@ -8,11 +8,16 @@
 
 #include "esp_err.h"
 #include "driver/i2c_master.h"
+#include "esp_lcd_touch.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* GT911 touch controller native coordinate range. */
+#define DISPLAY_TOUCH_NATIVE_H_RES  800
+#define DISPLAY_TOUCH_NATIVE_V_RES  480
 
 /**
  * @brief Initialize I2C master bus and create GT911 touch handle.
@@ -25,6 +30,7 @@ extern "C" {
  *      - Other errors from I2C or touch driver initialization
  */
 esp_err_t display_touch_init(void);
+esp_err_t display_touch_get_handle(esp_lcd_touch_handle_t *out_handle);
 
 /**
  * @brief Create an LVGL pointer input device bound to the touch controller.

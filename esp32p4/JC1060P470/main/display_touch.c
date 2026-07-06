@@ -13,12 +13,6 @@
 
 static const char *TAG = "display_touch";
 
-/* GT911 touch controller native resolution (panel-private parameter).
- * Coordinates are scaled from this native range to DISPLAY_PANEL_H/V_RES
- * before being reported to LVGL. */
-#define DISPLAY_TOUCH_NATIVE_H_RES  800
-#define DISPLAY_TOUCH_NATIVE_V_RES  480
-
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
 static esp_lcd_touch_handle_t s_touch_handle = NULL;
 
@@ -110,6 +104,14 @@ esp_err_t display_touch_get_i2c_bus(i2c_master_bus_handle_t *out_handle, int *ou
     if (out_port) {
         *out_port = DISPLAY_TOUCH_I2C_NUM;
     }
+    return ESP_OK;
+}
+
+esp_err_t display_touch_get_handle(esp_lcd_touch_handle_t *out_handle)
+{
+    ESP_RETURN_ON_FALSE(out_handle != NULL, ESP_ERR_INVALID_ARG, TAG, "out_handle is NULL");
+    ESP_RETURN_ON_FALSE(s_touch_handle != NULL, ESP_ERR_INVALID_STATE, TAG, "touch not initialized");
+    *out_handle = s_touch_handle;
     return ESP_OK;
 }
 

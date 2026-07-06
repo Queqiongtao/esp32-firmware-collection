@@ -20,11 +20,16 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#if CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER
+#include "esp_lv_adapter.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "display_lvgl";
+#if CONFIG_EXAMPLE_LVGL_PORT_CUSTOM_LEGACY
 static _lock_t s_lvgl_api_lock;
+#endif
 
 extern void example_lvgl_demo_ui(lv_display_t *disp);
 
@@ -124,6 +129,95 @@ static void display_lvgl_perf_event_cb(lv_event_t *event)
 }
 #endif
 
+#if CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER
+static esp_lv_adapter_tear_avoid_mode_t display_lvgl_adapter_get_tear_mode(void)
+{
+#if CONFIG_EXAMPLE_LVGL_ADAPTER_FORCE_PARTIAL_DMA2D_TEST || CONFIG_EXAMPLE_LVGL_ADAPTER_TEAR_TRIPLE_PARTIAL
+    return ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL;
+#elif CONFIG_EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_FULL
+    return ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL;
+#else
+    return ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT;
+#endif
+}
+
+static const char *display_lvgl_adapter_tear_mode_name(esp_lv_adapter_tear_avoid_mode_t mode)
+{
+    switch (mode) {
+    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_DIRECT:
+        return "DOUBLE_DIRECT";
+    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL:
+        return "TRIPLE_PARTIAL";
+    case ESP_LV_ADAPTER_TEAR_AVOID_MODE_DOUBLE_FULL:
+        return "DOUBLE_FULL";
+    default:
+        return "OTHER";
+    }
+}
+
+static esp_err_t display_lvgl_init_adapter(const display_panel_t *panel, display_lvgl_t *out_lvgl)
+{
+    const esp_lv_adapter_tear_avoid_mode_t tear_mode = display_lvgl_adapter_get_tear_mode();
+
+    ESP_LOGI(TAG, "Initialize LVGL via esp_lvgl_adapter");
+    ESP_LOGI(TAG, "LVGL v%d.%d.%d lvgl_builtin_ppa=%d DMA2D_hook=%d adapter_ppa=%d tear=%s num_fbs=%u lane=%dMbps dpi=%dMHz",
+             LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH,
+#if LV_USE_PPA
+             1,
+#else
+             0,
+#endif
+             CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME,
+             CONFIG_EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL,
+             display_lvgl_adapter_tear_mode_name(tear_mode),
+             (unsigned int)panel->num_fbs,
+             DISPLAY_MIPI_DSI_LANE_BITRATE_MBPS,
+             DISPLAY_MIPI_DSI_DPI_CLK_MHZ);
+
+    esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
+    adapter_cfg.task_stack_size = DISPLAY_LVGL_TASK_STACK_SIZE;
+    adapter_cfg.task_priority = DISPLAY_LVGL_TASK_PRIORITY;
+    adapter_cfg.tick_period_ms = DISPLAY_LVGL_TICK_PERIOD_MS;
+    adapter_cfg.task_min_delay_ms = DISPLAY_LVGL_TASK_MIN_DELAY_MS;
+    adapter_cfg.task_max_delay_ms = DISPLAY_LVGL_TASK_MAX_DELAY_MS;
+    ESP_RETURN_ON_ERROR(esp_lv_adapter_init(&adapter_cfg), TAG, "init esp_lvgl_adapter failed");
+
+    esp_lv_adapter_display_config_t disp_cfg = ESP_LV_ADAPTER_DISPLAY_MIPI_DEFAULT_CONFIG(
+        panel->panel_handle,
+        panel->panel_io_handle,
+        panel->h_res,
+        panel->v_res,
+        ESP_LV_ADAPTER_ROTATE_0);
+    disp_cfg.tear_avoid_mode = tear_mode;
+    disp_cfg.profile.use_psram = true;
+    disp_cfg.profile.enable_ppa_accel = CONFIG_EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL;
+    disp_cfg.profile.buffer_height = DISPLAY_LVGL_DRAW_BUF_LINES;
+
+    lv_display_t *display = esp_lv_adapter_register_display(&disp_cfg);
+    ESP_RETURN_ON_FALSE(display != NULL, ESP_ERR_NO_MEM, TAG, "register adapter display failed");
+
+#if CONFIG_EXAMPLE_LVGL_PERF_LOG
+    lv_display_add_event_cb(display, display_lvgl_perf_event_cb, LV_EVENT_ALL, NULL);
+#endif
+
+    ESP_RETURN_ON_ERROR(display_touch_init(), TAG, "init touch failed");
+    esp_lcd_touch_handle_t touch_handle = NULL;
+    ESP_RETURN_ON_ERROR(display_touch_get_handle(&touch_handle), TAG, "get touch handle failed");
+    esp_lv_adapter_touch_config_t touch_cfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(display, touch_handle);
+    touch_cfg.scale.x = (float)DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES;
+    touch_cfg.scale.y = (float)DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES;
+    lv_indev_t *indev = esp_lv_adapter_register_touch(&touch_cfg);
+    ESP_RETURN_ON_FALSE(indev != NULL, ESP_ERR_NO_MEM, TAG, "register adapter touch failed");
+
+    ESP_RETURN_ON_ERROR(esp_lv_adapter_start(), TAG, "start esp_lvgl_adapter failed");
+
+    out_lvgl->display = display;
+    out_lvgl->indev = indev;
+    return ESP_OK;
+}
+#endif
+
+#if CONFIG_EXAMPLE_LVGL_PORT_CUSTOM_LEGACY
 #if CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME
 static void display_lvgl_rounder_flush_area_cb(lv_event_t *event)
 {
@@ -201,12 +295,27 @@ static esp_err_t display_lvgl_register_panel_callbacks(const display_panel_t *pa
 
     return esp_lcd_dpi_panel_register_event_callbacks(panel->panel_handle, &cbs, display);
 }
+#endif
 
 esp_err_t display_lvgl_init(const display_panel_t *panel, display_lvgl_t *out_lvgl)
 {
     ESP_RETURN_ON_FALSE(panel && out_lvgl, ESP_ERR_INVALID_ARG, TAG, "invalid argument");
 
+#if CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER
+    return display_lvgl_init_adapter(panel, out_lvgl);
+#else
     ESP_LOGI(TAG, "Initialize LVGL");
+    ESP_LOGI(TAG, "LVGL v%d.%d.%d port=legacy render=DIRECT lvgl_builtin_ppa=%d DMA2D_hook=%d num_fbs=%u lane=%dMbps dpi=%dMHz",
+             LVGL_VERSION_MAJOR, LVGL_VERSION_MINOR, LVGL_VERSION_PATCH,
+#if LV_USE_PPA
+             1,
+#else
+             0,
+#endif
+             CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME,
+             (unsigned int)panel->num_fbs,
+             DISPLAY_MIPI_DSI_LANE_BITRATE_MBPS,
+             DISPLAY_MIPI_DSI_DPI_CLK_MHZ);
     lv_init();
 
     lv_display_t *display = lv_display_create(panel->h_res, panel->v_res);
@@ -249,14 +358,23 @@ esp_err_t display_lvgl_init(const display_panel_t *panel, display_lvgl_t *out_lv
     out_lvgl->display = display;
     out_lvgl->indev = indev;
     return ESP_OK;
+#endif
 }
 
 void display_lvgl_lock(void)
 {
+#if CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER
+    ESP_ERROR_CHECK(esp_lv_adapter_lock(-1));
+#else
     _lock_acquire(&s_lvgl_api_lock);
+#endif
 }
 
 void display_lvgl_unlock(void)
 {
+#if CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER
+    esp_lv_adapter_unlock();
+#else
     _lock_release(&s_lvgl_api_lock);
+#endif
 }

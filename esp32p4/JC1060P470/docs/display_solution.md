@@ -2,7 +2,7 @@
 
 ## 概述
 
-本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。LVGL 9.4.0 作为 UI 框架，采用 **DIRECT 渲染模式 + 双 framebuffer ping-pong + flush 回调中整 fb cache write back** 的方案，在无撕裂、无残影的前提下保持可接受的帧率。
+本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合已上板验证显示正常，未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
 
 当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是一个面向板级联调的 **综合验证 Demo**。应用入口 `app_main()` 先完成 `board -> panel -> LVGL` 初始化，再按 Kconfig 选项初始化 `RTC / Audio / Battery / USB / SD / Wireless` 等测试模块，最后加载 `example_lvgl_demo_ui()` 页面。
 
@@ -23,6 +23,21 @@
 | H/V 时序 | HSW=40 HBP=160 HFP=160 / VSW=10 VBP=23 VFP=12 | H_total=1384, V_total=645 |
 
 刷新率注释中 "54MHz" 描述的是 expect 值；real DPI 时钟由 240MHz 整分频为 60MHz，IDF 通过 bridge HFP 补偿把每行多塞 154 个 DPI 周期来对齐刷新率到 expect 值。
+
+## 当前 LVGL 与加速状态
+
+| 项目 | 当前值 | 说明 |
+|------|--------|------|
+| LVGL | `lvgl/lvgl 9.4.0` | `main/idf_component.yml` 固定版本 |
+| LVGL adapter | `espressif/esp_lvgl_adapter ^0.6.2` | 0.1.4 与 IDF 6.0.1 的 DMA2D/FBCPY API 不兼容，已升级 |
+| 默认 LVGL port | `CONFIG_EXAMPLE_LVGL_PORT_ESP_ADAPTER=y` | 自研 legacy port 保留为 Kconfig 回退 |
+| tear mode | `DOUBLE_DIRECT` | 当前 `num_fbs=2`，接近原稳定 DIRECT 双 fb 行为 |
+| ESP LCD DMA2D hook | `CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME=y` | 调用 `esp_lcd_dpi_panel_enable_dma2d()`，用于 adapter/partial/full 等需要 `draw_bitmap` 拷贝的路径 |
+| adapter PPA | `CONFIG_EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL=y` | 由 `esp_lvgl_adapter` 接管 PPA 加速 hook |
+| LVGL 内置 PPA | `CONFIG_LV_USE_PPA` 未启用 | 不走 LVGL 上游 `src/draw/espressif/ppa/` 后端 |
+| SW draw unit | `CONFIG_LV_DRAW_SW_DRAW_UNIT_CNT=1` | 减少并行 draw unit 对 PSRAM/cache 路径的额外压力 |
+
+注意：ESP32-P4 上不要启用 STM32 专用的 `LV_USE_DRAW_DMA2D`。本工程的 DMA2D 来自 ESP LCD DPI panel 的 `draw_bitmap` hook；PPA 加速由 `esp_lvgl_adapter` 负责。若要试验 `TRIPLE_PARTIAL` 或 `DOUBLE_FULL`，应通过 `Example Configuration -> esp_lvgl_adapter tear avoidance mode` 单独切换，并保留当前 `DOUBLE_DIRECT` 回退路径。
 
 ## 当前综合 Demo UI
 
@@ -62,28 +77,34 @@
 
 ## 渲染架构
 
-### 当前方案：DIRECT + 双 fb + cache msync
+### 当前默认方案：esp_lvgl_adapter + DOUBLE_DIRECT
 
 ```
-LVGL 渲染（只画 dirty 区）
+app_main()
       ↓
-flush_cb: esp_cache_msync(整 fb, DIR_C2M)  ← 把 CPU 渲染数据 + sync_areas 的 memcpy 数据写回 PSRAM
+display_panel_init()
+      ├─ 创建 MIPI DSI / DBI IO / JD9165 DPI panel
+      ├─ 按 adapter tear mode 计算 num_fbs（当前 DOUBLE_DIRECT → 2）
+      └─ esp_lcd_dpi_panel_enable_dma2d()
       ↓
-esp_lcd_panel_draw_bitmap(px_map=fb)      ← IDF 检测到 px_map 在 fb 地址范围，走 do_copy=false
-      ↓                                          只设 cur_fb_index，不拷贝
-DMA 在整帧传输完成 ISR 切 fb              ← fb 切换发生在帧边界，无撕裂
+display_lvgl_init()
+      ├─ esp_lv_adapter_init()
+      ├─ esp_lv_adapter_register_display(MIPI, DOUBLE_DIRECT, PPA enabled)
+      ├─ esp_lv_adapter_register_touch(GT911)
+      └─ esp_lv_adapter_start()
 ```
 
 关键点：
 
-- **双 fb 来自 DPI 驱动**：`esp_lcd_dpi_panel_get_frame_buffer(panel, 2, &fb0, &fb1)` 取 IDF 已分配的 framebuffer，作为 LVGL draw buffer。不再单独分配 partial draw buffer，省下约 320KB PSRAM。
-- **flush_cb 只切 fb 地址**：IDF 的 `draw_bitmap` 检测到 `px_map` 在 fb 地址范围内，走 `do_copy=false` 分支，只做 cache write back 并设 `cur_fb_index`，不触发 DMA2D 二次拷贝。
-- **fb 切换在帧边界**：DMA 在整帧传输完成 ISR（`mipi_dsi_dma_trans_done_cb`）重启时才读取新 `cur_fb_index`，写入和显示扫描作用于不同 fb，无撕裂。
-- **整 fb cache msync**：在 `esp_lcd_panel_draw_bitmap` 之前对整个 fb 做 `esp_cache_msync(DIR_C2M)`，确保 DMA 读到最新数据。这是消除残影的关键（见下文）。
+- **adapter 是默认路径**：`display_lvgl.c` 默认通过 `esp_lvgl_adapter` 注册 display/touch，统一使用其 display bridge、thread lock、tear avoidance 和 PPA helper。
+- **DOUBLE_DIRECT 作为稳定默认**：该模式需要 2 个 DPI framebuffer，保持低拷贝负载，且接近前一版已验证的 DIRECT 双 fb 行为。
+- **DMA2D hook 仍启用**：`display_panel.c` 调用 `esp_lcd_dpi_panel_enable_dma2d()`。在 DOUBLE_DIRECT 下不强制制造额外拷贝；切到 `TRIPLE_PARTIAL` 或 `DOUBLE_FULL` 做对比时，DMA2D copy 负载会更明显。
+- **PPA 由 adapter 接管**：`disp_cfg.profile.enable_ppa_accel = true`，不启用 LVGL 内置 PPA draw backend。
+- **legacy 可回退**：`CONFIG_EXAMPLE_LVGL_PORT_CUSTOM_LEGACY` 保留旧自研 DIRECT 双 fb + flush cache msync 路径，用于排查 adapter 问题。
 
 ### 方案选型过程
 
-本工程渲染模式经过三次迭代，每一步都有明确的问题驱动：
+本工程渲染模式经过多次迭代，每一步都有明确的问题驱动：
 
 #### 阶段 0：PARTIAL（原 mipi_dsi 工程继承）
 
@@ -103,11 +124,18 @@ DMA 在整帧传输完成 ISR 切 fb              ← fb 切换发生在帧边�
 - **改善**：残影消除（每帧整屏重画，两个 fb 内容天然一致，不依赖 sync_areas）
 - **新问题 - 帧率很低**：每帧 CPU 整屏渲染 1024×600×2 = 1.2MB，开销过大
 
-#### 阶段 3：DIRECT + 双 fb + flush_cb 整 fb cache msync（最终方案）
+#### 阶段 3：自研 DIRECT + 双 fb + flush_cb 整 fb cache msync（legacy 回退）
 
 - **配置**：回到 DIRECT 模式，在 flush_cb 中 `esp_lcd_panel_draw_bitmap` 之前对整个 fb 做 `esp_cache_msync(DIR_C2M)`
 - **效果**：撕裂消除（DIRECT + 双 fb）+ 残影消除（cache write back）+ 帧率回升（只渲染 dirty 区）
 - **上板验证通过**：撕裂与残影消除，滑动帧率回升
+
+#### 阶段 4：esp_lvgl_adapter 0.6.2 + DOUBLE_DIRECT（当前默认）
+
+- **配置**：引入 `espressif/esp_lvgl_adapter ^0.6.2`，默认 `EXAMPLE_LVGL_PORT_ESP_ADAPTER`，tear mode 为 `DOUBLE_DIRECT`，adapter PPA enabled。
+- **原因**：乐鑫 adapter 已覆盖 ESP32-P4/MIPI DSI/LVGL 9 的 display bridge、tear avoidance、touch 注册与 PPA helper，比继续维护自研 port 更接近官方路径。
+- **版本注意**：`esp_lvgl_adapter 0.1.4` 会在 IDF 6.0.1 下因 `esp_async_fbcpy_trans_desc_t` 字段变更编译失败，因此当前锁定到 `^0.6.2`。
+- **上板验证结果**：当前显示完美，未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
 
 ## 关键问题根因详解
 
@@ -141,8 +169,8 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 |------|------|------|
 | 板级 | `display_board.c/.h` | MIPI DSI PHY 供电（LDO ch3 @2.5V）、背光 PWM/GPIO |
 | 面板 | `display_panel.c/.h` | MIPI DSI 总线、DPI 接口、JD9165 面板创建、DMA2D hook |
-| LVGL 适配 | `display_lvgl.c/.h` | LVGL 任务、双 fb buffer 分配（DIRECT 模式）、flush 回调（含 cache msync）、tick timer、indev 注册 |
-| 触摸 | `display_touch.c/.h` | I2C master 总线、GT911 触摸初始化、坐标缩放、LVGL indev 注册 |
+| LVGL 适配 | `display_lvgl.c/.h` | 默认注册 `esp_lvgl_adapter` display/touch；legacy 路径保留自研 LVGL task、flush、indev |
+| 触摸 | `display_touch.c/.h` | I2C master 总线、GT911 触摸初始化、坐标缩放、touch handle 对外查询 |
 
 公共参数集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。
 
@@ -216,15 +244,14 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 以下方向均属独立工作项，应单独提交验证：
 
-### PPA 硬件加速
+### PPA / DMA2D 后续试验
 
-LVGL 9.4.0 内置 ESP32-P4 专用 PPA（Pixel Processing Accelerator）draw unit（`src/draw/espressif/ppa/`），当前未启用（`CONFIG_LV_USE_PPA` not set）。
+当前已经启用 **adapter PPA** 与 **ESP LCD DMA2D hook**，但没有启用 LVGL 内置 PPA draw backend。
 
-- 用途：加速矩形纯色 fill 和 image blit（无圆角/渐变/旋转场景）
-- 启用前提：draw buffer 对齐到 64 字节（cache line）。需 `CONFIG_LV_DRAW_BUF_ALIGN=64`、`CONFIG_LV_ATTRIBUTE_MEM_ALIGN_SIZE=64`
-- 当前 fb 行 stride 2048 字节已是 64 的整数倍，对齐开销可忽略
-- PPA 为实验级、同步阻塞执行，与 SW draw unit 并存，只接管满足条件的任务，不会破坏现有渲染
-- 官方文档称矩形 fill 可省约 30%，纯 fill 整数倍屏尺寸场景可达约 9x
+- `CONFIG_EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL=y`：把 PPA 加速提示交给 `esp_lvgl_adapter`，当前默认开启。
+- `CONFIG_EXAMPLE_USE_DMA2D_COPY_FRAME=y`：启用 ESP LCD DPI panel 的 DMA2D `draw_bitmap` hook，当前默认开启。
+- `CONFIG_LV_USE_PPA` 不启用：LVGL 9.4.0 自带的 `src/draw/espressif/ppa/` 后端在当前组合下需要额外对齐和组件依赖处理，且与 adapter PPA 职责重叠，暂不作为默认路径。
+- `CONFIG_EXAMPLE_LVGL_ADAPTER_FORCE_PARTIAL_DMA2D_TEST` 仅用于对比 DMA2D copy 负载，不建议作为日常默认。
 
 ### 链路参数调优
 

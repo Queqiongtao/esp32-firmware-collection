@@ -11,7 +11,7 @@
 
 ## 当前状态
 
-- **已上板验证**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4 综合 demo UI（DIRECT 渲染 + 双 framebuffer）、背光 PWM、SD 卡（SDMMC SLOT_0 40MHz 4-bit，已完成挂载与读写回环）、USB Device CDC-ACM、音频 I2S（ES8311，支持内置音乐播放 / 录音 / 录音回放）、板载 RTC（RX8025T-UC，启动校验、非法时间自动同步构建时间、5 秒周期读取）、电池电压采样（GPIO52 ADC）、无线测试模块（P4 <-> C6 SDIO 板级连接 + hosted WiFi STA 路径 + UI 操作卡片）。显示方案详见 [docs/display_solution.md](./docs/display_solution.md)，硬件引脚详见 [docs/hardware_pinout.md](./docs/hardware_pinout.md)。
+- **已上板验证**：MIPI DSI 显示（JD9165 1024x600 RGB565 2-lane）、GT911 触摸、LVGL 9.4.0 综合 demo UI（`esp_lvgl_adapter 0.6.2` + `DOUBLE_DIRECT` + 双 framebuffer + adapter PPA + ESP LCD DMA2D hook）、背光 PWM、SD 卡（SDMMC SLOT_0 40MHz 4-bit，已完成挂载与读写回环）、USB Device CDC-ACM、音频 I2S（ES8311，支持内置音乐播放 / 录音 / 录音回放）、板载 RTC（RX8025T-UC，启动校验、非法时间自动同步构建时间、5 秒周期读取）、电池电压采样（GPIO52 ADC）、无线测试模块（P4 <-> C6 SDIO 板级连接 + hosted WiFi STA 路径 + UI 操作卡片）。当前显示未观察到白条、花屏、闪烁、黑屏、撕裂或残影；显示方案详见 [docs/display_solution.md](./docs/display_solution.md)，硬件引脚详见 [docs/hardware_pinout.md](./docs/hardware_pinout.md)。
 - **规划中**：摄像头、传感器、BLE hosted 业务联调。
 
 ## 当前综合 Demo 页面
@@ -92,7 +92,9 @@ Before testing the display, review the active display parameters in [main/displa
 
 Run `idf.py menuconfig` and go to `Example Configuration`:
 
-* Choose whether to `Use DMA2D to copy draw buffer to frame buffer` asynchronously. If you choose `No`, the draw buffer will be copied to the frame buffer synchronously by CPU.
+* Choose whether to `Use ESP LCD DMA2D draw_bitmap hook`. This enables the ESP LCD DPI panel DMA2D copy hook and is separate from LVGL's STM32-only `LV_USE_DRAW_DMA2D`.
+* Choose `LVGL port implementation`. The default is `Espressif esp_lvgl_adapter`; `Project legacy LVGL port` keeps the previous custom DIRECT dual-framebuffer path as a fallback.
+* Choose `esp_lvgl_adapter tear avoidance mode`. The default is `DOUBLE_DIRECT`; `TRIPLE_PARTIAL` and `DOUBLE_FULL` are available for controlled comparison.
 * Enable `Bypass PWM and force backlight always on` if you need to distinguish backlight PWM flicker from display timing or panel instability.
 * Adjust `LVGL draw buffer lines` and `LVGL draw buffer memory` to compare PSRAM/internal RAM tradeoffs without changing source code.
 * Enable `WiFi/BLE test module` if you want the integrated demo UI to show the wireless card and initialize the hosted WiFi test path over the on-board `ESP32-C6`.
@@ -153,18 +155,20 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 ## Project Notes / 工程说明
 
 * This project is derived from the `mipi_dsi` project and tuned for `JD9165`, `1024x600`, `RGB565`, `2-lane DSI`, `750 Mbps lane rate`, `54 MHz DPI clock`, and `2` DPI frame buffers.
+* The active display stack uses `lvgl/lvgl 9.4.0` and `espressif/esp_lvgl_adapter ^0.6.2`. Adapter PPA is enabled, ESP LCD DMA2D hook is enabled, and LVGL built-in `CONFIG_LV_USE_PPA` is disabled.
 * If the screen appears to "flicker", first use `Example Configuration -> Bypass PWM and force backlight always on` to determine whether the issue is PWM dimming or display pipeline/panel instability.
 * The display stack is split into board control, panel bring-up, and LVGL port layers:
   * [main/display_board.c](./main/display_board.c): PHY power, backlight
-  * [main/display_panel.c](./main/display_panel.c): DSI bus, DBI IO, JD9165 panel creation
-  * [main/display_lvgl.c](./main/display_lvgl.c): LVGL task, draw buffers, flush callbacks
+  * [main/display_panel.c](./main/display_panel.c): DSI bus, DBI IO, JD9165 panel creation, DMA2D hook
+  * [main/display_lvgl.c](./main/display_lvgl.c): esp_lvgl_adapter display/touch registration, legacy LVGL port fallback
 
 * 本工程由 `mipi_dsi` 工程衍生，已按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`750 Mbps lane rate`、`54 MHz DPI clock`、`2` 个 DPI framebuffer 进行适配。
+* 当前显示栈使用 `lvgl/lvgl 9.4.0` 与 `espressif/esp_lvgl_adapter ^0.6.2`。已启用 adapter PPA 和 ESP LCD DMA2D hook，未启用 LVGL 内置 `CONFIG_LV_USE_PPA`。
 * 如果你看到“背光闪”或者“屏幕闪”，优先启用 `Example Configuration -> Bypass PWM and force backlight always on`，先区分是 PWM 背光问题还是显示链路/时序不稳定。
 * 显示链路代码已经拆成三层：
   * [main/display_board.c](./main/display_board.c)：PHY 供电、背光
-  * [main/display_panel.c](./main/display_panel.c)：DSI 总线、DBI IO、JD9165 面板创建
-  * [main/display_lvgl.c](./main/display_lvgl.c)：LVGL 任务、draw buffer、flush 回调
+  * [main/display_panel.c](./main/display_panel.c)：DSI 总线、DBI IO、JD9165 面板创建、DMA2D hook
+  * [main/display_lvgl.c](./main/display_lvgl.c)：esp_lvgl_adapter 显示/触摸注册、legacy LVGL port 回退
 * 无线模块已按独立测试模块接入：
   * [main/test_wireless.c](./main/test_wireless.c)：无线状态机、板级 SDIO 定义、WiFi STA 初始化/扫描/连接接口、BLE 未接入时的统一返回路径
   * [main/test_config.h](./main/test_config.h)：`GPIO14~19` 的 `P4 <-> C6 SDIO` 宏定义
@@ -179,7 +183,8 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 
 ```bash
 ...
-I (22xx) display_lvgl: Initialize LVGL
+I (22xx) display_lvgl: Initialize LVGL via esp_lvgl_adapter
+I (22xx) display_lvgl: LVGL v9.4.0 lvgl_builtin_ppa=0 DMA2D_hook=1 adapter_ppa=1 tear=DOUBLE_DIRECT num_fbs=2 lane=750Mbps dpi=54MHz
 I (22xx) app_main: Display LVGL integrated demo UI
 I (23xx) test_sdcard: Hosted+SDMMC workaround: enabled
 I (24xx) test_sdcard: Filesystem mounted
