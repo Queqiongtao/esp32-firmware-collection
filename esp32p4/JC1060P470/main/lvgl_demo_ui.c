@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <string.h>
 #include "display_font.h"
 #include "esp_err.h"
 #include "esp_log.h"
@@ -76,9 +77,143 @@ static size_t s_wifi_ap_record_count;
 static uint32_t s_wifi_scan_generation;
 static char s_selected_wifi_ssid[TEST_WIRELESS_SSID_MAX_LEN + 1];
 
+#define WIFI_KB_CTRL_KEY (LV_KEYBOARD_CTRL_BUTTON_FLAGS)
+#define WIFI_KB_CHECKED_KEY (LV_BUTTONMATRIX_CTRL_CHECKED)
+
+static const char * const s_wifi_keyboard_lower_map[] = {
+    "1#", "q", "w", "e", "r", "t", "y", "u", "i", "o", "p", "Bksp", "\n",
+    "ABC", "a", "s", "d", "f", "g", "h", "j", "k", "l", "Enter", "\n",
+    "_", "-", "z", "x", "c", "v", "b", "n", "m", ".", ",", ":", "\n",
+    "Hide", "Left", " ", "Right", "OK", ""
+};
+
+static const lv_buttonmatrix_ctrl_t s_wifi_keyboard_lower_ctrl_map[] = {
+    WIFI_KB_CTRL_KEY | 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, WIFI_KB_CHECKED_KEY | 7,
+    WIFI_KB_CTRL_KEY | 6, 3, 3, 3, 3, 3, 3, 3, 3, 3, WIFI_KB_CHECKED_KEY | 7,
+    WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1, 1, 1, 1, 1, 1, 1, 1,
+    WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1,
+    WIFI_KB_CTRL_KEY | 2, WIFI_KB_CHECKED_KEY | 2, 6, WIFI_KB_CHECKED_KEY | 2, WIFI_KB_CTRL_KEY | 2
+};
+
+static const char * const s_wifi_keyboard_upper_map[] = {
+    "1#", "Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "Bksp", "\n",
+    "abc", "A", "S", "D", "F", "G", "H", "J", "K", "L", "Enter", "\n",
+    "_", "-", "Z", "X", "C", "V", "B", "N", "M", ".", ",", ":", "\n",
+    "Hide", "Left", " ", "Right", "OK", ""
+};
+
+static const lv_buttonmatrix_ctrl_t s_wifi_keyboard_upper_ctrl_map[] = {
+    WIFI_KB_CTRL_KEY | 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, WIFI_KB_CHECKED_KEY | 7,
+    WIFI_KB_CTRL_KEY | 6, 3, 3, 3, 3, 3, 3, 3, 3, 3, WIFI_KB_CHECKED_KEY | 7,
+    WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1, 1, 1, 1, 1, 1, 1, 1,
+    WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1, WIFI_KB_CHECKED_KEY | 1,
+    WIFI_KB_CTRL_KEY | 2, WIFI_KB_CHECKED_KEY | 2, 6, WIFI_KB_CHECKED_KEY | 2, WIFI_KB_CTRL_KEY | 2
+};
+
+static const char * const s_wifi_keyboard_special_map[] = {
+    "1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "Bksp", "\n",
+    "abc", "+", "&", "/", "*", "=", "%", "!", "?", "#", "<", ">", "\n",
+    "\\", "@", "$", "(", ")", "{", "}", "[", "]", ";", "\"", "'", "\n",
+    "Hide", "Left", " ", "Right", "OK", ""
+};
+
+static const lv_buttonmatrix_ctrl_t s_wifi_keyboard_special_ctrl_map[] = {
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, WIFI_KB_CHECKED_KEY | 2,
+    WIFI_KB_CTRL_KEY | 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    WIFI_KB_CTRL_KEY | 2, WIFI_KB_CHECKED_KEY | 2, 6, WIFI_KB_CHECKED_KEY | 2, WIFI_KB_CTRL_KEY | 2
+};
+
 static const lv_font_t *demo_get_ui_font(void)
 {
     return display_font_get_ui_font();
+}
+
+static bool demo_utf8_sequence_valid(const uint8_t *text, size_t len, size_t *advance)
+{
+    uint32_t codepoint = 0;
+    uint8_t first = text[0];
+
+    if (first < 0x80) {
+        *advance = 1;
+        return true;
+    }
+
+    if (first >= 0xC2 && first <= 0xDF) {
+        if (len < 2 || (text[1] & 0xC0) != 0x80) {
+            return false;
+        }
+        *advance = 2;
+        return true;
+    }
+
+    if (first >= 0xE0 && first <= 0xEF) {
+        if (len < 3 || (text[1] & 0xC0) != 0x80 || (text[2] & 0xC0) != 0x80) {
+            return false;
+        }
+        if ((first == 0xE0 && text[1] < 0xA0) || (first == 0xED && text[1] >= 0xA0)) {
+            return false;
+        }
+        *advance = 3;
+        return true;
+    }
+
+    if (first >= 0xF0 && first <= 0xF4) {
+        if (len < 4 || (text[1] & 0xC0) != 0x80 || (text[2] & 0xC0) != 0x80 || (text[3] & 0xC0) != 0x80) {
+            return false;
+        }
+        if ((first == 0xF0 && text[1] < 0x90) || (first == 0xF4 && text[1] > 0x8F)) {
+            return false;
+        }
+        codepoint = ((uint32_t)(first & 0x07) << 18) |
+                    ((uint32_t)(text[1] & 0x3F) << 12) |
+                    ((uint32_t)(text[2] & 0x3F) << 6) |
+                    (uint32_t)(text[3] & 0x3F);
+        if (codepoint > 0x10FFFF) {
+            return false;
+        }
+        *advance = 4;
+        return true;
+    }
+
+    return false;
+}
+
+static bool demo_utf8_string_valid(const char *text)
+{
+    const uint8_t *bytes = (const uint8_t *)text;
+    size_t len = strlen(text);
+    size_t offset = 0;
+
+    while (offset < len) {
+        size_t advance = 0;
+        if (!demo_utf8_sequence_valid(&bytes[offset], len - offset, &advance)) {
+            return false;
+        }
+        offset += advance;
+    }
+
+    return true;
+}
+
+static const char *demo_wifi_ssid_display_text(const char *ssid, char *buf, size_t buf_size)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return "<Hidden>";
+    }
+
+    if (demo_utf8_string_valid(ssid)) {
+        return ssid;
+    }
+
+    if (buf_size > 0) {
+        snprintf(buf, buf_size, "<SSID HEX:%02X%02X%02X%02X>",
+                 (unsigned char)ssid[0],
+                 (unsigned char)ssid[1],
+                 (unsigned char)ssid[2],
+                 (unsigned char)ssid[3]);
+    }
+    return buf;
 }
 
 static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_t width, lv_coord_t height)
@@ -191,19 +326,19 @@ static const char *wireless_transport_state_to_text(test_wireless_transport_stat
 {
     switch (state) {
     case TEST_WIRELESS_TRANSPORT_UNINITIALIZED:
-        return "未初始化";
+        return "INIT";
     case TEST_WIRELESS_TRANSPORT_NOT_AVAILABLE:
         return "host NA";
     case TEST_WIRELESS_TRANSPORT_IDLE:
-        return "空闲";
+        return "IDLE";
     case TEST_WIRELESS_TRANSPORT_CONNECTING:
-        return "连接中";
+        return "LINKING";
     case TEST_WIRELESS_TRANSPORT_READY:
-        return "已就绪";
+        return "READY";
     case TEST_WIRELESS_TRANSPORT_ERROR:
-        return "错误";
+        return "ERROR";
     default:
-        return "未知";
+        return "UNKNOWN";
     }
 }
 
@@ -211,21 +346,21 @@ static const char *wireless_wifi_state_to_text(test_wireless_wifi_state_t state)
 {
     switch (state) {
     case TEST_WIRELESS_WIFI_UNINITIALIZED:
-        return "未初始化";
+        return "INIT";
     case TEST_WIRELESS_WIFI_NOT_AVAILABLE:
         return "host NA";
     case TEST_WIRELESS_WIFI_IDLE:
-        return "空闲";
+        return "IDLE";
     case TEST_WIRELESS_WIFI_SCANNING:
         return "Scan";
     case TEST_WIRELESS_WIFI_CONNECTING:
         return "Join";
     case TEST_WIRELESS_WIFI_CONNECTED:
-        return "已连接";
+        return "CONNECTED";
     case TEST_WIRELESS_WIFI_ERROR:
-        return "错误";
+        return "ERROR";
     default:
-        return "未知";
+        return "UNKNOWN";
     }
 }
 
@@ -233,19 +368,19 @@ static const char *wireless_ble_state_to_text(test_wireless_ble_state_t state)
 {
     switch (state) {
     case TEST_WIRELESS_BLE_UNINITIALIZED:
-        return "未初始化";
+        return "INIT";
     case TEST_WIRELESS_BLE_NOT_AVAILABLE:
         return "host NA";
     case TEST_WIRELESS_BLE_IDLE:
-        return "空闲";
+        return "IDLE";
     case TEST_WIRELESS_BLE_SCANNING:
         return "Scan";
     case TEST_WIRELESS_BLE_ADVERTISING:
         return "Adv On";
     case TEST_WIRELESS_BLE_ERROR:
-        return "错误";
+        return "ERROR";
     default:
-        return "未知";
+        return "UNKNOWN";
     }
 }
 
@@ -304,6 +439,46 @@ static void wifi_keyboard_event_cb(lv_event_t *e)
         wifi_dialog_connect_btn_cb(e);
     } else if (code == LV_EVENT_CANCEL) {
         wifi_dialog_close();
+    }
+}
+
+static void wifi_keyboard_preprocess_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || s_wifi_keyboard == NULL) {
+        return;
+    }
+
+    uint32_t btn_id = lv_keyboard_get_selected_button(s_wifi_keyboard);
+    if (btn_id == LV_BUTTONMATRIX_BUTTON_NONE) {
+        return;
+    }
+
+    const char *text = lv_keyboard_get_button_text(s_wifi_keyboard, btn_id);
+    if (text == NULL) {
+        return;
+    }
+
+    if (strcmp(text, "Bksp") == 0) {
+        if (s_wifi_password_ta != NULL) {
+            lv_textarea_delete_char(s_wifi_password_ta);
+        }
+        lv_event_stop_processing(e);
+    } else if (strcmp(text, "Left") == 0) {
+        if (s_wifi_password_ta != NULL) {
+            lv_textarea_cursor_left(s_wifi_password_ta);
+        }
+        lv_event_stop_processing(e);
+    } else if (strcmp(text, "Right") == 0) {
+        if (s_wifi_password_ta != NULL) {
+            lv_textarea_cursor_right(s_wifi_password_ta);
+        }
+        lv_event_stop_processing(e);
+    } else if (strcmp(text, "OK") == 0 || strcmp(text, "Enter") == 0) {
+        wifi_dialog_connect_btn_cb(e);
+        lv_event_stop_processing(e);
+    } else if (strcmp(text, "Hide") == 0) {
+        wifi_dialog_close();
+        lv_event_stop_processing(e);
     }
 }
 
@@ -535,8 +710,11 @@ static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
     }
 
     for (size_t i = 0; i < ap_count; i++) {
+        char ssid_display[32];
         char item_text[96];
-        const char *ssid = s_wifi_ap_records[i].ssid[0] != '\0' ? s_wifi_ap_records[i].ssid : "<Hidden>";
+        const char *ssid = demo_wifi_ssid_display_text(s_wifi_ap_records[i].ssid,
+                                                       ssid_display,
+                                                       sizeof(ssid_display));
         snprintf(item_text, sizeof(item_text), "%s  %ddBm  %s",
                  ssid, s_wifi_ap_records[i].rssi, wireless_wifi_security_text(s_wifi_ap_records[i].secured));
         lv_obj_t *item = lv_list_add_button(s_wifi_list, NULL, item_text);
@@ -571,7 +749,9 @@ static void wifi_dialog_open(const char *ssid)
     }
 
     snprintf(s_selected_wifi_ssid, sizeof(s_selected_wifi_ssid), "%s", ssid);
-    lv_label_set_text_fmt(s_wifi_dialog_ssid_label, "SSID: %s", ssid);
+    char ssid_display[32];
+    lv_label_set_text_fmt(s_wifi_dialog_ssid_label, "SSID: %s",
+                          demo_wifi_ssid_display_text(ssid, ssid_display, sizeof(ssid_display)));
     lv_textarea_set_text(s_wifi_password_ta, "");
     lv_obj_clear_flag(s_wifi_dialog_mask, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -653,9 +833,12 @@ static void demo_update_wireless_card(void)
                           status.wifi_ap_count,
                           status.transport_up_received,
                           status.cp_init_received);
+    char current_ssid_display[32];
     lv_label_set_text_fmt(s_wifi_hint_label, "Hint: %s SSID=%s IP=%s evt=%" PRIi32,
                           status.last_hint,
-                          status.current_ssid[0] != '\0' ? status.current_ssid : "--",
+                          demo_wifi_ssid_display_text(status.current_ssid,
+                                                      current_ssid_display,
+                                                      sizeof(current_ssid_display)),
                           status.current_ip[0] != '\0' ? status.current_ip : "--",
                           status.hosted_last_event);
     lv_label_set_text_fmt(s_ble_status_label, "状态: %s", wireless_ble_state_to_text(status.ble_state));
@@ -837,6 +1020,10 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     s_wifi_link_label = lv_label_create(wifi_card);
     s_wifi_ap_label = lv_label_create(wifi_card);
     s_wifi_hint_label = lv_label_create(wifi_card);
+    lv_obj_set_style_text_font(s_wifi_status_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_wifi_link_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_wifi_ap_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_wifi_hint_label, demo_get_ui_font(), 0);
     lv_obj_set_style_text_color(s_wifi_hint_label, lv_color_hex(0x5E4C38), 0);
 
     lv_obj_t *wifi_btn_row = lv_obj_create(wifi_card);
@@ -865,6 +1052,8 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 180);
     s_ble_status_label = lv_label_create(ble_card);
     s_ble_hint_label = lv_label_create(ble_card);
+    lv_obj_set_style_text_font(s_ble_status_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_ble_hint_label, demo_get_ui_font(), 0);
     lv_obj_set_style_text_color(s_ble_hint_label, lv_color_hex(0x5E4C38), 0);
     lv_label_set_text(s_ble_status_label, "状态: host NA");
     lv_label_set_text(s_ble_hint_label, "BLE Not Ready");
@@ -893,12 +1082,15 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_style_text_font(dialog_title, demo_get_ui_font(), 0);
 
     s_wifi_dialog_ssid_label = lv_label_create(s_wifi_dialog);
+    lv_obj_set_style_text_font(s_wifi_dialog_ssid_label, demo_get_ui_font(), 0);
     lv_label_set_text(s_wifi_dialog_ssid_label, "SSID: --");
 
     s_wifi_password_ta = lv_textarea_create(s_wifi_dialog);
     lv_obj_set_width(s_wifi_password_ta, lv_pct(100));
+    lv_obj_set_style_text_font(s_wifi_password_ta, demo_get_ui_font(), 0);
     lv_textarea_set_one_line(s_wifi_password_ta, true);
     lv_textarea_set_password_mode(s_wifi_password_ta, true);
+    lv_textarea_set_password_bullet(s_wifi_password_ta, "*");
     lv_textarea_set_placeholder_text(s_wifi_password_ta, "Password");
     lv_obj_add_event_cb(s_wifi_password_ta, wifi_password_ta_event_cb, LV_EVENT_ALL, NULL);
 
@@ -917,6 +1109,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_size(connect_btn, 110, 42);
     lv_obj_add_event_cb(connect_btn, wifi_dialog_connect_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *connect_label = lv_label_create(connect_btn);
+    lv_obj_set_style_text_font(connect_label, demo_get_ui_font(), 0);
     lv_label_set_text(connect_label, "Connect");
     lv_obj_center(connect_label);
 
@@ -924,13 +1117,32 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_size(cancel_btn, 110, 42);
     lv_obj_add_event_cb(cancel_btn, wifi_dialog_cancel_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *cancel_label = lv_label_create(cancel_btn);
+    lv_obj_set_style_text_font(cancel_label, demo_get_ui_font(), 0);
     lv_label_set_text(cancel_label, "Cancel");
     lv_obj_center(cancel_label);
 
     s_wifi_keyboard = lv_keyboard_create(top_layer);
     lv_obj_set_size(s_wifi_keyboard, lv_pct(100), 220);
+    lv_obj_set_style_text_font(s_wifi_keyboard, demo_get_ui_font(), LV_PART_ITEMS);
     lv_obj_align(s_wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_keyboard_set_map(s_wifi_keyboard,
+                        LV_KEYBOARD_MODE_TEXT_LOWER,
+                        s_wifi_keyboard_lower_map,
+                        s_wifi_keyboard_lower_ctrl_map);
+    lv_keyboard_set_map(s_wifi_keyboard,
+                        LV_KEYBOARD_MODE_TEXT_UPPER,
+                        s_wifi_keyboard_upper_map,
+                        s_wifi_keyboard_upper_ctrl_map);
+    lv_keyboard_set_map(s_wifi_keyboard,
+                        LV_KEYBOARD_MODE_SPECIAL,
+                        s_wifi_keyboard_special_map,
+                        s_wifi_keyboard_special_ctrl_map);
+    lv_keyboard_set_mode(s_wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
     lv_keyboard_set_textarea(s_wifi_keyboard, NULL);
+    lv_obj_add_event_cb(s_wifi_keyboard,
+                        wifi_keyboard_preprocess_cb,
+                        LV_EVENT_VALUE_CHANGED | LV_EVENT_PREPROCESS,
+                        NULL);
     lv_obj_add_event_cb(s_wifi_keyboard, wifi_keyboard_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
 
