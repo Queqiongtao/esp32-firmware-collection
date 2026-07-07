@@ -7,6 +7,7 @@
 #include "lvgl.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
@@ -28,6 +29,19 @@ typedef struct {
     lv_point_t last_point;
     bool touch_active;
 } demo_touch_state_t;
+
+typedef enum {
+    DEMO_WIFI_LIST_VIEW_UNKNOWN,
+    DEMO_WIFI_LIST_VIEW_NOT_READY,
+    DEMO_WIFI_LIST_VIEW_WIFI_NOT_READY,
+    DEMO_WIFI_LIST_VIEW_C6_LINK_FAILED,
+    DEMO_WIFI_LIST_VIEW_TAP_SCAN,
+    DEMO_WIFI_LIST_VIEW_SCANNING,
+    DEMO_WIFI_LIST_VIEW_READ_FAIL,
+    DEMO_WIFI_LIST_VIEW_EMPTY,
+    DEMO_WIFI_LIST_VIEW_DISABLED,
+    DEMO_WIFI_LIST_VIEW_RESULTS,
+} demo_wifi_list_view_t;
 
 static lv_obj_t *s_touch_status_label;
 static lv_obj_t *s_touch_count_label;
@@ -80,7 +94,11 @@ static demo_touch_state_t s_touch_state;
 static test_wireless_ap_record_t s_wifi_ap_records[TEST_WIRELESS_SCAN_RESULT_MAX];
 static size_t s_wifi_ap_record_count;
 static uint32_t s_wifi_scan_generation;
+static demo_wifi_list_view_t s_wifi_list_view = DEMO_WIFI_LIST_VIEW_UNKNOWN;
 static char s_selected_wifi_ssid[TEST_WIRELESS_SSID_MAX_LEN + 1];
+static uint32_t s_ui_label_update_count;
+static uint32_t s_ui_list_rebuild_count;
+static uint32_t s_ui_update_report_start_ms;
 
 #define WIFI_KB_CTRL_KEY (LV_KEYBOARD_CTRL_BUTTON_FLAGS)
 #define WIFI_KB_CHECKED_KEY (LV_BUTTONMATRIX_CTRL_CHECKED)
@@ -129,9 +147,119 @@ static const lv_buttonmatrix_ctrl_t s_wifi_keyboard_special_ctrl_map[] = {
     WIFI_KB_CTRL_KEY | 2, WIFI_KB_CHECKED_KEY | 2, 6, WIFI_KB_CHECKED_KEY | 2, WIFI_KB_CTRL_KEY | 2
 };
 
-static const lv_font_t *demo_get_ui_font(void)
+static const lv_font_t *demo_get_role_font(display_font_role_t role)
 {
-    return display_font_get_ui_font();
+    return display_font_get_role_font(role);
+}
+
+static void demo_set_text_role(lv_obj_t *obj, display_font_role_t role)
+{
+    lv_obj_set_style_text_font(obj, demo_get_role_font(role), 0);
+}
+
+static void demo_config_label(lv_obj_t *label, display_font_role_t role)
+{
+    demo_set_text_role(label, role);
+}
+
+static void demo_config_list_label(lv_obj_t *label, display_font_role_t role)
+{
+    demo_set_text_role(label, role);
+    lv_obj_set_width(label, lv_pct(100));
+    lv_obj_set_height(label, LV_SIZE_CONTENT);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+}
+
+static bool demo_label_set_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (label == NULL || text == NULL) {
+        return false;
+    }
+
+    const char *current = lv_label_get_text(label);
+    if (current != NULL && strcmp(current, text) == 0) {
+        return false;
+    }
+
+    lv_label_set_text(label, text);
+    s_ui_label_update_count++;
+    return true;
+}
+
+static bool demo_label_set_text_fmt_if_changed(lv_obj_t *label, const char *fmt, ...)
+{
+    char text[192];
+    va_list args;
+
+    va_start(args, fmt);
+    int len = vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+
+    if (len < 0) {
+        return false;
+    }
+
+    text[sizeof(text) - 1] = '\0';
+    return demo_label_set_text_if_changed(label, text);
+}
+
+static void demo_obj_set_disabled(lv_obj_t *obj, bool disabled)
+{
+    if (obj == NULL || lv_obj_has_state(obj, LV_STATE_DISABLED) == disabled) {
+        return;
+    }
+
+    if (disabled) {
+        lv_obj_add_state(obj, LV_STATE_DISABLED);
+    } else {
+        lv_obj_clear_state(obj, LV_STATE_DISABLED);
+    }
+}
+
+static lv_obj_t *demo_wifi_list_add_text(const char *text)
+{
+    lv_obj_t *item = lv_label_create(s_wifi_list);
+    lv_label_set_text(item, text);
+    demo_config_list_label(item, DISPLAY_FONT_ROLE_SMALL);
+    return item;
+}
+
+static lv_obj_t *demo_wifi_list_add_button(const char *text)
+{
+    lv_obj_t *item = lv_label_create(s_wifi_list);
+    lv_label_set_text(item, text);
+    demo_config_list_label(item, DISPLAY_FONT_ROLE_SMALL);
+    lv_obj_add_flag(item, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_pad_ver(item, 4, 0);
+    return item;
+}
+
+static void demo_ui_report_updates_if_ready(void)
+{
+    uint32_t now_ms = lv_tick_get();
+    if (s_ui_update_report_start_ms == 0) {
+        s_ui_update_report_start_ms = now_ms;
+        return;
+    }
+
+    if (lv_tick_elaps(s_ui_update_report_start_ms) < 1000) {
+        return;
+    }
+
+    lv_mem_monitor_t mon = {0};
+    lv_mem_monitor(&mon);
+    ESP_LOGI(TAG, "UI updates: labels=%" PRIu32 " list_rebuilds=%" PRIu32
+             " lv_mem_free=%u biggest=%u used=%u%% frag=%u%%",
+             s_ui_label_update_count,
+             s_ui_list_rebuild_count,
+             (unsigned int)mon.free_size,
+             (unsigned int)mon.free_biggest_size,
+             (unsigned int)mon.used_pct,
+             (unsigned int)mon.frag_pct);
+
+    s_ui_label_update_count = 0;
+    s_ui_list_rebuild_count = 0;
+    s_ui_update_report_start_ms = now_ms;
 }
 
 static bool demo_utf8_sequence_valid(const uint8_t *text, size_t len, size_t *advance)
@@ -225,19 +353,19 @@ static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_
 {
     lv_obj_t *card = lv_obj_create(parent);
     lv_obj_set_size(card, width, height);
-    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_radius(card, 8, 0);
     lv_obj_set_style_border_width(card, 2, 0);
     lv_obj_set_style_border_color(card, lv_color_hex(0x1E3A5F), 0);
     lv_obj_set_style_bg_color(card, lv_color_hex(0xF8F2E7), 0);
-    lv_obj_set_style_pad_all(card, 16, 0);
-    lv_obj_set_style_pad_row(card, 10, 0);
+    lv_obj_set_style_pad_all(card, 14, 0);
+    lv_obj_set_style_pad_row(card, 8, 0);
     lv_obj_set_layout(card, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title_label = lv_label_create(card);
     lv_label_set_text(title_label, title);
-    lv_obj_set_style_text_font(title_label, demo_get_ui_font(), 0);
+    demo_config_label(title_label, DISPLAY_FONT_ROLE_CARD_TITLE);
     lv_obj_set_style_text_color(title_label, lv_color_hex(0x132238), 0);
     return card;
 }
@@ -520,15 +648,15 @@ static void demo_update_touch_card(void)
         return;
     }
 
-    lv_label_set_text_fmt(s_touch_status_label, "状态: %s", s_touch_state.touch_active ? "按下中" : "待触摸");
-    lv_label_set_text_fmt(s_touch_count_label, "点击次数: %" PRIu32, s_touch_state.touch_count);
-    lv_label_set_text_fmt(s_touch_point_label, "最近坐标: (%" PRId32 ", %" PRId32 ")",
-                          s_touch_state.last_point.x, s_touch_state.last_point.y);
+    demo_label_set_text_fmt_if_changed(s_touch_status_label, "状态: %s", s_touch_state.touch_active ? "按下中" : "待触摸");
+    demo_label_set_text_fmt_if_changed(s_touch_count_label, "点击次数: %" PRIu32, s_touch_state.touch_count);
+    demo_label_set_text_fmt_if_changed(s_touch_point_label, "最近坐标: (%" PRId32 ", %" PRId32 ")",
+                                       s_touch_state.last_point.x, s_touch_state.last_point.y);
 
     if (s_touch_state.last_touch_ms == 0) {
-        lv_label_set_text(s_touch_hint_label, "在下方触摸区点击，验证显示与触摸联动");
+        demo_label_set_text_if_changed(s_touch_hint_label, "在下方触摸区点击，验证显示与触摸联动");
     } else {
-        lv_label_set_text_fmt(s_touch_hint_label, "最近点击: %" PRIu32 " ms", s_touch_state.last_touch_ms);
+        demo_label_set_text_fmt_if_changed(s_touch_hint_label, "最近点击: %" PRIu32 " ms", s_touch_state.last_touch_ms);
     }
 }
 
@@ -541,24 +669,24 @@ static void demo_update_rtc_card(void)
     test_rtc_status_t status = {0};
     esp_err_t ret = test_rtc_get_status(&status);
     if (ret != ESP_OK || !status.initialized) {
-        lv_label_set_text(s_rtc_status_label, "状态: 未初始化");
-        lv_label_set_text(s_rtc_time_label, "时间: --");
-        lv_label_set_text(s_rtc_sync_label, "同步: --");
+        demo_label_set_text_if_changed(s_rtc_status_label, "状态: 未初始化");
+        demo_label_set_text_if_changed(s_rtc_time_label, "时间: --");
+        demo_label_set_text_if_changed(s_rtc_sync_label, "同步: --");
         return;
     }
 
     if (status.time_valid) {
-        lv_label_set_text(s_rtc_status_label, "状态: 运行中");
-        lv_label_set_text_fmt(s_rtc_time_label, "时间: %04u-%02u-%02u %02u:%02u:%02u",
-                              status.year, status.month, status.mday,
-                              status.hour, status.min, status.sec);
+        demo_label_set_text_if_changed(s_rtc_status_label, "状态: 运行中");
+        demo_label_set_text_fmt_if_changed(s_rtc_time_label, "时间: %04u-%02u-%02u %02u:%02u:%02u",
+                                           status.year, status.month, status.mday,
+                                           status.hour, status.min, status.sec);
     } else {
-        lv_label_set_text_fmt(s_rtc_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
-        lv_label_set_text(s_rtc_time_label, "时间: 无有效值");
+        demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+        demo_label_set_text_if_changed(s_rtc_time_label, "时间: 无有效值");
     }
 
-    lv_label_set_text_fmt(s_rtc_sync_label, "同步: %s",
-                          status.synced_from_build_time ? "曾从固件构建时间写入" : "保持 RTC 原值");
+    demo_label_set_text_fmt_if_changed(s_rtc_sync_label, "同步: %s",
+                                       status.synced_from_build_time ? "曾从固件构建时间写入" : "保持 RTC 原值");
 }
 
 static void demo_update_usb_card(void)
@@ -570,24 +698,24 @@ static void demo_update_usb_card(void)
     test_usb_status_t status = {0};
     esp_err_t ret = test_usb_get_status(&status);
     if (ret != ESP_OK || !status.initialized) {
-        lv_label_set_text(s_usb_status_label, "状态: 未初始化");
-        lv_label_set_text(s_usb_line_label, "线路: --");
-        lv_label_set_text(s_usb_stats_label, "收发: --");
+        demo_label_set_text_if_changed(s_usb_status_label, "状态: 未初始化");
+        demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
+        demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
         return;
     }
 
     if (status.last_error != ESP_OK) {
-        lv_label_set_text_fmt(s_usb_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
     } else {
-        lv_label_set_text_fmt(s_usb_status_label, "状态: %s", status.attached ? "已连接主机" : "等待枚举");
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: %s", status.attached ? "已连接主机" : "等待枚举");
     }
 
-    lv_label_set_text_fmt(s_usb_line_label, "DTR=%d RTS=%d 最近收包=%uB 最近发包=%uB",
-                          status.dtr, status.rts,
-                          (unsigned int)status.last_rx_size, (unsigned int)status.last_tx_size);
-    lv_label_set_text_fmt(s_usb_stats_label, "RX %" PRIu32 " 包/%" PRIu32 " B  TX %" PRIu32 " 包/%" PRIu32 " B",
-                          status.rx_packets, status.rx_bytes, status.tx_packets, status.tx_bytes);
-    lv_label_set_text(s_usb_hint_label, "连接 HS USB Device 口，用串口工具发送数据验证 CDC 回显");
+    demo_label_set_text_fmt_if_changed(s_usb_line_label, "DTR=%d RTS=%d 最近收包=%uB 最近发包=%uB",
+                                       status.dtr, status.rts,
+                                       (unsigned int)status.last_rx_size, (unsigned int)status.last_tx_size);
+    demo_label_set_text_fmt_if_changed(s_usb_stats_label, "RX %" PRIu32 " 包/%" PRIu32 " B  TX %" PRIu32 " 包/%" PRIu32 " B",
+                                       status.rx_packets, status.rx_bytes, status.tx_packets, status.tx_bytes);
+    demo_label_set_text_if_changed(s_usb_hint_label, "连接 HS USB Device 口，用串口工具发送数据验证 CDC 回显");
 }
 
 static void demo_update_audio_card(void)
@@ -599,23 +727,23 @@ static void demo_update_audio_card(void)
     test_audio_status_t status = {0};
     esp_err_t ret = test_audio_get_status(&status);
     if (ret != ESP_OK || !status.initialized) {
-        lv_label_set_text(s_audio_status_label, "状态: 未初始化");
-        lv_label_set_text(s_audio_size_label, "录音数据: --");
-        lv_label_set_text(s_audio_peak_label, "峰值: --");
-        lv_label_set_text(s_audio_input_label, "输入电平: --");
+        demo_label_set_text_if_changed(s_audio_status_label, "状态: 未初始化");
+        demo_label_set_text_if_changed(s_audio_size_label, "录音数据: --");
+        demo_label_set_text_if_changed(s_audio_peak_label, "峰值: --");
+        demo_label_set_text_if_changed(s_audio_input_label, "输入电平: --");
         return;
     }
 
     if (status.state == TEST_AUDIO_STATE_ERROR) {
-        lv_label_set_text_fmt(s_audio_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+        demo_label_set_text_fmt_if_changed(s_audio_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
     } else {
-        lv_label_set_text_fmt(s_audio_status_label, "状态: %s", audio_state_to_text(status.state));
+        demo_label_set_text_fmt_if_changed(s_audio_status_label, "状态: %s", audio_state_to_text(status.state));
     }
 
-    lv_label_set_text_fmt(s_audio_size_label, "录音数据: %u B", (unsigned int)status.last_record_size);
-    lv_label_set_text_fmt(s_audio_peak_label, "峰值: %u", (unsigned int)status.last_record_peak);
-    lv_label_set_text_fmt(s_audio_input_label, "输入电平: %s", audio_input_level_text(status.last_record_peak,
-                                                                                      status.last_record_nonzero_count));
+    demo_label_set_text_fmt_if_changed(s_audio_size_label, "录音数据: %u B", (unsigned int)status.last_record_size);
+    demo_label_set_text_fmt_if_changed(s_audio_peak_label, "峰值: %u", (unsigned int)status.last_record_peak);
+    demo_label_set_text_fmt_if_changed(s_audio_input_label, "输入电平: %s", audio_input_level_text(status.last_record_peak,
+                                                                                                 status.last_record_nonzero_count));
 
     bool can_start_new = (status.state == TEST_AUDIO_STATE_IDLE ||
                           status.state == TEST_AUDIO_STATE_RECORDED ||
@@ -623,17 +751,17 @@ static void demo_update_audio_card(void)
     bool can_play_record = (status.state == TEST_AUDIO_STATE_RECORDED && status.last_record_size > 0);
 
     if (can_start_new) {
-        lv_obj_clear_state(s_audio_music_btn, LV_STATE_DISABLED);
-        lv_obj_clear_state(s_audio_record_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_audio_music_btn, false);
+        demo_obj_set_disabled(s_audio_record_btn, false);
     } else {
-        lv_obj_add_state(s_audio_music_btn, LV_STATE_DISABLED);
-        lv_obj_add_state(s_audio_record_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_audio_music_btn, true);
+        demo_obj_set_disabled(s_audio_record_btn, true);
     }
 
     if (can_play_record) {
-        lv_obj_clear_state(s_audio_play_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_audio_play_btn, false);
     } else {
-        lv_obj_add_state(s_audio_play_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_audio_play_btn, true);
     }
 }
 
@@ -646,40 +774,54 @@ static void demo_update_battery_card(void)
 #if CONFIG_EXAMPLE_ENABLE_TEST_BATTERY
     const test_battery_status_t *status = test_battery_get_status();
     if (status == NULL || !status->initialized) {
-        lv_label_set_text(s_battery_status_label, "状态: 初始化中");
-        lv_label_set_text(s_battery_adc_label, "ADC值: --");
-        lv_label_set_text(s_battery_voltage_label, "BAT值: --");
-        lv_label_set_text(s_battery_percent_label, "BAT%: --");
-        lv_label_set_text(s_battery_hint_label, "GPIO52 BAT 点");
+        demo_label_set_text_if_changed(s_battery_status_label, "状态: 初始化中");
+        demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
+        demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
+        demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
+        demo_label_set_text_if_changed(s_battery_hint_label, "GPIO52 BAT 点");
         return;
     }
 
     esp_err_t ret = test_battery_run();
 
     if (!status->sample_valid) {
-        lv_label_set_text_fmt(s_battery_status_label, "状态: %s(0x%x)",
-                              ret == ESP_OK ? "采样中" : "错误",
-                              (unsigned int)status->last_error);
-        lv_label_set_text(s_battery_adc_label, "ADC值: --");
-        lv_label_set_text(s_battery_voltage_label, "BAT值: --");
-        lv_label_set_text(s_battery_percent_label, "BAT%: --");
+        demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s(0x%x)",
+                                           ret == ESP_OK ? "采样中" : "错误",
+                                           (unsigned int)status->last_error);
+        demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
+        demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
+        demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
     } else {
-        lv_label_set_text_fmt(s_battery_status_label, "状态: %s", status->calibration_enabled ? "运行中(CAL)" : "运行中(RAW)");
-        lv_label_set_text_fmt(s_battery_adc_label, "ADC值: %d.%03d V",
-                              status->adc_voltage_mv / 1000, status->adc_voltage_mv % 1000);
-        lv_label_set_text_fmt(s_battery_voltage_label, "BAT值: %d.%03d V",
-                              status->battery_voltage_mv / 1000, status->battery_voltage_mv % 1000);
-        lv_label_set_text_fmt(s_battery_percent_label, "BAT%%: %d%%", status->battery_percent);
+        demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s", status->calibration_enabled ? "运行中(CAL)" : "运行中(RAW)");
+        demo_label_set_text_fmt_if_changed(s_battery_adc_label, "ADC值: %d.%03d V",
+                                           status->adc_voltage_mv / 1000, status->adc_voltage_mv % 1000);
+        demo_label_set_text_fmt_if_changed(s_battery_voltage_label, "BAT值: %d.%03d V",
+                                           status->battery_voltage_mv / 1000, status->battery_voltage_mv % 1000);
+        demo_label_set_text_fmt_if_changed(s_battery_percent_label, "BAT%%: %d%%", status->battery_percent);
     }
 
-    lv_label_set_text_fmt(s_battery_hint_label, "次数: %" PRIu32, status->sample_count);
+    demo_label_set_text_fmt_if_changed(s_battery_hint_label, "次数: %" PRIu32, status->sample_count);
 #else
-    lv_label_set_text(s_battery_status_label, "状态: 未开");
-    lv_label_set_text(s_battery_adc_label, "ADC值: --");
-    lv_label_set_text(s_battery_voltage_label, "BAT值: --");
-    lv_label_set_text(s_battery_percent_label, "BAT%: --");
-    lv_label_set_text(s_battery_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_BATTERY");
+    demo_label_set_text_if_changed(s_battery_status_label, "状态: 未开");
+    demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
+    demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
+    demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
+    demo_label_set_text_if_changed(s_battery_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_BATTERY");
 #endif
+}
+
+static void demo_wifi_list_set_message(demo_wifi_list_view_t view, const char *message, uint32_t generation)
+{
+    if (s_wifi_list_view == view && s_wifi_scan_generation == generation) {
+        return;
+    }
+
+    lv_obj_clean(s_wifi_list);
+    demo_wifi_list_add_text(message);
+    s_wifi_list_view = view;
+    s_wifi_scan_generation = generation;
+    s_wifi_ap_record_count = 0;
+    s_ui_list_rebuild_count++;
 }
 
 static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
@@ -689,28 +831,22 @@ static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
     }
 
     if (!status->transport_confirmed) {
-        lv_obj_clean(s_wifi_list);
-        lv_list_add_text(s_wifi_list, "C6 Link Not Ready");
-        s_wifi_ap_record_count = 0;
-        s_wifi_scan_generation = status->wifi_scan_generation;
+        demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_NOT_READY, "C6 Link Not Ready", status->wifi_scan_generation);
         return;
     }
 
     if (!status->wifi_scan_results_valid && status->wifi_state != TEST_WIRELESS_WIFI_SCANNING) {
-        lv_obj_clean(s_wifi_list);
-        lv_list_add_text(s_wifi_list, "Tap Scan");
-        s_wifi_ap_record_count = 0;
-        s_wifi_scan_generation = status->wifi_scan_generation;
+        demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_TAP_SCAN, "Tap Scan", status->wifi_scan_generation);
         return;
     }
 
     if (status->wifi_state == TEST_WIRELESS_WIFI_SCANNING) {
-        lv_obj_clean(s_wifi_list);
-        lv_list_add_text(s_wifi_list, "Scanning...");
+        demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_SCANNING, "Scanning...", status->wifi_scan_generation);
         return;
     }
 
-    if (status->wifi_scan_generation == s_wifi_scan_generation) {
+    if (s_wifi_list_view == DEMO_WIFI_LIST_VIEW_RESULTS &&
+        status->wifi_scan_generation == s_wifi_scan_generation) {
         return;
     }
 
@@ -719,17 +855,18 @@ static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
                                                    TEST_WIRELESS_SCAN_RESULT_MAX,
                                                    &ap_count);
     if (ret != ESP_OK) {
-        lv_obj_clean(s_wifi_list);
-        lv_list_add_text(s_wifi_list, "Scan Read Fail");
+        demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_READ_FAIL, "Scan Read Fail", status->wifi_scan_generation);
         return;
     }
 
     lv_obj_clean(s_wifi_list);
     s_wifi_ap_record_count = ap_count;
     s_wifi_scan_generation = status->wifi_scan_generation;
+    s_wifi_list_view = ap_count == 0 ? DEMO_WIFI_LIST_VIEW_EMPTY : DEMO_WIFI_LIST_VIEW_RESULTS;
+    s_ui_list_rebuild_count++;
 
     if (ap_count == 0) {
-        lv_list_add_text(s_wifi_list, "Scan Done, 0 AP");
+        demo_wifi_list_add_text("Scan Done, 0 AP");
         return;
     }
 
@@ -739,9 +876,9 @@ static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
         const char *ssid = demo_wifi_ssid_display_text(s_wifi_ap_records[i].ssid,
                                                        ssid_display,
                                                        sizeof(ssid_display));
-        snprintf(item_text, sizeof(item_text), "%s  %ddBm  %s",
+        snprintf(item_text, sizeof(item_text), "%s %ddBm %s",
                  ssid, s_wifi_ap_records[i].rssi, wireless_wifi_security_text(s_wifi_ap_records[i].secured));
-        lv_obj_t *item = lv_list_add_button(s_wifi_list, NULL, item_text);
+        lv_obj_t *item = demo_wifi_list_add_button(item_text);
         if (s_wifi_ap_records[i].ssid[0] != '\0') {
             lv_obj_add_event_cb(item, wifi_ap_item_event_cb, LV_EVENT_CLICKED, s_wifi_ap_records[i].ssid);
         } else {
@@ -792,12 +929,8 @@ static void demo_set_ble_adv_button(bool enabled, bool advertising)
         return;
     }
 
-    lv_label_set_text(s_ble_adv_btn_label, advertising ? "Adv Off" : "Adv On");
-    if (enabled) {
-        lv_obj_clear_state(s_ble_adv_btn, LV_STATE_DISABLED);
-    } else {
-        lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
-    }
+    demo_label_set_text_if_changed(s_ble_adv_btn_label, advertising ? "Adv Off" : "Adv On");
+    demo_obj_set_disabled(s_ble_adv_btn, !enabled);
 }
 
 static void demo_update_wireless_card(void)
@@ -810,97 +943,87 @@ static void demo_update_wireless_card(void)
     test_wireless_status_t status = {0};
     esp_err_t ret = test_wireless_get_status(&status);
     if (ret != ESP_OK) {
-        lv_label_set_text(s_wifi_status_label, "状态: 未初始化");
-        lv_label_set_text(s_wifi_link_label, "Link: --");
-        lv_label_set_text(s_wifi_ap_label, "WiFi: --");
-        lv_label_set_text(s_wifi_hint_label, "Hint: wireless NA");
-        lv_label_set_text(s_ble_status_label, "状态: 未初始化");
-        lv_label_set_text(s_ble_name_label, "Name: --");
-        lv_label_set_text(s_ble_link_label, "Link: --");
-        lv_label_set_text(s_ble_value_label, "GATT值: --");
-        lv_label_set_text(s_ble_hint_label, "BLE wireless NA");
+        demo_label_set_text_if_changed(s_wifi_status_label, "状态: 未初始化");
+        demo_label_set_text_if_changed(s_wifi_link_label, "Link: --");
+        demo_label_set_text_if_changed(s_wifi_ap_label, "WiFi: --");
+        demo_label_set_text_if_changed(s_wifi_hint_label, "Hint: wireless NA");
+        demo_label_set_text_if_changed(s_ble_status_label, "状态: 未初始化");
+        demo_label_set_text_if_changed(s_ble_name_label, "Name: --");
+        demo_label_set_text_if_changed(s_ble_link_label, "Link: --");
+        demo_label_set_text_if_changed(s_ble_value_label, "GATT值: --");
+        demo_label_set_text_if_changed(s_ble_hint_label, "BLE wireless NA");
         demo_set_ble_adv_button(false, false);
-        lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_wifi_scan_btn, true);
         if (s_wifi_list != NULL) {
-            lv_obj_clean(s_wifi_list);
-            lv_list_add_text(s_wifi_list, "WiFi Not Ready");
+            demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_WIFI_NOT_READY, "WiFi Not Ready", 0);
         }
         return;
     }
 
     if (!status.initialized) {
         if (status.init_attempted) {
-            lv_label_set_text_fmt(s_wifi_status_label, "状态: %s(0x%x)",
-                                  wireless_transport_state_to_text(status.transport_state),
-                                  (unsigned int)status.last_error);
-            lv_label_set_text_fmt(s_wifi_link_label, "Link: %s FW:%s RPC:%s",
-                                  status.cp_target_name[0] != '\0' ? status.cp_target_name : "--",
-                                  status.cp_fw_version[0] != '\0' ? status.cp_fw_version : "--",
-                                  status.rpc_metadata_ready ? "OK" : "WARN");
-            lv_label_set_text_fmt(s_wifi_ap_label, "WiFi: %s up=%d init=%d",
-                                  wireless_wifi_state_to_text(status.wifi_state),
-                                  status.transport_up_received,
-                                  status.cp_init_received);
-            lv_label_set_text_fmt(s_wifi_hint_label, "Hint: %s evt=%" PRIi32 " cp=0x%x fw=0x%x",
-                                  status.last_hint,
-                                  status.hosted_last_event,
-                                  (unsigned int)status.hosted_cp_info_error,
-                                  (unsigned int)status.hosted_fw_version_error);
-            lv_label_set_text(s_ble_status_label, "状态: 待就绪");
-            lv_label_set_text(s_ble_name_label, "Name: --");
-            lv_label_set_text(s_ble_link_label, "Link: hosted not ready");
-            lv_label_set_text(s_ble_value_label, "GATT值: --");
-            lv_label_set_text(s_ble_hint_label, "BLE follows hosted link");
+            demo_label_set_text_fmt_if_changed(s_wifi_status_label, "状态: %s(0x%x)",
+                                               wireless_transport_state_to_text(status.transport_state),
+                                               (unsigned int)status.last_error);
+            demo_label_set_text_fmt_if_changed(s_wifi_link_label, "Link: %s FW:%s RPC:%s",
+                                               status.cp_target_name[0] != '\0' ? status.cp_target_name : "--",
+                                               status.cp_fw_version[0] != '\0' ? status.cp_fw_version : "--",
+                                               status.rpc_metadata_ready ? "OK" : "WARN");
+            demo_label_set_text_fmt_if_changed(s_wifi_ap_label, "WiFi: %s",
+                                               wireless_wifi_state_to_text(status.wifi_state));
+            demo_label_set_text_fmt_if_changed(s_wifi_hint_label, "Hint: %s err=0x%x",
+                                               status.last_hint,
+                                               (unsigned int)status.last_error);
+            demo_label_set_text_if_changed(s_ble_status_label, "状态: 待就绪");
+            demo_label_set_text_if_changed(s_ble_name_label, "Name: --");
+            demo_label_set_text_if_changed(s_ble_link_label, "Link: hosted not ready");
+            demo_label_set_text_if_changed(s_ble_value_label, "GATT值: --");
+            demo_label_set_text_if_changed(s_ble_hint_label, "BLE follows hosted link");
         } else {
-            lv_label_set_text(s_wifi_status_label, "状态: 未初始化");
-            lv_label_set_text(s_wifi_link_label, "Link: --");
-            lv_label_set_text(s_wifi_ap_label, "WiFi: --");
-            lv_label_set_text(s_wifi_hint_label, "Hint: host NA");
-            lv_label_set_text(s_ble_status_label, "状态: 未初始化");
-            lv_label_set_text(s_ble_name_label, "Name: --");
-            lv_label_set_text(s_ble_link_label, "Link: --");
-            lv_label_set_text(s_ble_value_label, "GATT值: --");
-            lv_label_set_text(s_ble_hint_label, "BLE host NA");
+            demo_label_set_text_if_changed(s_wifi_status_label, "状态: 未初始化");
+            demo_label_set_text_if_changed(s_wifi_link_label, "Link: --");
+            demo_label_set_text_if_changed(s_wifi_ap_label, "WiFi: --");
+            demo_label_set_text_if_changed(s_wifi_hint_label, "Hint: host NA");
+            demo_label_set_text_if_changed(s_ble_status_label, "状态: 未初始化");
+            demo_label_set_text_if_changed(s_ble_name_label, "Name: --");
+            demo_label_set_text_if_changed(s_ble_link_label, "Link: --");
+            demo_label_set_text_if_changed(s_ble_value_label, "GATT值: --");
+            demo_label_set_text_if_changed(s_ble_hint_label, "BLE host NA");
         }
         demo_set_ble_adv_button(false, false);
-        lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_wifi_scan_btn, true);
         if (s_wifi_list != NULL) {
-            lv_obj_clean(s_wifi_list);
-            lv_list_add_text(s_wifi_list, "C6 Link Failed");
+            demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_C6_LINK_FAILED, "C6 Link Failed", status.wifi_scan_generation);
         }
         return;
     }
 
-    lv_label_set_text_fmt(s_wifi_status_label, "状态: %s",
-                          wireless_transport_state_to_text(status.transport_state));
-    lv_label_set_text_fmt(s_wifi_link_label, "Link: %s FW:%s RPC:%s",
-                          status.cp_target_name[0] != '\0' ? status.cp_target_name : "--",
-                          status.cp_fw_version[0] != '\0' ? status.cp_fw_version : "--",
-                          status.rpc_metadata_ready ? "OK" : "WARN");
-    lv_label_set_text_fmt(s_wifi_ap_label, "WiFi: %s AP=%" PRIu32 " up=%d init=%d",
-                          wireless_wifi_state_to_text(status.wifi_state),
-                          status.wifi_ap_count,
-                          status.transport_up_received,
-                          status.cp_init_received);
+    demo_label_set_text_fmt_if_changed(s_wifi_status_label, "状态: %s",
+                                       wireless_transport_state_to_text(status.transport_state));
+    demo_label_set_text_fmt_if_changed(s_wifi_link_label, "C6:%s FW:%s RPC:%s",
+                                       status.cp_target_name[0] != '\0' ? status.cp_target_name : "--",
+                                       status.cp_fw_version[0] != '\0' ? status.cp_fw_version : "--",
+                                       status.rpc_metadata_ready ? "OK" : "WARN");
+    demo_label_set_text_fmt_if_changed(s_wifi_ap_label, "WiFi: %s AP=%" PRIu32,
+                                       wireless_wifi_state_to_text(status.wifi_state),
+                                       status.wifi_ap_count);
     char current_ssid_display[32];
-    lv_label_set_text_fmt(s_wifi_hint_label, "Hint: %s SSID=%s IP=%s evt=%" PRIi32,
-                          status.last_hint,
-                          demo_wifi_ssid_display_text(status.current_ssid,
-                                                      current_ssid_display,
-                                                      sizeof(current_ssid_display)),
-                          status.current_ip[0] != '\0' ? status.current_ip : "--",
-                          status.hosted_last_event);
-    lv_label_set_text_fmt(s_ble_status_label, "状态: %s", wireless_ble_state_to_text(status.ble_state));
-    lv_label_set_text_fmt(s_ble_name_label, "Name: %s",
-                          status.ble_device_name[0] != '\0' ? status.ble_device_name : "--");
-    lv_label_set_text_fmt(s_ble_link_label, "Link: sync=%d conn=%d adv=%d",
-                          status.ble_host_synced,
-                          status.ble_connected,
-                          status.ble_advertising_enabled);
-    lv_label_set_text_fmt(s_ble_value_label, "GATT值: %u", (unsigned int)status.ble_test_value);
-    lv_label_set_text_fmt(s_ble_hint_label, "Hint: %s err=0x%x",
-                          status.last_hint,
-                          (unsigned int)status.last_error);
+    demo_label_set_text_fmt_if_changed(s_wifi_hint_label, "SSID=%s IP=%s",
+                                       demo_wifi_ssid_display_text(status.current_ssid,
+                                                                   current_ssid_display,
+                                                                   sizeof(current_ssid_display)),
+                                       status.current_ip[0] != '\0' ? status.current_ip : "--");
+    demo_label_set_text_fmt_if_changed(s_ble_status_label, "状态: %s", wireless_ble_state_to_text(status.ble_state));
+    demo_label_set_text_fmt_if_changed(s_ble_name_label, "Name: %s",
+                                       status.ble_device_name[0] != '\0' ? status.ble_device_name : "--");
+    demo_label_set_text_fmt_if_changed(s_ble_link_label, "Link: sync=%d conn=%d adv=%d",
+                                       status.ble_host_synced,
+                                       status.ble_connected,
+                                       status.ble_advertising_enabled);
+    demo_label_set_text_fmt_if_changed(s_ble_value_label, "GATT值: %u", (unsigned int)status.ble_test_value);
+    demo_label_set_text_fmt_if_changed(s_ble_hint_label, "err=0x%x %s",
+                                       (unsigned int)status.last_error,
+                                       status.last_hint);
 
     bool wifi_actions_ready = status.hosted_stack_available &&
                               status.wifi_feature_enabled &&
@@ -908,9 +1031,9 @@ static void demo_update_wireless_card(void)
                               status.transport_state == TEST_WIRELESS_TRANSPORT_READY;
 
     if (wifi_actions_ready) {
-        lv_obj_clear_state(s_wifi_scan_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_wifi_scan_btn, false);
     } else {
-        lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
+        demo_obj_set_disabled(s_wifi_scan_btn, true);
     }
 
     bool ble_actions_ready = status.hosted_stack_available &&
@@ -924,20 +1047,19 @@ static void demo_update_wireless_card(void)
 
     demo_refresh_wifi_ap_list(&status);
 #else
-    lv_label_set_text(s_wifi_status_label, "状态: 未开");
-    lv_label_set_text(s_wifi_link_label, "Link: --");
-    lv_label_set_text(s_wifi_ap_label, "WiFi: --");
-    lv_label_set_text(s_wifi_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
-    lv_label_set_text(s_ble_status_label, "状态: 未开");
-    lv_label_set_text(s_ble_name_label, "Name: --");
-    lv_label_set_text(s_ble_link_label, "Link: --");
-    lv_label_set_text(s_ble_value_label, "GATT值: --");
-    lv_label_set_text(s_ble_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
+    demo_label_set_text_if_changed(s_wifi_status_label, "状态: 未开");
+    demo_label_set_text_if_changed(s_wifi_link_label, "Link: --");
+    demo_label_set_text_if_changed(s_wifi_ap_label, "WiFi: --");
+    demo_label_set_text_if_changed(s_wifi_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
+    demo_label_set_text_if_changed(s_ble_status_label, "状态: 未开");
+    demo_label_set_text_if_changed(s_ble_name_label, "Name: --");
+    demo_label_set_text_if_changed(s_ble_link_label, "Link: --");
+    demo_label_set_text_if_changed(s_ble_value_label, "GATT值: --");
+    demo_label_set_text_if_changed(s_ble_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
     demo_set_ble_adv_button(false, false);
-    lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
+    demo_obj_set_disabled(s_wifi_scan_btn, true);
     if (s_wifi_list != NULL) {
-        lv_obj_clean(s_wifi_list);
-        lv_list_add_text(s_wifi_list, "WiFi Disabled");
+        demo_wifi_list_set_message(DEMO_WIFI_LIST_VIEW_DISABLED, "WiFi Disabled", 0);
     }
 #endif
 }
@@ -951,6 +1073,7 @@ static void demo_ui_timer_cb(lv_timer_t *timer)
     demo_update_audio_card();
     demo_update_battery_card();
     demo_update_wireless_card();
+    demo_ui_report_updates_if_ready();
 }
 
 void example_lvgl_demo_ui(lv_display_t *disp)
@@ -959,24 +1082,24 @@ void example_lvgl_demo_ui(lv_display_t *disp)
                           lv_color_hex(0x1F5C8A),
                           lv_color_hex(0xD97A3A),
                           false,
-                          demo_get_ui_font());
+                          demo_get_role_font(DISPLAY_FONT_ROLE_BODY));
 
     lv_obj_t *screen = lv_display_get_screen_active(disp);
     lv_obj_set_style_bg_color(screen, lv_color_hex(0xE6D8C2), 0);
     lv_obj_set_style_bg_grad_color(screen, lv_color_hex(0xF6EFE4), 0);
     lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_VER, 0);
-    lv_obj_set_style_pad_all(screen, 18, 0);
-    lv_obj_set_style_pad_row(screen, 16, 0);
+    lv_obj_set_style_pad_all(screen, 14, 0);
+    lv_obj_set_style_pad_row(screen, 12, 0);
     lv_obj_set_layout(screen, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(screen, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_scroll_dir(screen, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_AUTO);
-    lv_obj_set_style_text_font(screen, demo_get_ui_font(), 0);
+    demo_set_text_role(screen, DISPLAY_FONT_ROLE_BODY);
 
     lv_obj_t *header = lv_obj_create(screen);
     lv_obj_set_width(header, lv_pct(100));
     lv_obj_set_height(header, LV_SIZE_CONTENT);
-    lv_obj_set_style_radius(header, 20, 0);
+    lv_obj_set_style_radius(header, 12, 0);
     lv_obj_set_style_bg_color(header, lv_color_hex(0x17324D), 0);
     lv_obj_set_style_text_color(header, lv_color_hex(0xFFF8ED), 0);
     lv_obj_set_style_border_width(header, 0, 0);
@@ -988,10 +1111,11 @@ void example_lvgl_demo_ui(lv_display_t *disp)
 
     lv_obj_t *title = lv_label_create(header);
     lv_label_set_text(title, "JC1060P470 综合验证 Demo");
-    lv_obj_set_style_text_font(title, demo_get_ui_font(), 0);
+    demo_config_label(title, DISPLAY_FONT_ROLE_TITLE);
 
     lv_obj_t *subtitle = lv_label_create(header);
     lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频 + BAT + WiFi + BLE");
+    demo_config_label(subtitle, DISPLAY_FONT_ROLE_SMALL);
 
     lv_obj_t *row = lv_obj_create(screen);
     lv_obj_set_width(row, lv_pct(100));
@@ -1000,19 +1124,23 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
     lv_obj_set_style_pad_column(row, 16, 0);
-    lv_obj_set_style_pad_row(row, 16, 0);
+    lv_obj_set_style_pad_row(row, 12, 0);
     lv_obj_set_layout(row, LV_LAYOUT_FLEX);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW_WRAP);
     lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *touch_card = demo_create_card(row, "1. 显示与触摸", 488, 304);
+    lv_obj_t *touch_card = demo_create_card(row, "1. 显示与触摸", 488, 312);
     s_touch_status_label = lv_label_create(touch_card);
     s_touch_count_label = lv_label_create(touch_card);
     s_touch_point_label = lv_label_create(touch_card);
     s_touch_hint_label = lv_label_create(touch_card);
+    demo_config_label(s_touch_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_touch_count_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_touch_point_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_touch_hint_label, DISPLAY_FONT_ROLE_BODY);
 
     lv_obj_t *touch_pad = lv_obj_create(touch_card);
-    lv_obj_set_size(touch_pad, lv_pct(100), 110);
+    lv_obj_set_size(touch_pad, lv_pct(100), 116);
     lv_obj_set_style_radius(touch_pad, 14, 0);
     lv_obj_set_style_bg_color(touch_pad, lv_color_hex(0x8EC5A4), 0);
     lv_obj_set_style_border_width(touch_pad, 2, 0);
@@ -1026,25 +1154,37 @@ void example_lvgl_demo_ui(lv_display_t *disp)
 
     lv_obj_t *touch_pad_label = lv_label_create(touch_pad);
     lv_label_set_text(touch_pad_label, "触摸这里");
+    demo_set_text_role(touch_pad_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(touch_pad_label);
 
-    lv_obj_t *rtc_card = demo_create_card(row, "2. RTC", 488, 230);
+    lv_obj_t *rtc_card = demo_create_card(row, "2. RTC", 488, 220);
     s_rtc_status_label = lv_label_create(rtc_card);
     s_rtc_time_label = lv_label_create(rtc_card);
     s_rtc_sync_label = lv_label_create(rtc_card);
+    demo_config_label(s_rtc_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_rtc_time_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_rtc_sync_label, DISPLAY_FONT_ROLE_BODY);
 
-    lv_obj_t *usb_card = demo_create_card(row, "3. USB Device", 488, 230);
+    lv_obj_t *usb_card = demo_create_card(row, "3. USB Device", 488, 238);
     s_usb_status_label = lv_label_create(usb_card);
     s_usb_line_label = lv_label_create(usb_card);
     s_usb_stats_label = lv_label_create(usb_card);
     s_usb_hint_label = lv_label_create(usb_card);
+    demo_config_label(s_usb_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_usb_line_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_usb_stats_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_usb_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_usb_hint_label, lv_color_hex(0x5E4C38), 0);
 
-    lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 230);
+    lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 238);
     s_audio_status_label = lv_label_create(audio_card);
     s_audio_size_label = lv_label_create(audio_card);
     s_audio_peak_label = lv_label_create(audio_card);
     s_audio_input_label = lv_label_create(audio_card);
+    demo_config_label(s_audio_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_audio_size_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_audio_peak_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_audio_input_label, DISPLAY_FONT_ROLE_BODY);
 
     lv_obj_t *audio_btn_row = lv_obj_create(audio_card);
     lv_obj_set_width(audio_btn_row, lv_pct(100));
@@ -1058,43 +1198,51 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_clear_flag(audio_btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_audio_music_btn = lv_button_create(audio_btn_row);
-    lv_obj_set_size(s_audio_music_btn, 135, 46);
+    lv_obj_set_size(s_audio_music_btn, 135, 48);
     lv_obj_add_event_cb(s_audio_music_btn, audio_music_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *music_label = lv_label_create(s_audio_music_btn);
     lv_label_set_text(music_label, "播放内置音乐");
+    demo_set_text_role(music_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(music_label);
 
     s_audio_record_btn = lv_button_create(audio_btn_row);
-    lv_obj_set_size(s_audio_record_btn, 110, 46);
+    lv_obj_set_size(s_audio_record_btn, 110, 48);
     lv_obj_add_event_cb(s_audio_record_btn, audio_record_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *record_label = lv_label_create(s_audio_record_btn);
     lv_label_set_text(record_label, "开始录音");
+    demo_set_text_role(record_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(record_label);
 
     s_audio_play_btn = lv_button_create(audio_btn_row);
-    lv_obj_set_size(s_audio_play_btn, 110, 46);
+    lv_obj_set_size(s_audio_play_btn, 110, 48);
     lv_obj_add_event_cb(s_audio_play_btn, audio_play_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *play_label = lv_label_create(s_audio_play_btn);
     lv_label_set_text(play_label, "播放录音");
+    demo_set_text_role(play_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(play_label);
 
-    lv_obj_t *battery_card = demo_create_card(row, "5. BAT", 488, 230);
+    lv_obj_t *battery_card = demo_create_card(row, "5. BAT", 488, 238);
     s_battery_status_label = lv_label_create(battery_card);
     s_battery_adc_label = lv_label_create(battery_card);
     s_battery_voltage_label = lv_label_create(battery_card);
     s_battery_percent_label = lv_label_create(battery_card);
     s_battery_hint_label = lv_label_create(battery_card);
+    demo_config_label(s_battery_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_battery_adc_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_battery_voltage_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_battery_percent_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_battery_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_battery_hint_label, lv_color_hex(0x5E4C38), 0);
 
-    lv_obj_t *wifi_card = demo_create_card(row, "6. WiFi", 488, 360);
+    lv_obj_t *wifi_card = demo_create_card(row, "6. WiFi", 488, 388);
     s_wifi_status_label = lv_label_create(wifi_card);
     s_wifi_link_label = lv_label_create(wifi_card);
     s_wifi_ap_label = lv_label_create(wifi_card);
     s_wifi_hint_label = lv_label_create(wifi_card);
-    lv_obj_set_style_text_font(s_wifi_status_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_wifi_link_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_wifi_ap_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_wifi_hint_label, demo_get_ui_font(), 0);
+    demo_config_label(s_wifi_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_wifi_link_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_wifi_ap_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_wifi_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_wifi_hint_label, lv_color_hex(0x5E4C38), 0);
 
     lv_obj_t *wifi_btn_row = lv_obj_create(wifi_card);
@@ -1109,28 +1257,38 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_clear_flag(wifi_btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_wifi_scan_btn = lv_button_create(wifi_btn_row);
-    lv_obj_set_size(s_wifi_scan_btn, 124, 44);
+    lv_obj_set_size(s_wifi_scan_btn, 124, 48);
     lv_obj_add_event_cb(s_wifi_scan_btn, wireless_wifi_scan_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *wifi_scan_label = lv_label_create(s_wifi_scan_btn);
     lv_label_set_text(wifi_scan_label, "WiFi Scan");
+    demo_set_text_role(wifi_scan_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(wifi_scan_label);
 
-    s_wifi_list = lv_list_create(wifi_card);
-    lv_obj_set_size(s_wifi_list, lv_pct(100), 150);
+    s_wifi_list = lv_obj_create(wifi_card);
+    lv_obj_set_size(s_wifi_list, lv_pct(100), 170);
+    lv_obj_set_style_radius(s_wifi_list, 0, 0);
+    lv_obj_set_style_border_width(s_wifi_list, 1, 0);
+    lv_obj_set_style_border_color(s_wifi_list, lv_color_hex(0xD7C7AF), 0);
+    lv_obj_set_style_bg_color(s_wifi_list, lv_color_hex(0xFFF9EF), 0);
+    lv_obj_set_style_pad_all(s_wifi_list, 6, 0);
     lv_obj_set_style_pad_row(s_wifi_list, 6, 0);
-    lv_list_add_text(s_wifi_list, "Tap Scan");
+    lv_obj_set_layout(s_wifi_list, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(s_wifi_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(s_wifi_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_wifi_list, LV_SCROLLBAR_MODE_AUTO);
+    demo_wifi_list_add_text("Tap Scan");
 
-    lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 260);
+    lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 282);
     s_ble_status_label = lv_label_create(ble_card);
     s_ble_name_label = lv_label_create(ble_card);
     s_ble_link_label = lv_label_create(ble_card);
     s_ble_value_label = lv_label_create(ble_card);
     s_ble_hint_label = lv_label_create(ble_card);
-    lv_obj_set_style_text_font(s_ble_status_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_ble_name_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_ble_link_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_ble_value_label, demo_get_ui_font(), 0);
-    lv_obj_set_style_text_font(s_ble_hint_label, demo_get_ui_font(), 0);
+    demo_config_label(s_ble_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_ble_name_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_ble_link_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_ble_value_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_ble_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_ble_hint_label, lv_color_hex(0x5E4C38), 0);
     lv_label_set_text(s_ble_status_label, "状态: host NA");
     lv_label_set_text(s_ble_name_label, "Name: --");
@@ -1139,10 +1297,10 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_label_set_text(s_ble_hint_label, "BLE Not Ready");
 
     s_ble_adv_btn = lv_button_create(ble_card);
-    lv_obj_set_size(s_ble_adv_btn, 124, 44);
+    lv_obj_set_size(s_ble_adv_btn, 124, 48);
     lv_obj_add_event_cb(s_ble_adv_btn, wireless_ble_adv_btn_cb, LV_EVENT_CLICKED, NULL);
     s_ble_adv_btn_label = lv_label_create(s_ble_adv_btn);
-    lv_obj_set_style_text_font(s_ble_adv_btn_label, demo_get_ui_font(), 0);
+    demo_set_text_role(s_ble_adv_btn_label, DISPLAY_FONT_ROLE_BODY);
     lv_label_set_text(s_ble_adv_btn_label, "Adv On");
     lv_obj_center(s_ble_adv_btn_label);
     lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
@@ -1157,9 +1315,9 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_add_flag(s_wifi_dialog_mask, LV_OBJ_FLAG_CLICKABLE);
 
     s_wifi_dialog = lv_obj_create(s_wifi_dialog_mask);
-    lv_obj_set_size(s_wifi_dialog, 520, 250);
+    lv_obj_set_size(s_wifi_dialog, 520, 270);
     lv_obj_center(s_wifi_dialog);
-    lv_obj_set_style_radius(s_wifi_dialog, 20, 0);
+    lv_obj_set_style_radius(s_wifi_dialog, 12, 0);
     lv_obj_set_style_pad_all(s_wifi_dialog, 16, 0);
     lv_obj_set_style_pad_row(s_wifi_dialog, 10, 0);
     lv_obj_set_layout(s_wifi_dialog, LV_LAYOUT_FLEX);
@@ -1168,15 +1326,15 @@ void example_lvgl_demo_ui(lv_display_t *disp)
 
     lv_obj_t *dialog_title = lv_label_create(s_wifi_dialog);
     lv_label_set_text(dialog_title, "WiFi Join");
-    lv_obj_set_style_text_font(dialog_title, demo_get_ui_font(), 0);
+    demo_config_label(dialog_title, DISPLAY_FONT_ROLE_CARD_TITLE);
 
     s_wifi_dialog_ssid_label = lv_label_create(s_wifi_dialog);
-    lv_obj_set_style_text_font(s_wifi_dialog_ssid_label, demo_get_ui_font(), 0);
+    demo_config_label(s_wifi_dialog_ssid_label, DISPLAY_FONT_ROLE_BODY);
     lv_label_set_text(s_wifi_dialog_ssid_label, "SSID: --");
 
     s_wifi_password_ta = lv_textarea_create(s_wifi_dialog);
     lv_obj_set_width(s_wifi_password_ta, lv_pct(100));
-    lv_obj_set_style_text_font(s_wifi_password_ta, demo_get_ui_font(), 0);
+    demo_set_text_role(s_wifi_password_ta, DISPLAY_FONT_ROLE_BODY);
     lv_textarea_set_one_line(s_wifi_password_ta, true);
     lv_textarea_set_password_mode(s_wifi_password_ta, true);
     lv_textarea_set_password_bullet(s_wifi_password_ta, "*");
@@ -1195,24 +1353,24 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_clear_flag(dialog_btn_row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *connect_btn = lv_button_create(dialog_btn_row);
-    lv_obj_set_size(connect_btn, 110, 42);
+    lv_obj_set_size(connect_btn, 110, 48);
     lv_obj_add_event_cb(connect_btn, wifi_dialog_connect_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *connect_label = lv_label_create(connect_btn);
-    lv_obj_set_style_text_font(connect_label, demo_get_ui_font(), 0);
+    demo_set_text_role(connect_label, DISPLAY_FONT_ROLE_BODY);
     lv_label_set_text(connect_label, "Connect");
     lv_obj_center(connect_label);
 
     lv_obj_t *cancel_btn = lv_button_create(dialog_btn_row);
-    lv_obj_set_size(cancel_btn, 110, 42);
+    lv_obj_set_size(cancel_btn, 110, 48);
     lv_obj_add_event_cb(cancel_btn, wifi_dialog_cancel_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *cancel_label = lv_label_create(cancel_btn);
-    lv_obj_set_style_text_font(cancel_label, demo_get_ui_font(), 0);
+    demo_set_text_role(cancel_label, DISPLAY_FONT_ROLE_BODY);
     lv_label_set_text(cancel_label, "Cancel");
     lv_obj_center(cancel_label);
 
     s_wifi_keyboard = lv_keyboard_create(top_layer);
     lv_obj_set_size(s_wifi_keyboard, lv_pct(100), 220);
-    lv_obj_set_style_text_font(s_wifi_keyboard, demo_get_ui_font(), LV_PART_ITEMS);
+    lv_obj_set_style_text_font(s_wifi_keyboard, demo_get_role_font(DISPLAY_FONT_ROLE_BODY), LV_PART_ITEMS);
     lv_obj_align(s_wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_keyboard_set_map(s_wifi_keyboard,
                         LV_KEYBOARD_MODE_TEXT_LOWER,

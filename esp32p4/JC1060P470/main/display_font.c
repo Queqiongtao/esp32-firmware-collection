@@ -17,7 +17,24 @@ static const char *FONT_LVGL_PREFIX = "A:";
 
 static bool s_font_fs_mounted;
 static bool s_freetype_ready;
-static lv_font_t *s_ui_font;
+static lv_font_t *s_ui_fonts[DISPLAY_FONT_ROLE_COUNT];
+
+static const uint16_t s_role_font_sizes[DISPLAY_FONT_ROLE_COUNT] = {
+    [DISPLAY_FONT_ROLE_SMALL] = 16,
+    [DISPLAY_FONT_ROLE_BODY] = 16,
+    [DISPLAY_FONT_ROLE_CARD_TITLE] = 18,
+    [DISPLAY_FONT_ROLE_TITLE] = 22,
+};
+
+static void display_font_delete_fonts(void)
+{
+    for (display_font_role_t role = DISPLAY_FONT_ROLE_SMALL; role < DISPLAY_FONT_ROLE_COUNT; role++) {
+        if (s_ui_fonts[role] != NULL) {
+            lv_freetype_font_delete(s_ui_fonts[role]);
+            s_ui_fonts[role] = NULL;
+        }
+    }
+}
 
 static esp_err_t display_font_mount_fs(void)
 {
@@ -64,12 +81,20 @@ static esp_err_t display_font_init_backend(const char *font_path)
         s_freetype_ready = true;
     }
 
-    if (s_ui_font == NULL) {
-        s_ui_font = lv_freetype_font_create(font_path,
-                                            LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
-                                            16,
-                                            LV_FREETYPE_FONT_STYLE_NORMAL);
-        ESP_RETURN_ON_FALSE(s_ui_font != NULL, ESP_FAIL, TAG, "create ui font failed");
+    for (display_font_role_t role = DISPLAY_FONT_ROLE_SMALL; role < DISPLAY_FONT_ROLE_COUNT; role++) {
+        if (s_ui_fonts[role] != NULL) {
+            continue;
+        }
+
+        s_ui_fonts[role] = lv_freetype_font_create(font_path,
+                                                   LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
+                                                   s_role_font_sizes[role],
+                                                   LV_FREETYPE_FONT_STYLE_NORMAL);
+        if (s_ui_fonts[role] == NULL) {
+            display_font_delete_fonts();
+            ESP_LOGE(TAG, "create ui font failed: role=%d size=%u", role, (unsigned int)s_role_font_sizes[role]);
+            return ESP_FAIL;
+        }
     }
 
     return ESP_OK;
@@ -83,14 +108,24 @@ esp_err_t display_font_init(void)
     ESP_RETURN_ON_ERROR(display_font_check_file(&font_path), TAG, "validate font file failed");
     ESP_RETURN_ON_ERROR(display_font_init_backend(font_path), TAG, "init font backend failed");
 
-    ESP_LOGI(TAG, "UI font ready: %s size=%d", font_path, 16);
+    ESP_LOGI(TAG, "UI font ready: %s sizes=%u/%u/%u/%u",
+             font_path,
+             (unsigned int)s_role_font_sizes[DISPLAY_FONT_ROLE_SMALL],
+             (unsigned int)s_role_font_sizes[DISPLAY_FONT_ROLE_BODY],
+             (unsigned int)s_role_font_sizes[DISPLAY_FONT_ROLE_CARD_TITLE],
+             (unsigned int)s_role_font_sizes[DISPLAY_FONT_ROLE_TITLE]);
     return ESP_OK;
 }
 
 const lv_font_t *display_font_get_ui_font(void)
 {
-    if (s_ui_font != NULL) {
-        return s_ui_font;
+    return display_font_get_role_font(DISPLAY_FONT_ROLE_BODY);
+}
+
+const lv_font_t *display_font_get_role_font(display_font_role_t role)
+{
+    if (role >= DISPLAY_FONT_ROLE_SMALL && role < DISPLAY_FONT_ROLE_COUNT && s_ui_fonts[role] != NULL) {
+        return s_ui_fonts[role];
     }
 
     return &lvgl_demo_font_patch_16;
@@ -98,10 +133,7 @@ const lv_font_t *display_font_get_ui_font(void)
 
 void display_font_deinit(void)
 {
-    if (s_ui_font != NULL) {
-        lv_freetype_font_delete(s_ui_font);
-        s_ui_font = NULL;
-    }
+    display_font_delete_fonts();
 
     if (s_freetype_ready) {
         lv_freetype_uninit();
