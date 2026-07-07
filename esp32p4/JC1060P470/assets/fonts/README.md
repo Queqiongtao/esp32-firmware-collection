@@ -1,12 +1,15 @@
 放置 UI 运行时字体文件。
 
-当前实现默认从独立 `font` SPIFFS 分区加载子集 `TTF`：
+当前实现默认从独立 `font` SPIFFS 分区加载思源黑体简中 Regular 的子集字体：
 
-- 文件名：`NotoSansSC-Regular.ttf`
+- 源字体：Source Han Sans SC Regular / 思源黑体简中 Regular
+- 源仓库：<https://github.com/adobe-fonts/source-han-sans>
+- 许可证：SIL Open Font License 1.1
+- 文件名：`ui_shs_sc.otf`
 - 挂载点：`/spiffs`
-- 运行时路径：`/spiffs/NotoSansSC-Regular.ttf`
+- 运行时路径：`/spiffs/ui_shs_sc.otf`
 - 当前分区大小：`2M`
-- 运行时后端：`LVGL Tiny TTF`
+- 运行时后端：`LVGL FreeType`
 
 字符集生成规则：
 
@@ -19,11 +22,14 @@
 
 ```bash
 python3 -m pip install fonttools
-python3 assets/fonts/build_subset.py --source /path/to/NotoSansSC-Regular.ttf
+python3 assets/fonts/build_subset.py --source /path/to/SourceHanSansSC-Regular.otf
 ```
+
+不要提交完整官方源字体；仓库只保留生成后的 UI 子集字体。若重新生成或更换源字体，
+同步保留/更新对应许可证说明，避免把子集文件误标为官方完整原版。
 
 构建与回退：
 
 - 构建时通过 `spiffs_create_partition_image(font ../assets/fonts FLASH_IN_PROJECT)` 打包进 `font` 分区
-- 若字体文件缺失、分区未烧录或 Tiny TTF 初始化失败，程序会回退到内置 `lvgl_demo_font_patch_16`
-- 仓内正式资源是子集 `TTF`，原始完整字体不再作为运行时资源保留
+- 若字体文件缺失、分区未烧录或 FreeType 初始化失败，程序会回退到内置 `lvgl_demo_font_patch_16`
+- 仓内正式资源是子集字体，原始完整字体不作为运行时资源保留

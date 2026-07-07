@@ -19,10 +19,12 @@ def parse_args() -> argparse.Namespace:
     default_charset = fonts_dir / "ui_font_charset.txt"
     default_extra = fonts_dir / "ui_font_extra_chars.txt"
 
-    parser = argparse.ArgumentParser(description="Generate a Tiny TTF subset for the demo UI.")
+    parser = argparse.ArgumentParser(description="Generate a FreeType font subset for the demo UI.")
     parser.add_argument("--source", required=True, help="Path to the original TTF file.")
-    parser.add_argument("--output", default=str(fonts_dir / "NotoSansSC-Regular.ttf"),
-                        help="Output subset TTF path.")
+    parser.add_argument("--font-number", type=int, default=None,
+                        help="Font index for TTC/OTC collection input.")
+    parser.add_argument("--output", default=str(fonts_dir / "ui_shs_sc.otf"),
+                        help="Output subset font path.")
     parser.add_argument("--charset-output", default=str(default_charset),
                         help="Path used to write the merged charset text.")
     parser.add_argument("--extra-chars", default=str(default_extra),
@@ -73,7 +75,7 @@ def write_charset(path: Path, chars: set[str]) -> None:
     path.write_text(ordered + "\n", encoding="utf-8")
 
 
-def run_subset(source: Path, output: Path, charset_path: Path) -> None:
+def run_subset(source: Path, output: Path, charset_path: Path, font_number: int | None) -> None:
     cmd = [
         sys.executable,
         "-m",
@@ -93,6 +95,8 @@ def run_subset(source: Path, output: Path, charset_path: Path) -> None:
         "--name-languages=*",
         "--no-hinting",
     ]
+    if font_number is not None:
+        cmd.append(f"--font-number={font_number}")
     subprocess.run(cmd, check=True)
 
 
@@ -119,7 +123,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     charset_output.parent.mkdir(parents=True, exist_ok=True)
     write_charset(charset_output, charset)
-    run_subset(source, output, charset_output)
+    run_subset(source, output, charset_output, args.font_number)
 
     print(f"charset_count={len(charset)}")
     print(f"charset_file={charset_output}")

@@ -8,19 +8,16 @@
 #include "esp_log.h"
 #include "esp_spiffs.h"
 #include "lvgl_demo_font_patch.h"
-#include "others/font_manager/lv_font_manager.h"
-#include "libs/tiny_ttf/lv_tiny_ttf.h"
+#include "libs/freetype/lv_freetype.h"
 
 static const char *TAG = "display_font";
 static const char *FONT_PARTITION_LABEL = "font";
 static const char *FONT_BASE_PATH = "/spiffs";
 static const char *FONT_LVGL_PREFIX = "A:";
-static const char *FONT_MANAGER_NAME = "ui_font";
 
 static bool s_font_fs_mounted;
-static lv_font_manager_t *s_font_manager;
+static bool s_freetype_ready;
 static lv_font_t *s_ui_font;
-static lv_tiny_ttf_font_src_t s_font_src;
 
 static esp_err_t display_font_mount_fs(void)
 {
@@ -61,31 +58,17 @@ static esp_err_t display_font_check_file(const char **font_path_out)
 
 static esp_err_t display_font_init_backend(const char *font_path)
 {
-    if (s_font_manager == NULL) {
-        s_font_manager = lv_font_manager_create(4);
-        ESP_RETURN_ON_FALSE(s_font_manager != NULL, ESP_ERR_NO_MEM, TAG, "create font manager failed");
-
-        s_font_src = (lv_tiny_ttf_font_src_t) {
-            .path = font_path,
-            .data = NULL,
-            .data_size = 0,
-            .cache_size = CONFIG_LV_TINY_TTF_CACHE_GLYPH_CNT,
-        };
-
-        bool ok = lv_font_manager_add_src_static(s_font_manager,
-                                                 FONT_MANAGER_NAME,
-                                                 &s_font_src,
-                                                 &lv_tiny_ttf_font_class);
-        ESP_RETURN_ON_FALSE(ok, ESP_FAIL, TAG, "add tiny ttf source failed");
+    if (!s_freetype_ready) {
+        lv_result_t result = lv_freetype_init(CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT);
+        ESP_RETURN_ON_FALSE(result == LV_RESULT_OK, ESP_FAIL, TAG, "init freetype failed");
+        s_freetype_ready = true;
     }
 
     if (s_ui_font == NULL) {
-        s_ui_font = lv_font_manager_create_font(s_font_manager,
-                                                FONT_MANAGER_NAME,
-                                                0,
-                                                16,
-                                                0,
-                                                LV_FONT_KERNING_NONE);
+        s_ui_font = lv_freetype_font_create(font_path,
+                                            LV_FREETYPE_FONT_RENDER_MODE_BITMAP,
+                                            16,
+                                            LV_FREETYPE_FONT_STYLE_NORMAL);
         ESP_RETURN_ON_FALSE(s_ui_font != NULL, ESP_FAIL, TAG, "create ui font failed");
     }
 
@@ -115,18 +98,14 @@ const lv_font_t *display_font_get_ui_font(void)
 
 void display_font_deinit(void)
 {
-    if (s_font_manager != NULL && s_ui_font != NULL) {
-        lv_font_manager_delete_font(s_font_manager, s_ui_font);
+    if (s_ui_font != NULL) {
+        lv_freetype_font_delete(s_ui_font);
         s_ui_font = NULL;
     }
 
-    if (s_font_manager != NULL) {
-        bool deleted = lv_font_manager_delete(s_font_manager);
-        if (!deleted) {
-            ESP_LOGW(TAG, "font manager still referenced during deinit");
-        } else {
-            s_font_manager = NULL;
-        }
+    if (s_freetype_ready) {
+        lv_freetype_uninit();
+        s_freetype_ready = false;
     }
 
     if (s_font_fs_mounted) {
