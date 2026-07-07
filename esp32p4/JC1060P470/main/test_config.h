@@ -143,7 +143,7 @@
  *
  * Current software status:
  *   - WiFi station test path is brought up through esp_hosted + esp_wifi_remote
- *   - BLE state is exposed to UI, but no BLE hosted transport is integrated yet */
+ *   - BLE Peripheral smoke test uses hosted NimBLE over ESP-Hosted VHCI */
 
 #define TEST_WIRELESS_SDIO_PIN_D0               GPIO_NUM_14
 #define TEST_WIRELESS_SDIO_PIN_D1               GPIO_NUM_15

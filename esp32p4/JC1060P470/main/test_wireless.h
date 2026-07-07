@@ -17,6 +17,7 @@
 #define TEST_WIRELESS_SCAN_RESULT_MAX           12
 #define TEST_WIRELESS_CP_TARGET_MAX_LEN         24
 #define TEST_WIRELESS_FW_VERSION_MAX_LEN        24
+#define TEST_WIRELESS_BLE_NAME_MAX_LEN          32
 
 typedef struct {
     char ssid[TEST_WIRELESS_SSID_MAX_LEN + 1];
@@ -60,6 +61,8 @@ typedef struct {
     bool ble_feature_enabled;
     bool sdio_board_link_defined;
     bool ble_advertising_enabled;
+    bool ble_connected;
+    bool ble_host_synced;
     bool wifi_connected;
     bool transport_confirmed;
     bool rpc_metadata_ready;
@@ -73,6 +76,7 @@ typedef struct {
     uint32_t wifi_ap_count;
     uint32_t ble_device_count;
     uint32_t wifi_scan_generation;
+    uint8_t ble_test_value;
     int wifi_rssi;
     uint32_t wifi_retry_count;
     bool wifi_scan_results_valid;
@@ -83,6 +87,7 @@ typedef struct {
     char current_ip[TEST_WIRELESS_IPV4_STR_LEN];
     char cp_target_name[TEST_WIRELESS_CP_TARGET_MAX_LEN];
     char cp_fw_version[TEST_WIRELESS_FW_VERSION_MAX_LEN];
+    char ble_device_name[TEST_WIRELESS_BLE_NAME_MAX_LEN];
     char last_hint[TEST_WIRELESS_HINT_MAX_LEN];
 } test_wireless_status_t;
 

@@ -21,7 +21,23 @@
 #include "lwip/inet.h"
 #include "test_config.h"
 
+#if CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED && CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
+#include "host/ble_hs_id.h"
+#include "host/ble_store.h"
+#include "host/util/util.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "os/os_mbuf.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#endif
+
 static const char *TAG = "test_wireless";
+
+#define WIRELESS_BLE_HOSTED_ENABLED (CONFIG_BT_ENABLED && CONFIG_BT_NIMBLE_ENABLED && CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE)
 
 static test_wireless_status_t s_status;
 static bool s_event_loop_ready;
@@ -32,6 +48,15 @@ static bool s_wifi_driver_ready;
 static bool s_wifi_handlers_registered;
 static bool s_wifi_started;
 static bool s_wifi_connect_requested;
+static bool s_ble_controller_ready;
+static bool s_ble_controller_enabled;
+static bool s_ble_host_ready;
+static bool s_ble_host_task_started;
+static bool s_ble_host_synced;
+static bool s_ble_connected;
+static uint8_t s_ble_own_addr_type;
+static uint8_t s_ble_test_value;
+static uint16_t s_ble_test_value_handle;
 static esp_netif_t *s_sta_netif;
 static esp_event_handler_instance_t s_hosted_evt_instance;
 static esp_event_handler_instance_t s_wifi_evt_instance;
@@ -48,6 +73,18 @@ static EventGroupHandle_t s_hosted_event_group;
 #define WIRELESS_HOSTED_WAIT_READY_MS            5000
 #define WIRELESS_EXPECTED_CP_TARGET              "esp32c6"
 #define WIRELESS_EXPECTED_RESET_GPIO             54
+#define WIRELESS_BLE_DEVICE_NAME                 "JC1060P470-BLE"
+
+#if WIRELESS_BLE_HOSTED_ENABLED
+extern void ble_store_config_init(void);
+
+static const ble_uuid128_t s_ble_test_service_uuid =
+    BLE_UUID128_INIT(0x70, 0x04, 0x60, 0x10, 0x47, 0x60, 0x60, 0x10,
+                     0x99, 0x99, 0x43, 0x95, 0x12, 0x2f, 0x46, 0x59);
+static const ble_uuid128_t s_ble_test_chr_uuid =
+    BLE_UUID128_INIT(0x71, 0x04, 0x60, 0x10, 0x47, 0x60, 0x60, 0x10,
+                     0x99, 0x99, 0x43, 0x95, 0x12, 0x2f, 0x46, 0x59);
+#endif
 
 static void wireless_log_expected_config(void)
 {
@@ -333,6 +370,404 @@ static void wireless_clear_scan_results(void)
     s_status.wifi_ap_count = 0;
     s_status.wifi_scan_results_valid = false;
 }
+
+static void wireless_set_ble_error(esp_err_t err, const char *hint)
+{
+    s_status.ble_advertising_enabled = false;
+    s_status.ble_connected = s_ble_connected;
+    s_status.ble_host_synced = s_ble_host_synced;
+    s_status.ble_test_value = s_ble_test_value;
+    s_status.ble_state = TEST_WIRELESS_BLE_ERROR;
+    s_status.last_error = err;
+    wireless_set_hint(hint);
+}
+
+#if WIRELESS_BLE_HOSTED_ENABLED
+static int wireless_ble_gap_event(struct ble_gap_event *event, void *arg);
+
+static int wireless_ble_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
+                                    struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)arg;
+
+    switch (ctxt->op) {
+    case BLE_GATT_ACCESS_OP_READ_CHR:
+        if (attr_handle == s_ble_test_value_handle) {
+            int rc = os_mbuf_append(ctxt->om, &s_ble_test_value, sizeof(s_ble_test_value));
+            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+        return BLE_ATT_ERR_UNLIKELY;
+
+    case BLE_GATT_ACCESS_OP_WRITE_CHR: {
+        if (attr_handle != s_ble_test_value_handle || OS_MBUF_PKTLEN(ctxt->om) != sizeof(s_ble_test_value)) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+
+        uint16_t len = 0;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, &s_ble_test_value, sizeof(s_ble_test_value), &len);
+        if (rc != 0 || len != sizeof(s_ble_test_value)) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        ble_gatts_chr_updated(s_ble_test_value_handle);
+        s_status.ble_test_value = s_ble_test_value;
+        s_status.last_error = ESP_OK;
+        wireless_set_hint("ble gatt write");
+        ESP_LOGI(TAG, "BLE test characteristic updated: %u", s_ble_test_value);
+        return 0;
+    }
+
+    default:
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+}
+
+static const struct ble_gatt_svc_def s_ble_gatt_services[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &s_ble_test_service_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]) {
+            {
+                .uuid = &s_ble_test_chr_uuid.u,
+                .access_cb = wireless_ble_gatt_access,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+                .val_handle = &s_ble_test_value_handle,
+            },
+            {0},
+        },
+    },
+    {0},
+};
+
+static esp_err_t wireless_ble_start_advertising(void)
+{
+    if (!s_ble_host_synced) {
+        s_status.ble_host_synced = false;
+        s_status.last_error = ESP_ERR_INVALID_STATE;
+        wireless_set_hint("ble not synced");
+    }
+    ESP_RETURN_ON_FALSE(s_ble_host_synced, ESP_ERR_INVALID_STATE, TAG, "BLE host not synced");
+
+    if (s_status.ble_advertising_enabled) {
+        return ESP_OK;
+    }
+
+    if (s_ble_connected) {
+        s_status.ble_connected = true;
+        s_status.last_error = ESP_ERR_INVALID_STATE;
+        wireless_set_hint("ble connected");
+    }
+    ESP_RETURN_ON_FALSE(!s_ble_connected, ESP_ERR_INVALID_STATE, TAG, "BLE already connected");
+
+    struct ble_hs_adv_fields adv_fields = {0};
+    adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    adv_fields.tx_pwr_lvl_is_present = 1;
+    adv_fields.tx_pwr_lvl = BLE_HS_ADV_TX_PWR_LVL_AUTO;
+    adv_fields.name = (uint8_t *)WIRELESS_BLE_DEVICE_NAME;
+    adv_fields.name_len = strlen(WIRELESS_BLE_DEVICE_NAME);
+    adv_fields.name_is_complete = 1;
+
+    int rc = ble_gap_adv_set_fields(&adv_fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: %d", rc);
+        wireless_set_ble_error(ESP_FAIL, rc == BLE_HS_EMSGSIZE ? "ble adv data too large" : "ble adv fields fail");
+        return ESP_FAIL;
+    }
+
+    struct ble_hs_adv_fields scan_rsp_fields = {0};
+    scan_rsp_fields.uuids128 = &s_ble_test_service_uuid;
+    scan_rsp_fields.num_uuids128 = 1;
+    scan_rsp_fields.uuids128_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&scan_rsp_fields);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_rsp_set_fields failed: %d", rc);
+        wireless_set_ble_error(ESP_FAIL, rc == BLE_HS_EMSGSIZE ? "ble rsp data too large" : "ble rsp fields fail");
+        return ESP_FAIL;
+    }
+
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+
+    rc = ble_gap_adv_start(s_ble_own_addr_type, NULL, BLE_HS_FOREVER,
+                           &adv_params, wireless_ble_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_adv_start failed: %d", rc);
+        wireless_set_ble_error(ESP_FAIL, "ble adv start fail");
+        return ESP_FAIL;
+    }
+
+    s_status.ble_advertising_enabled = true;
+    s_status.ble_connected = false;
+    s_status.ble_host_synced = s_ble_host_synced;
+    s_status.ble_test_value = s_ble_test_value;
+    s_status.ble_state = TEST_WIRELESS_BLE_ADVERTISING;
+    s_status.last_error = ESP_OK;
+    wireless_set_hint("ble advertising");
+    return ESP_OK;
+}
+
+static esp_err_t wireless_ble_stop_advertising(void)
+{
+    if (!s_status.ble_advertising_enabled) {
+        s_status.ble_state = s_ble_host_ready ? TEST_WIRELESS_BLE_IDLE : TEST_WIRELESS_BLE_NOT_AVAILABLE;
+        s_status.ble_connected = s_ble_connected;
+        s_status.ble_host_synced = s_ble_host_synced;
+        return ESP_OK;
+    }
+
+    int rc = ble_gap_adv_stop();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gap_adv_stop failed: %d", rc);
+    }
+
+    s_status.ble_advertising_enabled = false;
+    s_status.ble_connected = s_ble_connected;
+    s_status.ble_host_synced = s_ble_host_synced;
+    s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+    s_status.last_error = ESP_OK;
+    wireless_set_hint("ble adv stop");
+    return ESP_OK;
+}
+
+static int wireless_ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+
+    switch (event->type) {
+#if defined(BLE_GAP_EVENT_LINK_ESTAB)
+    case BLE_GAP_EVENT_LINK_ESTAB:
+#else
+    case BLE_GAP_EVENT_CONNECT:
+#endif
+        if (event->connect.status == 0) {
+            s_ble_connected = true;
+            s_status.ble_advertising_enabled = false;
+            s_status.ble_connected = true;
+            s_status.ble_host_synced = s_ble_host_synced;
+            s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+            s_status.last_error = ESP_OK;
+            wireless_set_hint("ble connected");
+            ESP_LOGI(TAG, "BLE connected, handle=%d", event->connect.conn_handle);
+        } else {
+            s_ble_connected = false;
+            s_status.ble_advertising_enabled = false;
+            s_status.ble_connected = false;
+            s_status.ble_host_synced = s_ble_host_synced;
+            s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+            wireless_set_hint("ble conn fail");
+            ESP_LOGW(TAG, "BLE connection failed, status=%d", event->connect.status);
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        s_ble_connected = false;
+        s_status.ble_connected = false;
+        s_status.ble_host_synced = s_ble_host_synced;
+        s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+        s_status.last_error = ESP_OK;
+        wireless_set_hint("ble disconnected");
+        ESP_LOGI(TAG, "BLE disconnected, reason=%d", event->disconnect.reason);
+        if (s_status.ble_feature_enabled) {
+            (void)wireless_ble_start_advertising();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        s_status.ble_advertising_enabled = false;
+        s_status.ble_connected = s_ble_connected;
+        s_status.ble_host_synced = s_ble_host_synced;
+        s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+        wireless_set_hint("ble adv complete");
+        ESP_LOGI(TAG, "BLE advertising complete, reason=%d", event->adv_complete.reason);
+        return 0;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        wireless_set_hint(event->subscribe.cur_notify ? "ble notify on" : "ble notify off");
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
+static void wireless_ble_on_reset(int reason)
+{
+    s_ble_host_synced = false;
+    s_status.ble_host_synced = false;
+    wireless_set_ble_error(ESP_FAIL, "ble host reset");
+    ESP_LOGE(TAG, "NimBLE reset, reason=%d", reason);
+}
+
+static void wireless_ble_on_sync(void)
+{
+    int rc = ble_hs_util_ensure_addr(0);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_util_ensure_addr failed: %d", rc);
+        wireless_set_ble_error(ESP_FAIL, "ble addr fail");
+        return;
+    }
+
+    rc = ble_hs_id_infer_auto(0, &s_ble_own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        wireless_set_ble_error(ESP_FAIL, "ble addr type fail");
+        return;
+    }
+
+    uint8_t addr_val[6] = {0};
+    rc = ble_hs_id_copy_addr(s_ble_own_addr_type, addr_val, NULL);
+    if (rc == 0) {
+        ESP_LOGI(TAG, "BLE address: %02x:%02x:%02x:%02x:%02x:%02x",
+                 addr_val[5], addr_val[4], addr_val[3], addr_val[2], addr_val[1], addr_val[0]);
+    }
+
+    s_ble_host_synced = true;
+    s_status.ble_connected = s_ble_connected;
+    s_status.ble_host_synced = true;
+    s_status.ble_test_value = s_ble_test_value;
+    s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+    s_status.last_error = ESP_OK;
+    wireless_set_hint("ble ready");
+
+    if (s_status.ble_feature_enabled) {
+        (void)wireless_ble_start_advertising();
+    }
+}
+
+static void wireless_ble_host_task(void *param)
+{
+    (void)param;
+    ESP_LOGI(TAG, "BLE host task started");
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+    s_ble_host_task_started = false;
+    ESP_LOGI(TAG, "BLE host task stopped");
+}
+
+static esp_err_t wireless_prepare_ble(void)
+{
+    if (!s_status.ble_feature_enabled) {
+        return ESP_OK;
+    }
+
+    ESP_RETURN_ON_FALSE(s_status.transport_confirmed, ESP_ERR_INVALID_STATE, TAG, "hosted transport not ready for BLE");
+
+    if (!s_ble_controller_ready) {
+        ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_init(), TAG, "esp_hosted_bt_controller_init failed");
+        s_ble_controller_ready = true;
+    }
+
+    if (!s_ble_controller_enabled) {
+        ESP_RETURN_ON_ERROR(esp_hosted_bt_controller_enable(), TAG, "esp_hosted_bt_controller_enable failed");
+        s_ble_controller_enabled = true;
+    }
+
+    if (!s_ble_host_ready) {
+        esp_err_t ret = nimble_port_init();
+        ESP_RETURN_ON_FALSE(ret == ESP_OK, ret, TAG, "nimble_port_init failed");
+
+        ble_hs_cfg.reset_cb = wireless_ble_on_reset;
+        ble_hs_cfg.sync_cb = wireless_ble_on_sync;
+        ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+
+        ble_svc_gap_init();
+        ble_svc_gatt_init();
+
+        int rc = ble_gatts_count_cfg(s_ble_gatt_services);
+        if (rc != 0) {
+            wireless_set_ble_error(ESP_FAIL, "ble gatts count fail");
+            return ESP_FAIL;
+        }
+
+        rc = ble_gatts_add_svcs(s_ble_gatt_services);
+        if (rc != 0) {
+            wireless_set_ble_error(ESP_FAIL, "ble gatts add fail");
+            return ESP_FAIL;
+        }
+
+        rc = ble_svc_gap_device_name_set(WIRELESS_BLE_DEVICE_NAME);
+        if (rc != 0) {
+            wireless_set_ble_error(ESP_FAIL, "ble name fail");
+            return ESP_FAIL;
+        }
+
+        ble_store_config_init();
+        nimble_port_freertos_init(wireless_ble_host_task);
+        s_ble_host_task_started = true;
+        s_ble_host_ready = true;
+    }
+
+    if (!s_ble_host_synced) {
+        s_status.ble_state = TEST_WIRELESS_BLE_IDLE;
+        s_status.ble_host_synced = false;
+        s_status.last_error = ESP_OK;
+        wireless_set_hint("ble init");
+    }
+    return ESP_OK;
+}
+
+static void wireless_deinit_ble(void)
+{
+    if (s_status.ble_advertising_enabled) {
+        (void)wireless_ble_stop_advertising();
+    }
+
+    if (s_ble_host_ready) {
+        int rc = nimble_port_stop();
+        if (rc != 0) {
+            ESP_LOGW(TAG, "nimble_port_stop failed: %d", rc);
+        }
+        esp_err_t ret = nimble_port_deinit();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "nimble_port_deinit failed: %s", esp_err_to_name(ret));
+        }
+        s_ble_host_ready = false;
+        s_ble_host_synced = false;
+        s_ble_host_task_started = false;
+    }
+
+    if (s_ble_controller_enabled) {
+        esp_err_t ret = esp_hosted_bt_controller_disable();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "esp_hosted_bt_controller_disable failed: %s", esp_err_to_name(ret));
+        }
+        s_ble_controller_enabled = false;
+    }
+
+    if (s_ble_controller_ready) {
+        esp_err_t ret = esp_hosted_bt_controller_deinit(false);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "esp_hosted_bt_controller_deinit failed: %s", esp_err_to_name(ret));
+        }
+        s_ble_controller_ready = false;
+    }
+
+    s_ble_connected = false;
+    s_ble_test_value = 0;
+    s_ble_test_value_handle = 0;
+    s_status.ble_connected = false;
+    s_status.ble_host_synced = false;
+    s_status.ble_test_value = 0;
+}
+#else
+static esp_err_t wireless_prepare_ble(void)
+{
+    if (s_status.ble_feature_enabled) {
+        s_status.ble_state = TEST_WIRELESS_BLE_NOT_AVAILABLE;
+        s_status.last_error = ESP_ERR_NOT_SUPPORTED;
+        wireless_set_hint("ble cfg disabled");
+        ESP_LOGW(TAG, "BLE feature enabled in example, but hosted NimBLE config is disabled");
+    }
+    return ESP_OK;
+}
+
+static void wireless_deinit_ble(void)
+{
+}
+#endif
 
 static void wireless_update_scan_results(void)
 {
@@ -649,6 +1084,8 @@ esp_err_t test_wireless_init(void)
         .ble_feature_enabled = CONFIG_EXAMPLE_WIRELESS_ENABLE_BLE,
         .sdio_board_link_defined = true,
         .ble_advertising_enabled = false,
+        .ble_connected = false,
+        .ble_host_synced = false,
         .wifi_connected = false,
         .transport_confirmed = false,
         .rpc_metadata_ready = false,
@@ -657,13 +1094,15 @@ esp_err_t test_wireless_init(void)
         .transport_state = TEST_WIRELESS_TRANSPORT_IDLE,
         .wifi_state = CONFIG_EXAMPLE_WIRELESS_ENABLE_WIFI ? TEST_WIRELESS_WIFI_IDLE :
                                                            TEST_WIRELESS_WIFI_NOT_AVAILABLE,
-        .ble_state = CONFIG_EXAMPLE_WIRELESS_ENABLE_BLE ? TEST_WIRELESS_BLE_NOT_AVAILABLE :
-                                                          TEST_WIRELESS_BLE_UNINITIALIZED,
+        .ble_state = CONFIG_EXAMPLE_WIRELESS_ENABLE_BLE ?
+                     (WIRELESS_BLE_HOSTED_ENABLED ? TEST_WIRELESS_BLE_IDLE : TEST_WIRELESS_BLE_NOT_AVAILABLE) :
+                     TEST_WIRELESS_BLE_UNINITIALIZED,
         .hosted_last_event = -1,
         .cp_chip_id = 0,
         .wifi_ap_count = 0,
         .ble_device_count = 0,
         .wifi_scan_generation = 0,
+        .ble_test_value = 0,
         .wifi_rssi = 0,
         .wifi_retry_count = 0,
         .wifi_scan_results_valid = false,
@@ -674,6 +1113,7 @@ esp_err_t test_wireless_init(void)
     snprintf(s_status.current_ip, sizeof(s_status.current_ip), "--");
     snprintf(s_status.cp_target_name, sizeof(s_status.cp_target_name), "%s", "--");
     snprintf(s_status.cp_fw_version, sizeof(s_status.cp_fw_version), "%s", "--");
+    snprintf(s_status.ble_device_name, sizeof(s_status.ble_device_name), "%s", WIRELESS_BLE_DEVICE_NAME);
     wireless_clear_scan_results();
     wireless_set_hint("wifi hosted init");
     s_hosted_ready = true;
@@ -711,9 +1151,16 @@ esp_err_t test_wireless_init(void)
     s_status.initialized = true;
     s_status.transport_state = TEST_WIRELESS_TRANSPORT_READY;
     s_status.transport_confirmed = true;
+
     if (s_status.ble_feature_enabled) {
-        wireless_set_hint("wifi ok ble na");
-    } else {
+        ret = wireless_prepare_ble();
+        if (ret != ESP_OK) {
+            wireless_set_ble_error(ret, "ble init fail");
+            ESP_LOGE(TAG, "BLE hosted path init failed: %s", esp_err_to_name(ret));
+        }
+    }
+
+    if (!s_status.ble_feature_enabled || s_status.ble_state == TEST_WIRELESS_BLE_NOT_AVAILABLE) {
         wireless_set_hint("wifi ready");
     }
 
@@ -732,7 +1179,8 @@ esp_err_t test_wireless_init(void)
              s_status.rpc_metadata_ready);
 
     if (s_status.ble_feature_enabled) {
-        ESP_LOGW(TAG, "BLE hosted path is not integrated yet; WiFi is available, BLE stays disabled");
+        ESP_LOGI(TAG, "BLE hosted path state=%d advertising=%d",
+                 s_status.ble_state, s_status.ble_advertising_enabled);
     }
     return ESP_OK;
 }
@@ -848,9 +1296,8 @@ esp_err_t test_wireless_request_ble_scan(void)
 {
     ESP_RETURN_ON_ERROR(wireless_require_initialized(), TAG, "wireless init state invalid");
     ESP_RETURN_ON_FALSE(s_status.ble_feature_enabled, ESP_ERR_NOT_SUPPORTED, TAG, "BLE feature disabled");
-    s_status.ble_state = TEST_WIRELESS_BLE_NOT_AVAILABLE;
     s_status.last_error = ESP_ERR_NOT_SUPPORTED;
-    wireless_set_hint("ble na");
+    wireless_set_hint("ble scan unsupported");
     return ESP_ERR_NOT_SUPPORTED;
 }
 
@@ -858,15 +1305,24 @@ esp_err_t test_wireless_set_ble_advertising(bool enable)
 {
     ESP_RETURN_ON_ERROR(wireless_require_initialized(), TAG, "wireless init state invalid");
     ESP_RETURN_ON_FALSE(s_status.ble_feature_enabled, ESP_ERR_NOT_SUPPORTED, TAG, "BLE feature disabled");
-    s_status.ble_advertising_enabled = enable;
+#if WIRELESS_BLE_HOSTED_ENABLED
+    if (enable) {
+        return wireless_ble_start_advertising();
+    }
+    return wireless_ble_stop_advertising();
+#else
+    (void)enable;
     s_status.ble_state = TEST_WIRELESS_BLE_NOT_AVAILABLE;
     s_status.last_error = ESP_ERR_NOT_SUPPORTED;
-    wireless_set_hint("ble na");
+    wireless_set_hint("ble cfg disabled");
     return ESP_ERR_NOT_SUPPORTED;
+#endif
 }
 
 esp_err_t test_wireless_deinit(void)
 {
+    wireless_deinit_ble();
+
     if (s_wifi_started) {
         esp_wifi_stop();
         s_wifi_started = false;

@@ -30,6 +30,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_event
                                      esp_netif
                                      esp_wifi
+                                     bt
                                      espressif__esp_hosted
                                      nvs_flash
                                      log

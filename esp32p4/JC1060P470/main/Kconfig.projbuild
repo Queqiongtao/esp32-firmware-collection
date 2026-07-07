@@ -193,10 +193,9 @@ menu "Example Configuration"
         default y
         help
             Enable this option to expose the board-level ESP32-P4 <-> ESP32-C6
-            wireless test module. The current implementation brings up the
-            hosted WiFi station path over SDIO by using esp_hosted +
-            esp_wifi_remote. BLE status is kept in the UI model, but the BLE
-            hosted data path is not integrated yet.
+            wireless test module. WiFi uses esp_hosted + esp_wifi_remote over
+            SDIO. BLE uses hosted NimBLE Host-only on ESP32-P4 with the
+            ESP32-C6 BLE controller reached through ESP-Hosted VHCI.
 
     config EXAMPLE_WIRELESS_ENABLE_WIFI
         bool "Enable WiFi status/actions in wireless module"
@@ -210,7 +209,9 @@ menu "Example Configuration"
         depends on EXAMPLE_ENABLE_TEST_WIRELESS
         default y
         help
-            Keep BLE actions and status visible in the wireless demo card.
+            Enable the BLE Peripheral smoke-test path. The first version
+            starts connectable advertising and exposes one small read/write
+            GATT characteristic for validation with a phone BLE scanner.
 
     config EXAMPLE_WIRELESS_DEFAULT_WIFI_SSID
         string "Default WiFi SSID for demo connect action"

@@ -64,7 +64,12 @@ static lv_obj_t *s_wifi_hint_label;
 static lv_obj_t *s_wifi_scan_btn;
 static lv_obj_t *s_wifi_list;
 static lv_obj_t *s_ble_status_label;
+static lv_obj_t *s_ble_name_label;
+static lv_obj_t *s_ble_link_label;
+static lv_obj_t *s_ble_value_label;
 static lv_obj_t *s_ble_hint_label;
+static lv_obj_t *s_ble_adv_btn;
+static lv_obj_t *s_ble_adv_btn_label;
 static lv_obj_t *s_wifi_dialog_mask;
 static lv_obj_t *s_wifi_dialog;
 static lv_obj_t *s_wifi_dialog_ssid_label;
@@ -400,6 +405,25 @@ static void wireless_wifi_scan_btn_cb(lv_event_t *e)
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "wifi scan request failed: %s", esp_err_to_name(ret));
     }
+}
+
+static void wireless_ble_adv_btn_cb(lv_event_t *e)
+{
+    (void)e;
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS && CONFIG_EXAMPLE_WIRELESS_ENABLE_BLE
+    test_wireless_status_t status = {0};
+    esp_err_t ret = test_wireless_get_status(&status);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ble status read failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    ret = test_wireless_set_ble_advertising(!status.ble_advertising_enabled);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "ble advertising request failed: %s", esp_err_to_name(ret));
+    }
+#endif
 }
 
 static void wifi_password_ta_event_cb(lv_event_t *e)
@@ -762,6 +786,20 @@ static void wifi_dialog_open(const char *ssid)
     lv_obj_add_state(s_wifi_password_ta, LV_STATE_FOCUSED);
 }
 
+static void demo_set_ble_adv_button(bool enabled, bool advertising)
+{
+    if (s_ble_adv_btn == NULL || s_ble_adv_btn_label == NULL) {
+        return;
+    }
+
+    lv_label_set_text(s_ble_adv_btn_label, advertising ? "Adv Off" : "Adv On");
+    if (enabled) {
+        lv_obj_clear_state(s_ble_adv_btn, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
+    }
+}
+
 static void demo_update_wireless_card(void)
 {
     if (s_wifi_status_label == NULL || s_ble_status_label == NULL) {
@@ -777,7 +815,11 @@ static void demo_update_wireless_card(void)
         lv_label_set_text(s_wifi_ap_label, "WiFi: --");
         lv_label_set_text(s_wifi_hint_label, "Hint: wireless NA");
         lv_label_set_text(s_ble_status_label, "状态: 未初始化");
+        lv_label_set_text(s_ble_name_label, "Name: --");
+        lv_label_set_text(s_ble_link_label, "Link: --");
+        lv_label_set_text(s_ble_value_label, "GATT值: --");
         lv_label_set_text(s_ble_hint_label, "BLE wireless NA");
+        demo_set_ble_adv_button(false, false);
         lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
         if (s_wifi_list != NULL) {
             lv_obj_clean(s_wifi_list);
@@ -805,6 +847,9 @@ static void demo_update_wireless_card(void)
                                   (unsigned int)status.hosted_cp_info_error,
                                   (unsigned int)status.hosted_fw_version_error);
             lv_label_set_text(s_ble_status_label, "状态: 待就绪");
+            lv_label_set_text(s_ble_name_label, "Name: --");
+            lv_label_set_text(s_ble_link_label, "Link: hosted not ready");
+            lv_label_set_text(s_ble_value_label, "GATT值: --");
             lv_label_set_text(s_ble_hint_label, "BLE follows hosted link");
         } else {
             lv_label_set_text(s_wifi_status_label, "状态: 未初始化");
@@ -812,8 +857,12 @@ static void demo_update_wireless_card(void)
             lv_label_set_text(s_wifi_ap_label, "WiFi: --");
             lv_label_set_text(s_wifi_hint_label, "Hint: host NA");
             lv_label_set_text(s_ble_status_label, "状态: 未初始化");
+            lv_label_set_text(s_ble_name_label, "Name: --");
+            lv_label_set_text(s_ble_link_label, "Link: --");
+            lv_label_set_text(s_ble_value_label, "GATT值: --");
             lv_label_set_text(s_ble_hint_label, "BLE host NA");
         }
+        demo_set_ble_adv_button(false, false);
         lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
         if (s_wifi_list != NULL) {
             lv_obj_clean(s_wifi_list);
@@ -842,7 +891,16 @@ static void demo_update_wireless_card(void)
                           status.current_ip[0] != '\0' ? status.current_ip : "--",
                           status.hosted_last_event);
     lv_label_set_text_fmt(s_ble_status_label, "状态: %s", wireless_ble_state_to_text(status.ble_state));
-    lv_label_set_text(s_ble_hint_label, "BLE Hosted 待接入");
+    lv_label_set_text_fmt(s_ble_name_label, "Name: %s",
+                          status.ble_device_name[0] != '\0' ? status.ble_device_name : "--");
+    lv_label_set_text_fmt(s_ble_link_label, "Link: sync=%d conn=%d adv=%d",
+                          status.ble_host_synced,
+                          status.ble_connected,
+                          status.ble_advertising_enabled);
+    lv_label_set_text_fmt(s_ble_value_label, "GATT值: %u", (unsigned int)status.ble_test_value);
+    lv_label_set_text_fmt(s_ble_hint_label, "Hint: %s err=0x%x",
+                          status.last_hint,
+                          (unsigned int)status.last_error);
 
     bool wifi_actions_ready = status.hosted_stack_available &&
                               status.wifi_feature_enabled &&
@@ -855,6 +913,15 @@ static void demo_update_wireless_card(void)
         lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
     }
 
+    bool ble_actions_ready = status.hosted_stack_available &&
+                             status.ble_feature_enabled &&
+                             status.transport_confirmed &&
+                             status.transport_state == TEST_WIRELESS_TRANSPORT_READY &&
+                             status.ble_state != TEST_WIRELESS_BLE_NOT_AVAILABLE &&
+                             status.ble_state != TEST_WIRELESS_BLE_ERROR &&
+                             (!status.ble_connected || status.ble_advertising_enabled);
+    demo_set_ble_adv_button(ble_actions_ready, status.ble_advertising_enabled);
+
     demo_refresh_wifi_ap_list(&status);
 #else
     lv_label_set_text(s_wifi_status_label, "状态: 未开");
@@ -862,7 +929,11 @@ static void demo_update_wireless_card(void)
     lv_label_set_text(s_wifi_ap_label, "WiFi: --");
     lv_label_set_text(s_wifi_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
     lv_label_set_text(s_ble_status_label, "状态: 未开");
+    lv_label_set_text(s_ble_name_label, "Name: --");
+    lv_label_set_text(s_ble_link_label, "Link: --");
+    lv_label_set_text(s_ble_value_label, "GATT值: --");
     lv_label_set_text(s_ble_hint_label, "开 CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS");
+    demo_set_ble_adv_button(false, false);
     lv_obj_add_state(s_wifi_scan_btn, LV_STATE_DISABLED);
     if (s_wifi_list != NULL) {
         lv_obj_clean(s_wifi_list);
@@ -1049,14 +1120,32 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_style_pad_row(s_wifi_list, 6, 0);
     lv_list_add_text(s_wifi_list, "Tap Scan");
 
-    lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 180);
+    lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 260);
     s_ble_status_label = lv_label_create(ble_card);
+    s_ble_name_label = lv_label_create(ble_card);
+    s_ble_link_label = lv_label_create(ble_card);
+    s_ble_value_label = lv_label_create(ble_card);
     s_ble_hint_label = lv_label_create(ble_card);
     lv_obj_set_style_text_font(s_ble_status_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_ble_name_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_ble_link_label, demo_get_ui_font(), 0);
+    lv_obj_set_style_text_font(s_ble_value_label, demo_get_ui_font(), 0);
     lv_obj_set_style_text_font(s_ble_hint_label, demo_get_ui_font(), 0);
     lv_obj_set_style_text_color(s_ble_hint_label, lv_color_hex(0x5E4C38), 0);
     lv_label_set_text(s_ble_status_label, "状态: host NA");
+    lv_label_set_text(s_ble_name_label, "Name: --");
+    lv_label_set_text(s_ble_link_label, "Link: --");
+    lv_label_set_text(s_ble_value_label, "GATT值: --");
     lv_label_set_text(s_ble_hint_label, "BLE Not Ready");
+
+    s_ble_adv_btn = lv_button_create(ble_card);
+    lv_obj_set_size(s_ble_adv_btn, 124, 44);
+    lv_obj_add_event_cb(s_ble_adv_btn, wireless_ble_adv_btn_cb, LV_EVENT_CLICKED, NULL);
+    s_ble_adv_btn_label = lv_label_create(s_ble_adv_btn);
+    lv_obj_set_style_text_font(s_ble_adv_btn_label, demo_get_ui_font(), 0);
+    lv_label_set_text(s_ble_adv_btn_label, "Adv On");
+    lv_obj_center(s_ble_adv_btn_label);
+    lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
 
     lv_obj_t *top_layer = lv_display_get_layer_top(disp);
     s_wifi_dialog_mask = lv_obj_create(top_layer);
