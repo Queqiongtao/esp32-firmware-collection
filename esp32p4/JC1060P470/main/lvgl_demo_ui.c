@@ -7,11 +7,13 @@
 #include "lvgl.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
 #include "display_font.h"
+#include "display_touch.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "lvgl_demo_font_patch.h"
@@ -22,6 +24,15 @@
 #include "test_wireless.h"
 
 static const char *TAG = "demo_ui";
+
+typedef void (*demo_ui_progress_cb_t)(const char *stage);
+
+static void demo_build_progress(demo_ui_progress_cb_t progress_cb, const char *stage)
+{
+    if (progress_cb != NULL) {
+        progress_cb(stage);
+    }
+}
 
 typedef struct {
     uint32_t touch_count;
@@ -84,6 +95,13 @@ static lv_obj_t *s_ble_value_label;
 static lv_obj_t *s_ble_hint_label;
 static lv_obj_t *s_ble_adv_btn;
 static lv_obj_t *s_ble_adv_btn_label;
+static lv_obj_t *s_font_status_label;
+static lv_obj_t *s_font_file_label;
+static lv_obj_t *s_font_size_label;
+static lv_obj_t *s_font_glyph_label;
+static lv_obj_t *s_font_touch_label;
+static lv_obj_t *s_font_sample_area;
+static lv_obj_t *s_font_sample_label;
 static lv_obj_t *s_wifi_dialog_mask;
 static lv_obj_t *s_wifi_dialog;
 static lv_obj_t *s_wifi_dialog_ssid_label;
@@ -99,6 +117,10 @@ static char s_selected_wifi_ssid[TEST_WIRELESS_SSID_MAX_LEN + 1];
 static uint32_t s_ui_label_update_count;
 static uint32_t s_ui_list_rebuild_count;
 static uint32_t s_ui_update_report_start_ms;
+static uint16_t s_font_sample_size_px = 22;
+static uint16_t s_font_pinch_base_size_px = 22;
+static float s_font_pinch_base_distance;
+static bool s_font_pinch_active;
 
 #define WIFI_KB_CTRL_KEY (LV_KEYBOARD_CTRL_BUTTON_FLAGS)
 #define WIFI_KB_CHECKED_KEY (LV_BUTTONMATRIX_CTRL_CHECKED)
@@ -1064,6 +1086,175 @@ static void demo_update_wireless_card(void)
 #endif
 }
 
+static const char *demo_font_diag_state_text(display_font_diag_state_t state)
+{
+    switch (state) {
+    case DISPLAY_FONT_DIAG_OK:
+        return "OK";
+    case DISPLAY_FONT_DIAG_FALLBACK:
+        return "Fallback";
+    case DISPLAY_FONT_DIAG_ERROR:
+        return "Error";
+    case DISPLAY_FONT_DIAG_NOT_RUN:
+    default:
+        return "Not Run";
+    }
+}
+
+static uint16_t demo_font_size_clamp(int32_t size_px)
+{
+    if (size_px < DISPLAY_FONT_SAMPLE_SIZE_MIN) {
+        return DISPLAY_FONT_SAMPLE_SIZE_MIN;
+    }
+    if (size_px > DISPLAY_FONT_SAMPLE_SIZE_MAX) {
+        return DISPLAY_FONT_SAMPLE_SIZE_MAX;
+    }
+    return (uint16_t)size_px;
+}
+
+static bool demo_font_apply_sample_size(uint16_t size_px)
+{
+    size_px = demo_font_size_clamp(size_px);
+    if (s_font_sample_label == NULL) {
+        return false;
+    }
+
+    const lv_font_t *font = display_font_get_freetype_sample_font(size_px);
+    if (font == NULL) {
+        return false;
+    }
+
+    s_font_sample_size_px = size_px;
+    lv_obj_set_style_text_font(s_font_sample_label, font, 0);
+    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
+    lv_obj_center(s_font_sample_label);
+    lv_obj_invalidate(s_font_sample_label);
+    return true;
+}
+
+static bool demo_font_point_in_sample_area(const display_touch_point_t *point)
+{
+    if (point == NULL || s_font_sample_area == NULL) {
+        return false;
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(s_font_sample_area, &area);
+    return point->x >= area.x1 && point->x <= area.x2 && point->y >= area.y1 && point->y <= area.y2;
+}
+
+static float demo_font_touch_distance(const display_touch_point_t *a, const display_touch_point_t *b)
+{
+    const float dx = (float)(a->x - b->x);
+    const float dy = (float)(a->y - b->y);
+    return sqrtf(dx * dx + dy * dy);
+}
+
+static void demo_update_font_touch_zoom(void)
+{
+    if (s_font_sample_area == NULL || s_font_sample_label == NULL) {
+        return;
+    }
+
+    display_touch_snapshot_t snapshot = {0};
+    if (display_touch_get_snapshot(&snapshot) != ESP_OK) {
+        return;
+    }
+
+    display_touch_point_t area_points[2] = {0};
+    uint8_t area_count = 0;
+    for (uint8_t i = 0; i < snapshot.count && area_count < 2; i++) {
+        if (demo_font_point_in_sample_area(&snapshot.points[i])) {
+            area_points[area_count++] = snapshot.points[i];
+        }
+    }
+
+    if (area_count < 2) {
+        s_font_pinch_active = false;
+        s_font_pinch_base_size_px = s_font_sample_size_px;
+        s_font_pinch_base_distance = 0.0f;
+        if (s_font_touch_label != NULL) {
+            demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: %u point(s) in area  Font: %upx",
+                                               (unsigned int)area_count,
+                                               (unsigned int)s_font_sample_size_px);
+        }
+        return;
+    }
+
+    const float distance = demo_font_touch_distance(&area_points[0], &area_points[1]);
+    if (distance < 20.0f) {
+        if (s_font_touch_label != NULL) {
+            demo_label_set_text_if_changed(s_font_touch_label, "Touch: 2 points too close");
+        }
+        return;
+    }
+
+    if (!s_font_pinch_active) {
+        s_font_pinch_active = true;
+        s_font_pinch_base_size_px = s_font_sample_size_px;
+        s_font_pinch_base_distance = distance;
+    }
+
+    if (!display_font_is_freetype_ready()) {
+        if (s_font_touch_label != NULL) {
+            demo_label_set_text_if_changed(s_font_touch_label, "Touch: 2 points  Font: static fallback");
+        }
+        return;
+    }
+
+    bool font_ok = true;
+    if (s_font_pinch_base_distance > 0.01f) {
+        const float scale = distance / s_font_pinch_base_distance;
+        const uint16_t target_size = demo_font_size_clamp((int32_t)((float)s_font_pinch_base_size_px * scale));
+        font_ok = demo_font_apply_sample_size(target_size);
+    }
+
+    if (s_font_touch_label != NULL) {
+        demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: 2 points  Font: %upx%s",
+                                           (unsigned int)s_font_sample_size_px,
+                                           font_ok ? "" : " create failed");
+    }
+}
+
+static void demo_font_touch_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    demo_update_font_touch_zoom();
+}
+
+static void demo_update_font_card(void)
+{
+    if (s_font_status_label == NULL) {
+        return;
+    }
+
+    const display_font_diagnostics_t *diag = display_font_get_diagnostics();
+    if (diag == NULL) {
+        demo_label_set_text_if_changed(s_font_status_label, "State: NA");
+        demo_label_set_text_if_changed(s_font_file_label, "Font: static fallback");
+        demo_label_set_text_if_changed(s_font_size_label, "Gesture: pinch with two fingers");
+        demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: 0 point(s) in area  Font: %upx",
+                                           (unsigned int)s_font_sample_size_px);
+        demo_label_set_text_if_changed(s_font_glyph_label, "FreeType: --");
+        demo_label_set_text_if_changed(s_font_sample_label, "缩放测试 中文");
+        return;
+    }
+
+    bool sample_font_ready = demo_font_apply_sample_size(s_font_sample_size_px);
+
+    demo_label_set_text_fmt_if_changed(s_font_status_label, "State: %s stage=%s",
+                                       demo_font_diag_state_text(diag->state),
+                                       diag->stage[0] != '\0' ? diag->stage : "--");
+    demo_label_set_text_fmt_if_changed(s_font_file_label, "Font: %s",
+                                       sample_font_ready ? "FreeType dynamic" : "static fallback");
+    demo_label_set_text_if_changed(s_font_size_label, "Gesture: pinch with two fingers");
+    demo_label_set_text_fmt_if_changed(s_font_glyph_label, "Roles: ready=%" PRIu32 " fail=%" PRIu32 " %s",
+                                       diag->role_ready_count,
+                                       diag->role_fail_count,
+                                       diag->first_error[0] != '\0' ? diag->first_error : "");
+    demo_label_set_text_if_changed(s_font_sample_label, "缩放测试 中文");
+}
+
 static void demo_ui_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -1073,10 +1264,11 @@ static void demo_ui_timer_cb(lv_timer_t *timer)
     demo_update_audio_card();
     demo_update_battery_card();
     demo_update_wireless_card();
+    demo_update_font_card();
     demo_ui_report_updates_if_ready();
 }
 
-void example_lvgl_demo_ui(lv_display_t *disp)
+void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
 {
     lv_theme_default_init(disp,
                           lv_color_hex(0x1F5C8A),
@@ -1116,6 +1308,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_t *subtitle = lv_label_create(header);
     lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频 + BAT + WiFi + BLE");
     demo_config_label(subtitle, DISPLAY_FONT_ROLE_SMALL);
+    demo_build_progress(progress_cb, "header");
 
     lv_obj_t *row = lv_obj_create(screen);
     lv_obj_set_width(row, lv_pct(100));
@@ -1156,6 +1349,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_label_set_text(touch_pad_label, "触摸这里");
     demo_set_text_role(touch_pad_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(touch_pad_label);
+    demo_build_progress(progress_cb, "touch");
 
     lv_obj_t *rtc_card = demo_create_card(row, "2. RTC", 488, 220);
     s_rtc_status_label = lv_label_create(rtc_card);
@@ -1164,6 +1358,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     demo_config_label(s_rtc_status_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_rtc_time_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_rtc_sync_label, DISPLAY_FONT_ROLE_BODY);
+    demo_build_progress(progress_cb, "rtc");
 
     lv_obj_t *usb_card = demo_create_card(row, "3. USB Device", 488, 238);
     s_usb_status_label = lv_label_create(usb_card);
@@ -1175,6 +1370,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     demo_config_label(s_usb_stats_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_usb_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_usb_hint_label, lv_color_hex(0x5E4C38), 0);
+    demo_build_progress(progress_cb, "usb");
 
     lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 238);
     s_audio_status_label = lv_label_create(audio_card);
@@ -1220,6 +1416,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_label_set_text(play_label, "播放录音");
     demo_set_text_role(play_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(play_label);
+    demo_build_progress(progress_cb, "audio");
 
     lv_obj_t *battery_card = demo_create_card(row, "5. BAT", 488, 238);
     s_battery_status_label = lv_label_create(battery_card);
@@ -1233,6 +1430,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     demo_config_label(s_battery_percent_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_battery_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_battery_hint_label, lv_color_hex(0x5E4C38), 0);
+    demo_build_progress(progress_cb, "battery");
 
     lv_obj_t *wifi_card = demo_create_card(row, "6. WiFi", 488, 388);
     s_wifi_status_label = lv_label_create(wifi_card);
@@ -1277,6 +1475,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_obj_set_scroll_dir(s_wifi_list, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_wifi_list, LV_SCROLLBAR_MODE_AUTO);
     demo_wifi_list_add_text("Tap Scan");
+    demo_build_progress(progress_cb, "wifi");
 
     lv_obj_t *ble_card = demo_create_card(row, "7. BLE", 488, 282);
     s_ble_status_label = lv_label_create(ble_card);
@@ -1304,6 +1503,36 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     lv_label_set_text(s_ble_adv_btn_label, "Adv On");
     lv_obj_center(s_ble_adv_btn_label);
     lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
+    demo_build_progress(progress_cb, "ble");
+
+    lv_obj_t *font_card = demo_create_card(row, "8. FreeType", 488, 420);
+    s_font_status_label = lv_label_create(font_card);
+    s_font_file_label = lv_label_create(font_card);
+    s_font_size_label = lv_label_create(font_card);
+    s_font_touch_label = lv_label_create(font_card);
+    s_font_glyph_label = lv_label_create(font_card);
+    demo_config_label(s_font_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_font_file_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_font_size_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_font_touch_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_font_glyph_label, DISPLAY_FONT_ROLE_BODY);
+
+    s_font_sample_area = lv_obj_create(font_card);
+    lv_obj_set_size(s_font_sample_area, lv_pct(100), 250);
+    lv_obj_set_style_radius(s_font_sample_area, 8, 0);
+    lv_obj_set_style_bg_color(s_font_sample_area, lv_color_hex(0xFFF9EF), 0);
+    lv_obj_set_style_border_width(s_font_sample_area, 1, 0);
+    lv_obj_set_style_border_color(s_font_sample_area, lv_color_hex(0xD7C7AF), 0);
+    lv_obj_clear_flag(s_font_sample_area, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_font_sample_label = lv_label_create(s_font_sample_area);
+    demo_config_label(s_font_sample_label, DISPLAY_FONT_ROLE_TITLE);
+    lv_label_set_text(s_font_sample_label, "缩放测试 中文");
+    lv_obj_set_style_text_color(s_font_sample_label, lv_color_hex(0x17324D), 0);
+    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
+    lv_obj_center(s_font_sample_label);
+
+    demo_build_progress(progress_cb, "font");
 
     lv_obj_t *top_layer = lv_display_get_layer_top(disp);
     s_wifi_dialog_mask = lv_obj_create(top_layer);
@@ -1367,6 +1596,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     demo_set_text_role(cancel_label, DISPLAY_FONT_ROLE_BODY);
     lv_label_set_text(cancel_label, "Cancel");
     lv_obj_center(cancel_label);
+    demo_build_progress(progress_cb, "dialog");
 
     s_wifi_keyboard = lv_keyboard_create(top_layer);
     lv_obj_set_size(s_wifi_keyboard, lv_pct(100), 220);
@@ -1392,6 +1622,7 @@ void example_lvgl_demo_ui(lv_display_t *disp)
                         NULL);
     lv_obj_add_event_cb(s_wifi_keyboard, wifi_keyboard_event_cb, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
+    demo_build_progress(progress_cb, "keyboard");
 
     demo_update_touch_card();
     demo_update_rtc_card();
@@ -1399,5 +1630,8 @@ void example_lvgl_demo_ui(lv_display_t *disp)
     demo_update_audio_card();
     demo_update_battery_card();
     demo_update_wireless_card();
+    demo_update_font_card();
+    demo_build_progress(progress_cb, "initial-update");
+    lv_timer_create(demo_font_touch_timer_cb, 40, NULL);
     lv_timer_create(demo_ui_timer_cb, 250, NULL);
 }

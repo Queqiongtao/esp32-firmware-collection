@@ -19,6 +19,20 @@ extern "C" {
 #define DISPLAY_TOUCH_NATIVE_H_RES  800
 #define DISPLAY_TOUCH_NATIVE_V_RES  480
 
+typedef struct {
+    uint8_t track_id;
+    int32_t x;
+    int32_t y;
+    uint16_t strength;
+} display_touch_point_t;
+
+typedef struct {
+    uint8_t count;
+    display_touch_point_t points[CONFIG_ESP_LCD_TOUCH_MAX_POINTS];
+    int64_t timestamp_us;
+    uint32_t sequence;
+} display_touch_snapshot_t;
+
 /**
  * @brief Initialize I2C master bus and create GT911 touch handle.
  *
@@ -31,6 +45,12 @@ extern "C" {
  */
 esp_err_t display_touch_init(void);
 esp_err_t display_touch_get_handle(esp_lcd_touch_handle_t *out_handle);
+esp_err_t display_touch_read_cached(esp_lcd_touch_handle_t tp,
+                                    esp_lcd_touch_point_data_t *points,
+                                    uint8_t *count,
+                                    uint8_t max_count,
+                                    void *user_ctx);
+esp_err_t display_touch_get_snapshot(display_touch_snapshot_t *out_snapshot);
 
 /**
  * @brief Create an LVGL pointer input device bound to the touch controller.

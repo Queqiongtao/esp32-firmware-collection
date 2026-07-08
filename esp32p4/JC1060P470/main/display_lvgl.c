@@ -31,7 +31,7 @@ static const char *TAG = "display_lvgl";
 static _lock_t s_lvgl_api_lock;
 #endif
 
-extern void example_lvgl_demo_ui(lv_display_t *disp);
+extern void example_lvgl_demo_ui(lv_display_t *disp, void (*progress_cb)(const char *stage));
 
 #if CONFIG_EXAMPLE_LVGL_PERF_LOG
 typedef struct {
@@ -206,6 +206,11 @@ static esp_err_t display_lvgl_init_adapter(const display_panel_t *panel, display
     esp_lv_adapter_touch_config_t touch_cfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(display, touch_handle);
     touch_cfg.scale.x = (float)DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES;
     touch_cfg.scale.y = (float)DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES;
+#if LV_USE_GESTURE_RECOGNITION
+    touch_cfg.multi_touch.mode = ESP_LV_ADAPTER_TOUCH_MODE_MULTI_CONTROL;
+    touch_cfg.multi_touch.pointers = 2;
+#endif
+    touch_cfg.callbacks.custom_touch_read = display_touch_read_cached;
     lv_indev_t *indev = esp_lv_adapter_register_touch(&touch_cfg);
     ESP_RETURN_ON_FALSE(indev != NULL, ESP_ERR_NO_MEM, TAG, "register adapter touch failed");
 

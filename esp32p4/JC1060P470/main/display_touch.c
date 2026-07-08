@@ -10,11 +10,34 @@
 #include "esp_check.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "display_touch";
 
 static i2c_master_bus_handle_t s_i2c_bus = NULL;
 static esp_lcd_touch_handle_t s_touch_handle = NULL;
+static portMUX_TYPE s_touch_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
+static display_touch_snapshot_t s_touch_snapshot;
+
+static void display_touch_update_snapshot(const esp_lcd_touch_point_data_t *points, uint8_t count)
+{
+    display_touch_snapshot_t snapshot = {
+        .count = count > CONFIG_ESP_LCD_TOUCH_MAX_POINTS ? CONFIG_ESP_LCD_TOUCH_MAX_POINTS : count,
+        .timestamp_us = esp_timer_get_time(),
+    };
+
+    for (uint8_t i = 0; i < snapshot.count; i++) {
+        snapshot.points[i].track_id = points[i].track_id;
+        snapshot.points[i].x = (int32_t)((uint32_t)points[i].x * DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES);
+        snapshot.points[i].y = (int32_t)((uint32_t)points[i].y * DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES);
+        snapshot.points[i].strength = points[i].strength;
+    }
+
+    portENTER_CRITICAL(&s_touch_snapshot_lock);
+    snapshot.sequence = s_touch_snapshot.sequence + 1;
+    s_touch_snapshot = snapshot;
+    portEXIT_CRITICAL(&s_touch_snapshot_lock);
+}
 
 esp_err_t display_touch_init(void)
 {
@@ -115,6 +138,36 @@ esp_err_t display_touch_get_handle(esp_lcd_touch_handle_t *out_handle)
     return ESP_OK;
 }
 
+esp_err_t display_touch_read_cached(esp_lcd_touch_handle_t tp,
+                                    esp_lcd_touch_point_data_t *points,
+                                    uint8_t *count,
+                                    uint8_t max_count,
+                                    void *user_ctx)
+{
+    (void)user_ctx;
+
+    ESP_RETURN_ON_FALSE(tp != NULL, ESP_ERR_INVALID_ARG, TAG, "touch handle is NULL");
+    ESP_RETURN_ON_FALSE(points != NULL, ESP_ERR_INVALID_ARG, TAG, "points is NULL");
+    ESP_RETURN_ON_FALSE(count != NULL, ESP_ERR_INVALID_ARG, TAG, "count is NULL");
+    ESP_RETURN_ON_FALSE(max_count > 0, ESP_ERR_INVALID_ARG, TAG, "max_count is zero");
+
+    *count = 0;
+    ESP_RETURN_ON_ERROR(esp_lcd_touch_read_data(tp), TAG, "read touch data failed");
+    ESP_RETURN_ON_ERROR(esp_lcd_touch_get_data(tp, points, count, max_count), TAG, "get touch data failed");
+    display_touch_update_snapshot(points, *count);
+    return ESP_OK;
+}
+
+esp_err_t display_touch_get_snapshot(display_touch_snapshot_t *out_snapshot)
+{
+    ESP_RETURN_ON_FALSE(out_snapshot != NULL, ESP_ERR_INVALID_ARG, TAG, "out_snapshot is NULL");
+
+    portENTER_CRITICAL(&s_touch_snapshot_lock);
+    *out_snapshot = s_touch_snapshot;
+    portEXIT_CRITICAL(&s_touch_snapshot_lock);
+    return ESP_OK;
+}
+
 static void display_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void)indev;
@@ -122,11 +175,7 @@ static void display_touch_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     esp_lcd_touch_point_data_t touch_data[1];
     uint8_t touch_cnt = 0;
 
-    /* Read latest touch data from GT911 */
-    esp_lcd_touch_read_data(s_touch_handle);
-
-    /* Get the first touch point and scale to panel resolution */
-    esp_err_t err = esp_lcd_touch_get_data(s_touch_handle, touch_data, &touch_cnt, 1);
+    esp_err_t err = display_touch_read_cached(s_touch_handle, touch_data, &touch_cnt, 1, NULL);
 
     if (err == ESP_OK && touch_cnt > 0) {
         data->point.x = (int32_t)((uint32_t)touch_data[0].x * DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES);
