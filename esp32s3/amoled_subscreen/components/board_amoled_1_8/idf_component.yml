@@ -1,0 +1,10 @@
+dependencies:
+  espressif/usb: "^1"
+  espressif/esp_lcd_touch: "^1"
+  espressif/esp_lcd_touch_ft5x06: "^1"
+  espressif/esp_io_expander_tca9554: "^2"
+  espressif/esp_codec_dev: "~1.5"
+  waveshare/esp_lcd_sh8601: "^2"
+  espp/pcf85063: "^1.1.4"
+  esp-idf-lib/qmi8658c: "^0.5.7"
+  cube32esp/xpowerslib: "^0.3.3"
