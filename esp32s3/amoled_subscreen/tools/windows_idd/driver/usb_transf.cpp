@@ -422,13 +422,9 @@ void decision_runtime_policy(WDFDEVICE Device){
 	pDeviceContext->pContext->monitor_modes.clear();
 	mode.Width = 368;
 	mode.Height = 448;
-	mode.VSync = 60;
+	mode.VSync = fps;
 	pDeviceContext->pContext->monitor_modes.push_back(mode);
-	mode.Width = 448;
-	mode.Height = 368;
-	mode.VSync = 60;
-	pDeviceContext->pContext->monitor_modes.push_back(mode);
-	LOGI("configured AMOLED modes: 368x448, 448x368\n");
+	LOGI("configured AMOLED mode: 368x448@%dHz\n", fps);
 	LOGI("%s scale_res:%d monitor size:%d",__func__,scale_res,pDeviceContext->pContext->monitor_modes.size());
 }
 

@@ -90,7 +90,7 @@ static esp_err_t board_display_create_panel(const board_amoled_1_8_config_t *cfg
     io_config.cs_gpio_num = (gpio_num_t)cfg->lcd_cs_gpio;
     io_config.dc_gpio_num = GPIO_NUM_NC;
     io_config.spi_mode = 0;
-    io_config.pclk_hz = 40 * 1000 * 1000;
+    io_config.pclk_hz = cfg->lcd_pclk_hz;
     io_config.trans_queue_depth = 10;
     io_config.on_color_trans_done = NULL;
     io_config.user_ctx = NULL;
@@ -101,7 +101,7 @@ static esp_err_t board_display_create_panel(const board_amoled_1_8_config_t *cfg
     io_config.flags.quad_mode = 1;
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)cfg->lcd_spi_host, &io_config, &s_panel_io),
                         TAG, "create panel io failed");
-    ESP_LOGI(TAG, "display panel io create done");
+    ESP_LOGI(TAG, "display panel io create done: qspi=%dHz", cfg->lcd_pclk_hz);
 
     ESP_LOGI(TAG, "display panel create start");
     sh8601_vendor_config_t vendor_config = {

@@ -20,6 +20,7 @@ typedef struct {
 
     int lcd_cs_gpio;
     int lcd_pclk_gpio;
+    int lcd_pclk_hz;
     int lcd_d0_gpio;
     int lcd_d1_gpio;
     int lcd_d2_gpio;

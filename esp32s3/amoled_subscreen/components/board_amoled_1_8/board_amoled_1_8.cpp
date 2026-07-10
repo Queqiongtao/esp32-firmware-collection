@@ -115,6 +115,7 @@ static const board_amoled_1_8_config_t s_board_cfg = {
 
     .lcd_cs_gpio = CONFIG_BOARD_AMOLED_1_8_LCD_CS_GPIO,
     .lcd_pclk_gpio = CONFIG_BOARD_AMOLED_1_8_LCD_PCLK_GPIO,
+    .lcd_pclk_hz = CONFIG_BOARD_AMOLED_1_8_LCD_PCLK_HZ,
     .lcd_d0_gpio = CONFIG_BOARD_AMOLED_1_8_LCD_D0_GPIO,
     .lcd_d1_gpio = CONFIG_BOARD_AMOLED_1_8_LCD_D1_GPIO,
     .lcd_d2_gpio = CONFIG_BOARD_AMOLED_1_8_LCD_D2_GPIO,

@@ -56,10 +56,16 @@ Current defaults from `sdkconfig.defaults`:
 - I2C SDA GPIO: `15`
 - I2C SCL GPIO: `14`
 - I2C frequency: `400000`
+- SH8601 QSPI clock: `40000000`
 - Backlight GPIO: `6`
 - Backlight LEDC channel: `0`
 - Backlight LEDC timer: `0`
 - Backlight PWM frequency: `5000`
+
+The 40 MHz QSPI clock matches Waveshare's conservative SH8601 component
+default. The ESP32-S3 GPSPI clock can also run this link at 80 MHz, but that
+setting should only be used after checking display stability on the target
+board.
 
 ## Commands
 

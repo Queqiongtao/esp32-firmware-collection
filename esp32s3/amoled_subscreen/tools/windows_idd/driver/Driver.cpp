@@ -556,10 +556,8 @@ void SwapChainProcessor::RunCore()
 {
     // Get the DXGI device interface
     ComPtr<IDXGIDevice> DxgiDevice;
-	int64_t  last_fps_us=0;
     HRESULT hr = m_Device->Device.As(&DxgiDevice);
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(this->mp_WdfDevice);
-	long  fps_interval=1000000/pContext->fps -1000;//for skew case
     if(FAILED(hr)) {
         return;
     }
@@ -575,7 +573,7 @@ void SwapChainProcessor::RunCore()
     // Acquire and release buffers in a loop
     for(;;) {
         ComPtr<IDXGIResource> AcquiredBuffer;
-        int64_t a,b,c,d,t,swap_t;
+		int64_t a,b,c,d,swap_t;
 	
 	
         // Ask for the next buffer from the producer
@@ -624,18 +622,13 @@ void SwapChainProcessor::RunCore()
 					goto next;
 				}
 				swap_t=get_system_us();
-				LOGD("last:%lld now:%lld diff:%lld intv%ld\n",last_fps_us,swap_t,swap_t-last_fps_us,fps_interval);
-				if((pContext->fps >= 50) || (swap_t-last_fps_us)>= fps_interval) //can issue frame
+				LOGD("acquired swap-chain frame:%llu dirty:%u\n",
+					Buffer.MetaData.PresentationFrameNumber, Buffer.MetaData.DirtyRectCount);
+				PSLIST_ENTRY pentry = InterlockedPopEntrySList(&urb_list);
+				urb_itm_t* purb = (urb_itm_t*)pentry;
+
+				if(NULL != purb)
 				{
-					PSLIST_ENTRY	pentry =  InterlockedPopEntrySList(&urb_list);
-					urb_itm_t* purb = (urb_itm_t*)pentry;
-					
-					last_fps_us += fps_interval;//increase tick
-					if( (swap_t-last_fps_us) > fps_interval ) //we lost more 1 frame, so sync to swap_t 
-						last_fps_us = swap_t;
-					
-					if(NULL != purb) 
-					{
 						a=get_system_us();
 						enc_grab_surface(m_Device , AcquiredBuffer , this->fb_buf ,&frameDescriptor);
 #if 1
@@ -674,21 +667,15 @@ void SwapChainProcessor::RunCore()
 						#endif
 						d=get_system_us();
 						put_fps_data(&fps_mgr,get_system_us());
-						LOGM("[%lld]%d fps:%.2f g%ld e%ld s%ld %ld (%ld)\n",last_fps_us, total_bytes+sizeof(udisp_frame_header_t), ((float)get_fps(&fps_mgr))/10,b-a,c-b,d-c,d-a,a-t);
-					
-					} else {
-						LOGM("no urb item so drop\n");
-					}
-				}else {
-					LOGD("drop by fps\n"); //drop by fps
-					if(b<last_fps_us){
-						last_fps_us=b;
-						}
+						LOGM("[%lld]%d fps:%.2f g%ld e%ld s%ld total:%ld\n",swap_t, total_bytes+sizeof(udisp_frame_header_t), ((float)get_fps(&fps_mgr))/10,b-a,c-b,d-c,d-a);
+
+				} else {
+					LOGW("drop swap-chain frame:%llu: no USB request available\n",
+						Buffer.MetaData.PresentationFrameNumber);
 				}
             }
 
 next:
-			t=get_system_us();
             AcquiredBuffer.Reset();
             hr = IddCxSwapChainFinishedProcessingFrame(m_hSwapChain);
             if(FAILED(hr)) {
@@ -808,16 +795,8 @@ void IndirectDeviceContext::CreateMonitor(unsigned int ConnectorIndex)
 
     MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    if (ConnectorIndex >= ARRAYSIZE(s_SampleMonitors))
-    {
-        MonitorInfo.MonitorDescription.DataSize = 0;
-        MonitorInfo.MonitorDescription.pData = nullptr;
-    }
-    else
-    {
-        MonitorInfo.MonitorDescription.DataSize = IndirectSampleMonitor::szEdidBlock;
-        MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(s_SampleMonitors[ConnectorIndex].pEdidBlock);
-    }
+    MonitorInfo.MonitorDescription.DataSize = 0;
+    MonitorInfo.MonitorDescription.pData = nullptr;
 
     // ==============================
     // TODO: The monitor's container ID should be distinct from "this" device's container ID if the monitor is not

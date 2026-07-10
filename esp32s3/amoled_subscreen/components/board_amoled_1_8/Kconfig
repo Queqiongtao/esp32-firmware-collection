@@ -24,6 +24,14 @@ config BOARD_AMOLED_1_8_LCD_PCLK_GPIO
     int "LCD PCLK GPIO"
     default 11
 
+config BOARD_AMOLED_1_8_LCD_PCLK_HZ
+    int "LCD QSPI clock frequency"
+    range 1000000 80000000
+    default 40000000
+    help
+        QSPI clock used for SH8601 command and color transfers. The default
+        matches the Waveshare SH8601 component's conservative setting.
+
 config BOARD_AMOLED_1_8_LCD_D0_GPIO
     int "LCD DATA0 GPIO"
     default 4

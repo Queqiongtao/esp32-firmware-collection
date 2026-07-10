@@ -1,10 +1,9 @@
 # Windows IDD Driver
 
 This test-signed development driver binds to `USB\VID_303A&PID_2987` and
-registers exactly these Windows display modes:
+registers this Windows display mode:
 
-- `368x448` (preferred, direct AMOLED output)
-- `448x368` (rotated by ESP firmware)
+- `368x448 @ 30 Hz` (direct AMOLED output)
 
 ## Build
 
