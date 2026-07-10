@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS "usb_extend_screen.c"
     INCLUDE_DIRS "include" "tusb"
-    REQUIRES subscreen_display espressif__tinyusb
+    REQUIRES esp_timer subscreen_display espressif__tinyusb
 )
 
 idf_component_get_property(tinyusb_lib espressif__tinyusb COMPONENT_LIB)

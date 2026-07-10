@@ -29,17 +29,17 @@ config USB_EXTEND_SCREEN_JPEG_QUALITY
 
 config USB_EXTEND_SCREEN_MAX_FPS
     int "Maximum frames per second advertised to Windows driver"
-    default 10
+    default 30
     range 1 60
 
-config USB_EXTEND_SCREEN_FRAME_LIMIT_B
-    int "Maximum JPEG frame size in bytes"
-    default 100000
-    range 1024 1048576
+config USB_EXTEND_SCREEN_FRAME_LIMIT_KB
+    int "Maximum JPEG frame size in KiB"
+    default 100
+    range 1 4095
 
 config USB_EXTEND_SCREEN_FRAME_BUFFER_COUNT
     int "JPEG frame buffer count"
-    default 6
+    default 3
     range 2 8
 
 config USB_TASK_PRIORITY

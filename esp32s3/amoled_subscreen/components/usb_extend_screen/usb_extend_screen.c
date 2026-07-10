@@ -7,6 +7,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_private/usb_phy.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -14,6 +15,9 @@
 #include "usb_descriptors.h"
 
 static const char *TAG = "usb_extend_screen";
+
+#define FRAME_LIMIT_BYTES ((size_t)CONFIG_USB_EXTEND_SCREEN_FRAME_LIMIT_KB * 1024U)
+#define STATS_INTERVAL_US (5LL * 1000 * 1000)
 
 enum {
     UDISP_TYPE_RGB565 = 0,
@@ -42,7 +46,32 @@ typedef struct {
     size_t total;
     uint16_t width;
     uint16_t height;
+    int64_t started_us;
 } frame_t;
+
+typedef struct {
+    uint64_t rx_bytes;
+    uint64_t jpeg_bytes;
+    uint64_t decode_us;
+    uint64_t lcd_wait_us;
+    uint64_t lcd_dma_us;
+    uint64_t lcd_submit_us;
+    uint64_t latency_us;
+    uint32_t rx_callbacks;
+    uint32_t accepted_frames;
+    uint32_t completed_frames;
+    uint32_t rejected_frames;
+    uint32_t no_free_frames;
+    uint32_t stale_frames;
+    uint32_t presented_frames;
+    uint32_t failed_frames;
+    uint32_t queue_peak;
+    uint32_t decode_max_us;
+    uint32_t lcd_wait_max_us;
+    uint32_t lcd_dma_max_us;
+    uint32_t lcd_dma_samples;
+    uint32_t latency_max_us;
+} performance_stats_t;
 
 static struct {
     subscreen_display_t *display;
@@ -54,13 +83,128 @@ static struct {
     uint32_t skip_remaining;
     uint8_t header_data[sizeof(udisp_frame_header_t)];
     size_t header_received;
-    uint32_t received_packets;
-    uint32_t received_bytes;
-    uint32_t accepted_frames;
-    uint32_t completed_frames;
-    uint32_t rejected_frames;
+    performance_stats_t stats;
+    int64_t stats_window_started_us;
     bool initialized;
 } s_usb;
+
+static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void stats_record_rx(size_t bytes)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_usb.stats.rx_callbacks++;
+    s_usb.stats.rx_bytes += bytes;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void stats_record_rejected(bool no_free)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_usb.stats.rejected_frames++;
+    if (no_free) {
+        s_usb.stats.no_free_frames++;
+    }
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void stats_record_completed(size_t jpeg_bytes, uint32_t queue_depth)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_usb.stats.completed_frames++;
+    s_usb.stats.jpeg_bytes += jpeg_bytes;
+    if (queue_depth > s_usb.stats.queue_peak) {
+        s_usb.stats.queue_peak = queue_depth;
+    }
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void stats_record_stale(void)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    s_usb.stats.stale_frames++;
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void stats_record_display(const subscreen_display_frame_metrics_t *metrics,
+                                 uint32_t latency_us,
+                                 bool success)
+{
+    portENTER_CRITICAL(&s_stats_lock);
+    if (success) {
+        s_usb.stats.presented_frames++;
+        s_usb.stats.decode_us += metrics->jpeg_decode_us;
+        s_usb.stats.lcd_wait_us += metrics->lcd_wait_us;
+        s_usb.stats.lcd_submit_us += metrics->lcd_submit_us;
+        s_usb.stats.latency_us += latency_us;
+        if (metrics->previous_dma_us > 0) {
+            s_usb.stats.lcd_dma_us += metrics->previous_dma_us;
+            s_usb.stats.lcd_dma_samples++;
+            if (metrics->previous_dma_us > s_usb.stats.lcd_dma_max_us) {
+                s_usb.stats.lcd_dma_max_us = metrics->previous_dma_us;
+            }
+        }
+        if (metrics->jpeg_decode_us > s_usb.stats.decode_max_us) {
+            s_usb.stats.decode_max_us = metrics->jpeg_decode_us;
+        }
+        if (metrics->lcd_wait_us > s_usb.stats.lcd_wait_max_us) {
+            s_usb.stats.lcd_wait_max_us = metrics->lcd_wait_us;
+        }
+        if (latency_us > s_usb.stats.latency_max_us) {
+            s_usb.stats.latency_max_us = latency_us;
+        }
+    } else {
+        s_usb.stats.failed_frames++;
+    }
+    portEXIT_CRITICAL(&s_stats_lock);
+}
+
+static void report_stats_if_due(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    const int64_t elapsed_us = now_us - s_usb.stats_window_started_us;
+    if (elapsed_us < STATS_INTERVAL_US) {
+        return;
+    }
+
+    performance_stats_t stats;
+    portENTER_CRITICAL(&s_stats_lock);
+    stats = s_usb.stats;
+    memset(&s_usb.stats, 0, sizeof(s_usb.stats));
+    s_usb.stats_window_started_us = now_us;
+    portEXIT_CRITICAL(&s_stats_lock);
+
+    const uint32_t rx_kbps = elapsed_us > 0 ?
+                             (uint32_t)(stats.rx_bytes * 8U * 1000U / (uint64_t)elapsed_us) : 0;
+    const uint32_t fps_x10 = elapsed_us > 0 ?
+                             (uint32_t)((uint64_t)stats.presented_frames * 10U * 1000000U /
+                                        (uint64_t)elapsed_us) : 0;
+    const uint32_t shown = stats.presented_frames;
+    const uint32_t jpeg_avg = stats.completed_frames > 0 ?
+                              (uint32_t)(stats.jpeg_bytes / stats.completed_frames) : 0;
+    const uint32_t decode_avg = shown > 0 ? (uint32_t)(stats.decode_us / shown) : 0;
+    const uint32_t lcd_wait_avg = shown > 0 ? (uint32_t)(stats.lcd_wait_us / shown) : 0;
+    const uint32_t lcd_dma_avg = stats.lcd_dma_samples > 0 ?
+                                 (uint32_t)(stats.lcd_dma_us / stats.lcd_dma_samples) : 0;
+    const uint32_t lcd_submit_avg = shown > 0 ? (uint32_t)(stats.lcd_submit_us / shown) : 0;
+    const uint32_t latency_avg = shown > 0 ? (uint32_t)(stats.latency_us / shown) : 0;
+
+    ESP_LOGI(TAG,
+             "perf: rx=%" PRIu32 "kbps callbacks=%" PRIu32 " accepted=%" PRIu32
+             " complete=%" PRIu32 " shown=%" PRIu32 " fps=%" PRIu32 ".%" PRIu32
+             " rejected=%" PRIu32 " stale=%" PRIu32 " failed=%" PRIu32 " qpeak=%" PRIu32,
+             rx_kbps, stats.rx_callbacks, stats.accepted_frames, stats.completed_frames,
+             shown, fps_x10 / 10, fps_x10 % 10, stats.rejected_frames,
+             stats.stale_frames, stats.failed_frames, stats.queue_peak);
+    ESP_LOGI(TAG,
+             "perf-time: jpeg=%" PRIu32 "B decode=%" PRIu32 "/%" PRIu32
+             "us lcd-dma=%" PRIu32 "/%" PRIu32 "us wait=%" PRIu32 "/%" PRIu32
+             "us submit=%" PRIu32
+             "us latency=%" PRIu32 "/%" PRIu32 "us no-free=%" PRIu32,
+             jpeg_avg, decode_avg, stats.decode_max_us, lcd_dma_avg, stats.lcd_dma_max_us,
+             lcd_wait_avg, stats.lcd_wait_max_us, lcd_submit_avg, latency_avg,
+             stats.latency_max_us, stats.no_free_frames);
+}
 
 static void return_empty(frame_t *frame)
 {
@@ -101,8 +245,8 @@ static void begin_frame_from_header(void)
 
     if (header->type != UDISP_TYPE_JPG || header->x != 0 || header->y != 0 ||
         !subscreen_display_supports_frame_size(s_usb.display, header->width, header->height) ||
-        header->payload_total == 0 || header->payload_total > CONFIG_USB_EXTEND_SCREEN_FRAME_LIMIT_B) {
-        s_usb.rejected_frames++;
+        header->payload_total == 0 || header->payload_total > FRAME_LIMIT_BYTES) {
+        stats_record_rejected(false);
         s_usb.skip_remaining = header->payload_total;
         ESP_LOGW(TAG, "drop header: type=%u area=%u,%u %ux%u payload=%" PRIu32,
                  header->type, header->x, header->y, header->width, header->height,
@@ -113,7 +257,7 @@ static void begin_frame_from_header(void)
 
     frame_t *frame = NULL;
     if (xQueueReceive(s_usb.empty_frames, &frame, 0) != pdPASS) {
-        s_usb.rejected_frames++;
+        stats_record_rejected(true);
         s_usb.skip_remaining = header->payload_total;
         ESP_LOGW(TAG, "drop frame %u: no free buffer", header->frame_id);
         show_transport_status(SUBSCREEN_TRANSPORT_FRAME_REJECTED);
@@ -123,74 +267,71 @@ static void begin_frame_from_header(void)
     frame->total = header->payload_total;
     frame->width = header->width;
     frame->height = header->height;
+    frame->started_us = esp_timer_get_time();
     s_usb.current_frame = frame;
-    s_usb.accepted_frames++;
+    portENTER_CRITICAL(&s_stats_lock);
+    s_usb.stats.accepted_frames++;
+    portEXIT_CRITICAL(&s_stats_lock);
     show_transport_status(SUBSCREEN_TRANSPORT_WAITING_FRAME);
 }
 
-static void consume_vendor_bytes(const uint8_t *data, size_t size)
+static void complete_current_frame(void)
 {
-    while (size > 0) {
-        if (s_usb.skip_remaining > 0) {
-            const size_t consumed = size < s_usb.skip_remaining ? size : s_usb.skip_remaining;
-            data += consumed;
-            size -= consumed;
-            s_usb.skip_remaining -= consumed;
-            continue;
-        }
-
-        if (s_usb.current_frame != NULL) {
-            frame_t *frame = s_usb.current_frame;
-            const size_t remaining = frame->total - frame->received;
-            const size_t consumed = size < remaining ? size : remaining;
-            memcpy(frame->data + frame->received, data, consumed);
-            frame->received += consumed;
-            data += consumed;
-            size -= consumed;
-            if (frame->received == frame->total) {
-                if (xQueueSend(s_usb.filled_frames, &frame, 0) != pdPASS) {
-                    ESP_LOGW(TAG, "filled frame queue full");
-                    return_current_frame_to_empty();
-                    s_usb.rejected_frames++;
-                    show_transport_status(SUBSCREEN_TRANSPORT_FRAME_REJECTED);
-                } else {
-                    s_usb.completed_frames++;
-                    s_usb.current_frame = NULL;
-                }
-            }
-            continue;
-        }
-
-        const size_t header_remaining = sizeof(s_usb.header_data) - s_usb.header_received;
-        const size_t consumed = size < header_remaining ? size : header_remaining;
-        memcpy(s_usb.header_data + s_usb.header_received, data, consumed);
-        s_usb.header_received += consumed;
-        data += consumed;
-        size -= consumed;
-        if (s_usb.header_received == sizeof(s_usb.header_data)) {
-            begin_frame_from_header();
-        }
+    frame_t *frame = s_usb.current_frame;
+    if (xQueueSend(s_usb.filled_frames, &frame, 0) != pdPASS) {
+        ESP_LOGW(TAG, "filled frame queue full");
+        return_current_frame_to_empty();
+        stats_record_rejected(false);
+        show_transport_status(SUBSCREEN_TRANSPORT_FRAME_REJECTED);
+        return;
     }
+    s_usb.current_frame = NULL;
+    stats_record_completed(frame->received, uxQueueMessagesWaiting(s_usb.filled_frames));
 }
 
 void tud_vendor_rx_cb(uint8_t itf, const uint8_t *buffer, uint16_t size)
 {
     (void)buffer;
     (void)size;
-    s_usb.received_packets++;
-
-    uint8_t rx_buffer[CFG_TUD_VENDOR_RX_BUFSIZE];
+    uint8_t discard_buffer[CFG_TUD_VENDOR_EPSIZE];
+    size_t callback_bytes = 0;
     while (tud_vendor_n_available(itf) > 0) {
         const uint32_t available = tud_vendor_n_available(itf);
-        const uint32_t read_len = available < sizeof(rx_buffer) ? available : sizeof(rx_buffer);
-        const uint32_t read = tud_vendor_n_read(itf, rx_buffer, read_len);
+        uint32_t read = 0;
+
+        if (s_usb.skip_remaining > 0) {
+            uint32_t read_len = available < s_usb.skip_remaining ? available : s_usb.skip_remaining;
+            if (read_len > sizeof(discard_buffer)) {
+                read_len = sizeof(discard_buffer);
+            }
+            read = tud_vendor_n_read(itf, discard_buffer, read_len);
+            s_usb.skip_remaining -= read;
+        } else if (s_usb.current_frame != NULL) {
+            frame_t *frame = s_usb.current_frame;
+            const size_t remaining = frame->total - frame->received;
+            const uint32_t read_len = available < remaining ? available : (uint32_t)remaining;
+            read = tud_vendor_n_read(itf, frame->data + frame->received, read_len);
+            frame->received += read;
+            if (frame->received == frame->total) {
+                complete_current_frame();
+            }
+        } else {
+            const size_t remaining = sizeof(s_usb.header_data) - s_usb.header_received;
+            const uint32_t read_len = available < remaining ? available : (uint32_t)remaining;
+            read = tud_vendor_n_read(itf, s_usb.header_data + s_usb.header_received, read_len);
+            s_usb.header_received += read;
+            if (s_usb.header_received == sizeof(s_usb.header_data)) {
+                begin_frame_from_header();
+            }
+        }
+
         if (read == 0) {
             break;
         }
-        s_usb.received_bytes += read;
+        callback_bytes += read;
         show_transport_status(SUBSCREEN_TRANSPORT_RECEIVING_FRAME);
-        consume_vendor_bytes(rx_buffer, read);
     }
+    stats_record_rx(callback_bytes);
 }
 
 static void transfer_task(void *arg)
@@ -201,13 +342,26 @@ static void transfer_task(void *arg)
         if (xQueueReceive(s_usb.filled_frames, &frame, portMAX_DELAY) != pdPASS) {
             continue;
         }
+        frame_t *newer = NULL;
+        while (xQueueReceive(s_usb.filled_frames, &newer, 0) == pdPASS) {
+            return_empty(frame);
+            stats_record_stale();
+            frame = newer;
+        }
+
+        subscreen_display_frame_metrics_t metrics = {};
         esp_err_t err = subscreen_display_draw_jpeg(s_usb.display, frame->data, frame->received,
-                                                    frame->width, frame->height);
+                                                    frame->width, frame->height, &metrics);
+        const int64_t now_us = esp_timer_get_time();
+        const uint32_t latency_us = now_us > frame->started_us ?
+                                    (uint32_t)(now_us - frame->started_us) : 0;
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "frame draw failed: %s", esp_err_to_name(err));
             show_transport_status(SUBSCREEN_TRANSPORT_FRAME_FAILED);
         }
+        stats_record_display(&metrics, latency_us, err == ESP_OK);
         return_empty(frame);
+        report_stats_if_due();
     }
 }
 
@@ -222,7 +376,7 @@ static esp_err_t allocate_frames(void)
 
     for (size_t i = 0; i < count; ++i) {
         frame_t *frame = &s_usb.frames[i];
-        frame->capacity = CONFIG_USB_EXTEND_SCREEN_FRAME_LIMIT_B;
+        frame->capacity = FRAME_LIMIT_BYTES;
         frame->data = heap_caps_aligned_alloc(16, frame->capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         ESP_RETURN_ON_FALSE(frame->data != NULL, ESP_ERR_NO_MEM, TAG, "frame buffer alloc failed");
         ESP_RETURN_ON_FALSE(xQueueSend(s_usb.empty_frames, &frame, 0) == pdPASS, ESP_FAIL, TAG, "queue frame failed");
@@ -256,6 +410,7 @@ esp_err_t usb_extend_screen_init(subscreen_display_t *display)
         return ESP_OK;
     }
     s_usb.display = display;
+    s_usb.stats_window_started_us = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(allocate_frames(), TAG, "frame allocation failed");
     ESP_RETURN_ON_ERROR(init_usb_phy(), TAG, "USB PHY init failed");
     const tusb_rhport_init_t device_init = {
@@ -269,8 +424,9 @@ esp_err_t usb_extend_screen_init(subscreen_display_t *display)
     ESP_RETURN_ON_FALSE(xTaskCreate(tinyusb_task, "tinyusb", 4096, NULL, CONFIG_USB_TASK_PRIORITY, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "TinyUSB task create failed");
     s_usb.initialized = true;
-    ESP_LOGI(TAG, "ready: mode=368x448 jpeg=%d fps=%d", CONFIG_USB_EXTEND_SCREEN_JPEG_QUALITY,
-             CONFIG_USB_EXTEND_SCREEN_MAX_FPS);
+    ESP_LOGI(TAG, "ready: mode=368x448 jpeg=%d fps=%d frame_limit=%uKiB buffers=%d",
+             CONFIG_USB_EXTEND_SCREEN_JPEG_QUALITY, CONFIG_USB_EXTEND_SCREEN_MAX_FPS,
+             CONFIG_USB_EXTEND_SCREEN_FRAME_LIMIT_KB, CONFIG_USB_EXTEND_SCREEN_FRAME_BUFFER_COUNT);
     return ESP_OK;
 }
 

@@ -37,8 +37,10 @@ The current codebase is a minimal secondary-screen skeleton. It provides:
 - SH8601 QSPI display initialization and brightness control
 - boot logs and a simple display placeholder frame
 - Windows IDD-compatible USB Vendor display (`VID:PID 303A:2987`)
-- JPEG frame queue in PSRAM for `368x448` portrait frames
-- RGB565 JPEG decode output arranged for the SH8601 QSPI color byte order
+- latest-frame JPEG queue in PSRAM for `368x448` portrait frames
+- direct RGB565 JPEG decode with two output buffers
+- overlapped JPEG decode and full-frame SH8601 QSPI DMA
+- five-second USB, decode, display, drop, and latency performance logs
 
 The following are not implemented yet:
 
@@ -82,6 +84,19 @@ the firmware directly renders the resulting portrait frame.
 This first version intentionally exposes only the Vendor display interface.
 Touch HID, USB audio, partial updates, and a product-owned VID/PID remain out
 of scope.
+
+Default transport settings are JPEG quality 6, a 30 FPS target, a 100 KiB
+maximum JPEG frame, and three receive buffers. The Windows driver reads these
+values from the USB product string as `Ejpg6_Fps30_Bl100`.
+
+### Performance Diagnostics
+
+While frames are flowing, the firmware logs a performance window every five
+seconds. `perf` reports USB bitrate, received and presented frames, effective
+FPS, rejected/stale frames, and queue depth. `perf-time` reports average JPEG
+size plus average/maximum decode, LCD DMA, pipeline wait, and submission latency
+in microseconds. Stale frames are intentionally discarded so overload reduces
+frame rate instead of building visible input lag.
 
 ### No-Serial-Link Diagnostics
 
