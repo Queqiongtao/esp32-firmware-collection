@@ -1,0 +1,55 @@
+menu "USB Extend Screen"
+
+config TUSB_VID
+    hex "USB vendor ID"
+    default 0x303A
+
+config TUSB_PID
+    hex "USB product ID"
+    default 0x2987
+
+config TUSB_MANUFACTURER
+    string "USB manufacturer"
+    default "Espressif"
+
+config USB_EXTEND_SCREEN_HEIGHT
+    int "Preferred Windows display width"
+    default 368
+    range 1 65535
+
+config USB_EXTEND_SCREEN_WIDTH
+    int "Preferred Windows display height"
+    default 448
+    range 1 65535
+
+config USB_EXTEND_SCREEN_JPEG_QUALITY
+    int "JPEG quality advertised to Windows driver"
+    default 6
+    range 1 10
+
+config USB_EXTEND_SCREEN_MAX_FPS
+    int "Maximum frames per second advertised to Windows driver"
+    default 10
+    range 1 60
+
+config USB_EXTEND_SCREEN_FRAME_LIMIT_B
+    int "Maximum JPEG frame size in bytes"
+    default 100000
+    range 1024 1048576
+
+config USB_EXTEND_SCREEN_FRAME_BUFFER_COUNT
+    int "JPEG frame buffer count"
+    default 6
+    range 2 8
+
+config USB_TASK_PRIORITY
+    int "TinyUSB task priority"
+    default 6
+    range 1 15
+
+config USB_EXTEND_SCREEN_TRANSFER_TASK_PRIORITY
+    int "JPEG transfer task priority"
+    default 5
+    range 1 15
+
+endmenu

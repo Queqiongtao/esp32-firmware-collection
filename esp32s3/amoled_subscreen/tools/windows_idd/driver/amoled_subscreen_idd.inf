@@ -1,0 +1,64 @@
+; Test-signed Windows UMDF indirect-display driver for amoled_subscreen.
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider=%ProviderName%
+CatalogFile=amoled_subscreen_idd.cat
+DriverVer=07/10/2026,1.0.0.0
+
+[Manufacturer]
+%ProviderName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceName%=AmoledSubscreen_Install,USB\VID_303A&PID_2987
+
+[SourceDisksNames]
+1=%DiskName%,,,
+
+[SourceDisksFiles]
+xfz1986_usb_graphic.dll=1
+
+[DestinationDirs]
+UMDriverCopy=12,UMDF
+
+[AmoledSubscreen_Install.NT]
+CopyFiles=UMDriverCopy
+
+[AmoledSubscreen_Install.NT.hw]
+AddReg=AmoledSubscreen_HardwareSettings
+
+[AmoledSubscreen_HardwareSettings]
+HKR,,"UpperFilters",0x00010000,"IndirectKmd"
+HKR,"WUDF","DeviceGroupId",0x00000000,"AmoledSubscreenIddGroup"
+
+[AmoledSubscreen_Install.NT.Services]
+AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+
+[AmoledSubscreen_Install.NT.Wdf]
+UmdfDispatcher=NativeUSB
+UmdfService=xfz1986_usb_graphic,xfz1986_usb_graphic_Install
+UmdfServiceOrder=xfz1986_usb_graphic
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+
+[xfz1986_usb_graphic_Install]
+UmdfLibraryVersion=$UMDFVERSION$
+ServiceBinary=%12%\UMDF\xfz1986_usb_graphic.dll
+UmdfExtensions=IddCx0102
+
+[WUDFRD_ServiceInstall]
+DisplayName=%WudfRdDisplayName%
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%12%\WUDFRd.sys
+
+[UMDriverCopy]
+xfz1986_usb_graphic.dll
+
+[Strings]
+ProviderName="amoled_subscreen development"
+DiskName="AMOLED Subscreen IDD Driver"
+DeviceName="AMOLED Subscreen USB Display"
+WudfRdDisplayName="Windows Driver Foundation - User-mode Driver Framework Reflector"
