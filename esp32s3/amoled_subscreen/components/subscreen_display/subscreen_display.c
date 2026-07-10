@@ -14,7 +14,7 @@
 static const char *TAG = "subscreen_display";
 
 #define PLACEHOLDER_CHUNK_LINES 32
-#define ROTATE_CHUNK_LINES 32
+#define FRAME_CHUNK_LINES 32
 
 #define COLOR_BG 0x1084
 #define COLOR_HEADER 0x07FF
@@ -27,7 +27,6 @@ struct subscreen_display {
     int physical_width;
     int physical_height;
     uint16_t *decoded_frame;
-    uint16_t *rotate_lines;
     SemaphoreHandle_t lock;
     subscreen_transport_status_t transport_status;
     bool has_frame;
@@ -120,11 +119,8 @@ esp_err_t subscreen_display_init(subscreen_display_t **ret_display)
     const size_t pixel_count = (size_t)s_display.physical_width * s_display.physical_height;
     s_display.decoded_frame = heap_caps_aligned_alloc(16, pixel_count * sizeof(uint16_t),
                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_display.rotate_lines = heap_caps_aligned_alloc(16,
-                                                      (size_t)s_display.physical_width * ROTATE_CHUNK_LINES * sizeof(uint16_t),
-                                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_display.lock = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(s_display.decoded_frame != NULL && s_display.rotate_lines != NULL && s_display.lock != NULL,
+    ESP_RETURN_ON_FALSE(s_display.decoded_frame != NULL && s_display.lock != NULL,
                         ESP_ERR_NO_MEM, TAG, "display buffers alloc failed");
 
     *ret_display = &s_display;
@@ -178,7 +174,7 @@ esp_err_t subscreen_display_draw_jpeg(subscreen_display_t *display,
         .outbuf_size = (size_t)display->physical_width * display->physical_height * sizeof(uint16_t),
         .out_format = JPEG_IMAGE_FORMAT_RGB565,
         .out_scale = JPEG_IMAGE_SCALE_0,
-        .flags = {.swap_color_bytes = 0},
+        .flags = {.swap_color_bytes = 1},
     };
     esp_jpeg_image_output_t output = {};
     esp_err_t err = esp_jpeg_decode(&jpeg_cfg, &output);
@@ -188,34 +184,15 @@ esp_err_t subscreen_display_draw_jpeg(subscreen_display_t *display,
         return err == ESP_OK ? ESP_ERR_INVALID_SIZE : err;
     }
 
-    if (width == display->physical_width && height == display->physical_height) {
-        for (int dest_y = 0; dest_y < display->physical_height; dest_y += ROTATE_CHUNK_LINES) {
-            const int dest_y2 = (dest_y + ROTATE_CHUNK_LINES < display->physical_height) ?
-                               dest_y + ROTATE_CHUNK_LINES : display->physical_height;
-            err = esp_lcd_panel_draw_bitmap(display->panel, 0, dest_y, display->physical_width, dest_y2,
-                                            display->decoded_frame + dest_y * display->physical_width);
-            if (err != ESP_OK) {
-                xSemaphoreGive(display->lock);
-                return err;
-            }
-        }
-    } else {
-    for (int dest_y = 0; dest_y < display->physical_height; dest_y += ROTATE_CHUNK_LINES) {
-        const int dest_y2 = (dest_y + ROTATE_CHUNK_LINES < display->physical_height) ?
-                           dest_y + ROTATE_CHUNK_LINES : display->physical_height;
-        for (int y = dest_y; y < dest_y2; ++y) {
-            uint16_t *dst = display->rotate_lines + (y - dest_y) * display->physical_width;
-            for (int x = 0; x < display->physical_width; ++x) {
-                dst[x] = display->decoded_frame[(display->physical_width - 1 - x) * width + y];
-            }
-        }
+    for (int dest_y = 0; dest_y < display->physical_height; dest_y += FRAME_CHUNK_LINES) {
+        const int dest_y2 = (dest_y + FRAME_CHUNK_LINES < display->physical_height) ?
+                           dest_y + FRAME_CHUNK_LINES : display->physical_height;
         err = esp_lcd_panel_draw_bitmap(display->panel, 0, dest_y, display->physical_width, dest_y2,
-                                        display->rotate_lines);
+                                        display->decoded_frame + dest_y * display->physical_width);
         if (err != ESP_OK) {
             xSemaphoreGive(display->lock);
             return err;
         }
-    }
     }
 
     display->has_frame = true;
@@ -230,8 +207,7 @@ bool subscreen_display_supports_frame_size(const subscreen_display_t *display,
     if (display == NULL) {
         return false;
     }
-    return (width == display->physical_width && height == display->physical_height) ||
-           (width == display->physical_height && height == display->physical_width);
+    return width == display->physical_width && height == display->physical_height;
 }
 
 bool subscreen_display_has_frame(const subscreen_display_t *display)

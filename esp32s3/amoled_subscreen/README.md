@@ -4,9 +4,9 @@ ESP-IDF small companion display project for the Waveshare
 ESP32-S3-Touch-AMOLED-1.8 board.
 
 This project implements Windows USB secondary-display support for the Waveshare
-ESP32-S3-Touch-AMOLED-1.8. It keeps the local `board_amoled_1_8` board wrapper,
-receives JPEG frames through a TinyUSB Vendor interface, and rotates the Windows
-landscape image onto the physical portrait AMOLED panel.
+ESP32-S3-Touch-AMOLED-1.8. It keeps the local `board_amoled_1_8` board wrapper
+and receives `368x448` JPEG frames through a TinyUSB Vendor interface for direct
+rendering to the physical portrait AMOLED panel.
 
 ## Board
 
@@ -37,8 +37,8 @@ The current codebase is a minimal secondary-screen skeleton. It provides:
 - SH8601 QSPI display initialization and brightness control
 - boot logs and a simple display placeholder frame
 - Windows IDD-compatible USB Vendor display (`VID:PID 303A:2987`)
-- JPEG frame queue in PSRAM with `368x448` and `448x368` frame support
-- clockwise rotation from landscape frames to the physical `368x448` panel
+- JPEG frame queue in PSRAM for `368x448` portrait frames
+- RGB565 JPEG decode output arranged for the SH8601 QSPI color byte order
 
 The following are not implemented yet:
 
@@ -75,9 +75,9 @@ Run commands from this project directory:
 
 Install Espressif's USB Extend Screen Windows IDD driver, then connect the
 firmware through the board's USB OTG data port. The driver matches the display-
-only identity `USB\\VID_303A&PID_2987`; the development driver exposes
-`368x448` and `448x368`. Portrait output is direct, while landscape output is
-rotated clockwise to the physical panel.
+only identity `USB\\VID_303A&PID_2987`; the development driver exposes a
+single `368x448` portrait mode. Windows applies the selected desktop orientation;
+the firmware directly renders the resulting portrait frame.
 
 This first version intentionally exposes only the Vendor display interface.
 Touch HID, USB audio, partial updates, and a product-owned VID/PID remain out

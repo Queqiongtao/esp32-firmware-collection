@@ -269,7 +269,7 @@ esp_err_t usb_extend_screen_init(subscreen_display_t *display)
     ESP_RETURN_ON_FALSE(xTaskCreate(tinyusb_task, "tinyusb", 4096, NULL, CONFIG_USB_TASK_PRIORITY, NULL) == pdPASS,
                         ESP_ERR_NO_MEM, TAG, "TinyUSB task create failed");
     s_usb.initialized = true;
-    ESP_LOGI(TAG, "ready: modes=368x448,448x368 jpeg=%d fps=%d", CONFIG_USB_EXTEND_SCREEN_JPEG_QUALITY,
+    ESP_LOGI(TAG, "ready: mode=368x448 jpeg=%d fps=%d", CONFIG_USB_EXTEND_SCREEN_JPEG_QUALITY,
              CONFIG_USB_EXTEND_SCREEN_MAX_FPS);
     return ESP_OK;
 }

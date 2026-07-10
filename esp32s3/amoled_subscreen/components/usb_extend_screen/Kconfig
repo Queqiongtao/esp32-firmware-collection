@@ -13,12 +13,12 @@ config TUSB_MANUFACTURER
     default "Espressif"
 
 config USB_EXTEND_SCREEN_HEIGHT
-    int "Preferred Windows display width"
+    int "Windows display width"
     default 368
     range 1 65535
 
 config USB_EXTEND_SCREEN_WIDTH
-    int "Preferred Windows display height"
+    int "Windows display height"
     default 448
     range 1 65535
 
