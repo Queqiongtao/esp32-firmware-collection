@@ -71,6 +71,7 @@ powershell -ExecutionPolicy Bypass -File .\package-driver.ps1 -Configuration Rel
 - 创建或复用当前用户的测试代码签名证书
 - 使用 `signtool.exe` 签名 CAT
 - 生成脚本安装包、zip 包和 EXE 安装器
+- 在脚本/EXE 安装流程中写入默认运行时配置 `esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200`
 
 ## 输出物
 
@@ -131,6 +132,7 @@ EXE 由 `package-driver.ps1` 动态生成 C# bootstrapper，不再使用 IExpres
 - 安装器打开控制台窗口，显示解压路径、日志路径和 `pnputil` 输出
 - 安装器把 payload 解压到 `%TEMP%\amoled_subscreen_idd_installer_<pid>`
 - 安装器执行解压后的 `install-driver.ps1`
+- 安装脚本写入默认 `udisp` 运行时配置，提升默认 JPEG 画质
 - 成功或失败都会弹窗提示，控制台结束前会停住等待按键
 
 ## 手动安装
@@ -139,6 +141,12 @@ EXE 由 `package-driver.ps1` 动态生成 C# bootstrapper，不再使用 IExpres
 
 ```powershell
 pnputil /add-driver ".\dist\driver\x64\Release\amoled_subscreen_idd.inf" /install
+```
+
+原始驱动包只包含 INF、CAT、DLL 和测试证书，不会自动写入运行时画质配置。若使用原始包手动安装，需要额外写入：
+
+```powershell
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\xfz1986_usb_graphic\Parameters" /v udisp /t REG_SZ /d "esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200" /f
 ```
 
 脚本安装包可用管理员 PowerShell 安装：

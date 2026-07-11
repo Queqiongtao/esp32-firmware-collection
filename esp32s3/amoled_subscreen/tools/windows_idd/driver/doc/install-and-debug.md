@@ -208,6 +208,30 @@ HKLM\SYSTEM\CurrentControlset\Services\xfz1986_usb_graphic\Parameters
 
 `udisp` 字符串会影响运行时策略，例如分辨率、编码、质量、FPS 和缓冲限制。若注册表未配置，驱动会使用 USB 产品字符串或默认策略。
 
+脚本安装包和 EXE 安装器会默认写入：
+
+```text
+esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200
+```
+
+这表示：
+
+```text
+分辨率: 368x448
+编码: JPEG
+JPEG 质量: 8
+帧率: 30 FPS
+单帧缓冲上限: 200 KB
+```
+
+如需临时调参，可用管理员 PowerShell 覆盖：
+
+```powershell
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\xfz1986_usb_graphic\Parameters" /v udisp /t REG_SZ /d "esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200" /f
+```
+
+修改后需要重新插拔设备，或禁用/启用设备，让驱动重新读取配置。
+
 ## 常见安装问题
 
 ### 双击 EXE 没有弹窗或控制台

@@ -66,6 +66,12 @@ EXE 安装器：
 
 推荐给测试人员使用 EXE 安装器：双击后接受 UAC 提权，控制台会显示安装过程，结束时会弹窗提示结果。
 
+脚本安装包和 EXE 安装器会自动写入默认画质配置：
+
+```text
+esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200
+```
+
 也可以使用脚本安装包。管理员 PowerShell 执行：
 
 ```powershell
@@ -77,5 +83,7 @@ powershell -ExecutionPolicy Bypass -File ".\dist\installer\x64\Release\install-d
 ```powershell
 pnputil /add-driver ".\dist\driver\x64\Release\amoled_subscreen_idd.inf" /install
 ```
+
+原始驱动包手动安装不会自动写入上述运行时配置，需要单独写注册表或改用脚本/EXE 安装包。
 
 说明：Windows 驱动的标准交付物是 INF、CAT 和驱动二进制。EXE 是外层安装引导程序，内部仍会解压这些文件、导入测试证书并调用 `pnputil` 安装。

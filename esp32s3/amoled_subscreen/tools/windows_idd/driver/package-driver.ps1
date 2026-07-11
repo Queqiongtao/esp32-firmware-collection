@@ -32,6 +32,7 @@ $InstallerExe = Join-Path $DistDir "amoled_subscreen_idd_driver_installer_${Plat
 $RawZip = Join-Path $DistDir "amoled_subscreen_idd_driver_raw_${Platform}_${Configuration}.zip"
 $InstallerZip = Join-Path $DistDir "amoled_subscreen_idd_driver_installer_${Platform}_${Configuration}.zip"
 $CertSubject = "CN=AMOLED Subscreen IDD Test Certificate"
+$DefaultUdispConfig = "esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200"
 
 function Find-MsBuild {
     if ($env:MSBUILD_EXE -and (Test-Path $env:MSBUILD_EXE)) {
@@ -325,6 +326,17 @@ if (!(Test-Path $inf)) {
     throw "Driver INF was not found: $inf"
 }
 
+$defaultUdispConfig = "__DEFAULT_UDISP_CONFIG__"
+$driverParameterKey = "HKLM:\SYSTEM\CurrentControlSet\Services\xfz1986_usb_graphic\Parameters"
+
+function Set-DefaultDriverRuntimeConfig {
+    New-Item -Path $driverParameterKey -Force | Out-Null
+    New-ItemProperty -Path $driverParameterKey -Name "udisp" -PropertyType String -Value $defaultUdispConfig -Force | Out-Null
+    Write-Host "Default driver runtime config written:"
+    Write-Host "  $driverParameterKey"
+    Write-Host "  udisp=$defaultUdispConfig"
+}
+
 if (Test-Path $cert) {
     Import-Certificate -FilePath $cert -CertStoreLocation Cert:\LocalMachine\Root | Out-Null
     Import-Certificate -FilePath $cert -CertStoreLocation Cert:\LocalMachine\TrustedPublisher | Out-Null
@@ -349,8 +361,9 @@ if ($LASTEXITCODE -eq 259) {
 }
 
 Write-Host "Driver installation command completed."
+Set-DefaultDriverRuntimeConfig
 Write-DeviceBindingHint
-Write-Host "If the device was already connected, unplug and replug it if Windows does not bind the driver immediately."
+Write-Host "If the device was already connected, unplug and replug it so the driver reloads the runtime config."
 '@
 
 $uninstallScript = @'
@@ -369,6 +382,8 @@ function Test-IsAdministrator {
 if (!(Test-IsAdministrator)) {
     throw "Please run this script from an elevated PowerShell."
 }
+
+$driverParameterKey = "HKLM:\SYSTEM\CurrentControlSet\Services\xfz1986_usb_graphic\Parameters"
 
 $drivers = pnputil /enum-drivers
 $matchedPackages = @()
@@ -425,6 +440,12 @@ foreach ($packageBlock in $matchedPackages) {
         throw "pnputil failed to delete $publishedName with exit code $LASTEXITCODE"
     }
 }
+
+if ($Force -and (Test-Path $driverParameterKey)) {
+    Remove-ItemProperty -Path $driverParameterKey -Name "udisp" -ErrorAction SilentlyContinue
+    Write-Host "Removed driver runtime config:"
+    Write-Host "  $driverParameterKey\udisp"
+}
 '@
 
 $readmeText = @"
@@ -434,7 +455,9 @@ Install:
   1. Open PowerShell as Administrator.
   2. Run:
        powershell -ExecutionPolicy Bypass -File .\install-driver.ps1
-  3. If Windows rejects the test-signed driver, run:
+  3. The installer writes the default runtime config:
+       esp32s3udisp0_R368x448_Ejpg8_Fps30_Bl200
+  4. If Windows rejects the test-signed driver, run:
        bcdedit /set testsigning on
      Then reboot and run install-driver.ps1 again.
 
@@ -454,6 +477,8 @@ Raw driver files are under:
 
 If this package is delivered as an EXE, double-click it and accept the UAC prompt.
 "@
+
+$installScript = $installScript.Replace("__DEFAULT_UDISP_CONFIG__", $DefaultUdispConfig)
 
 Set-Content -LiteralPath (Join-Path $InstallerDir "install-driver.ps1") -Value $installScript -Encoding UTF8
 Set-Content -LiteralPath (Join-Path $InstallerDir "uninstall-driver.ps1") -Value $uninstallScript -Encoding UTF8
