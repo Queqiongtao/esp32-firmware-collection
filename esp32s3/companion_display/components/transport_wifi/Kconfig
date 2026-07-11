@@ -1,0 +1,8 @@
+menu "Companion Display Wi-Fi"
+config COMPANION_HTTP_PORT
+    int "HTTP and WebSocket port"
+    default 80
+config COMPANION_AP_PASSWORD
+    string "Provisioning AP password"
+    default "companion-display"
+endmenu

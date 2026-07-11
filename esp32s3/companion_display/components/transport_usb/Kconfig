@@ -1,0 +1,11 @@
+menu "Companion Display USB"
+config COMPANION_USB_VID
+    hex "USB vendor ID"
+    default 0x303A
+config COMPANION_USB_PID
+    hex "USB product ID"
+    default 0x4001
+config COMPANION_USB_TASK_PRIORITY
+    int "TinyUSB task priority"
+    default 6
+endmenu

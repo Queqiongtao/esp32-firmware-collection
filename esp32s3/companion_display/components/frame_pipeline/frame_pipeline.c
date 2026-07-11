@@ -1,0 +1,128 @@
+#include "frame_pipeline.h"
+
+#include <string.h>
+#include "esp_check.h"
+#include "esp_crc.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "subscreen_display.h"
+
+static const char *TAG = "frame_pipeline";
+#define FRAME_LIMIT ((size_t)CONFIG_COMPANION_FRAME_LIMIT_KB * 1024U)
+
+typedef struct { uint8_t *data; size_t length; uint16_t width; uint16_t height; int64_t received_us; } frame_t;
+static struct {
+    subscreen_display_t *display;
+    QueueHandle_t empty;
+    QueueHandle_t filled;
+    frame_t *frames;
+    companion_transport_t active;
+    portMUX_TYPE lock;
+} s_pipeline = {.lock = portMUX_INITIALIZER_UNLOCKED};
+
+static void return_frame(frame_t *frame)
+{
+    if (frame != NULL) xQueueSend(s_pipeline.empty, &frame, 0);
+}
+
+static void draw_task(void *arg)
+{
+    (void)arg;
+    while (true) {
+        frame_t *frame = NULL;
+        if (xQueueReceive(s_pipeline.filled, &frame, portMAX_DELAY) != pdPASS) continue;
+        frame_t *newer = NULL;
+        while (xQueueReceive(s_pipeline.filled, &newer, 0) == pdPASS) {
+            return_frame(frame);
+            frame = newer;
+        }
+        subscreen_display_frame_metrics_t metrics = {};
+        esp_err_t err = subscreen_display_draw_jpeg(s_pipeline.display, frame->data, frame->length,
+                                                     frame->width, frame->height, &metrics);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "JPEG frame rejected by display: %s", esp_err_to_name(err));
+            subscreen_display_set_transport_status(s_pipeline.display, SUBSCREEN_TRANSPORT_FRAME_FAILED);
+        }
+        return_frame(frame);
+    }
+}
+
+bool frame_pipeline_acquire(companion_transport_t source)
+{
+    bool acquired = false;
+    portENTER_CRITICAL(&s_pipeline.lock);
+    if (s_pipeline.active == COMPANION_TRANSPORT_NONE || s_pipeline.active == source) {
+        s_pipeline.active = source;
+        acquired = true;
+    }
+    portEXIT_CRITICAL(&s_pipeline.lock);
+    return acquired;
+}
+
+void frame_pipeline_release(companion_transport_t source)
+{
+    portENTER_CRITICAL(&s_pipeline.lock);
+    if (s_pipeline.active == source) s_pipeline.active = COMPANION_TRANSPORT_NONE;
+    portEXIT_CRITICAL(&s_pipeline.lock);
+}
+
+companion_transport_t frame_pipeline_active_transport(void)
+{
+    companion_transport_t active;
+    portENTER_CRITICAL(&s_pipeline.lock);
+    active = s_pipeline.active;
+    portEXIT_CRITICAL(&s_pipeline.lock);
+    return active;
+}
+
+esp_err_t frame_pipeline_submit(companion_transport_t source, const companion_frame_header_t *header,
+                                const uint8_t *payload)
+{
+    ESP_RETURN_ON_FALSE(header != NULL && payload != NULL, ESP_ERR_INVALID_ARG, TAG, "empty frame");
+    ESP_RETURN_ON_FALSE(frame_pipeline_acquire(source), ESP_ERR_INVALID_STATE, TAG, "transport busy");
+    ESP_RETURN_ON_FALSE(header->magic == COMPANION_FRAME_MAGIC && header->version == COMPANION_FRAME_VERSION &&
+                            header->format == COMPANION_FRAME_FORMAT_JPEG &&
+                            header->header_size == sizeof(*header) && header->payload_size > 0 &&
+                            header->payload_size <= FRAME_LIMIT,
+                        ESP_ERR_INVALID_ARG, TAG, "bad frame header");
+    ESP_RETURN_ON_FALSE(esp_crc32_le(UINT32_MAX, payload, header->payload_size) == header->crc32,
+                        ESP_ERR_INVALID_CRC, TAG, "bad frame CRC");
+    frame_t *frame = NULL;
+    if (xQueueReceive(s_pipeline.empty, &frame, 0) != pdPASS) return ESP_ERR_NO_MEM;
+    memcpy(frame->data, payload, header->payload_size);
+    frame->length = header->payload_size;
+    frame->width = header->width;
+    frame->height = header->height;
+    frame->received_us = esp_timer_get_time();
+    if (xQueueSend(s_pipeline.filled, &frame, 0) != pdPASS) {
+        return_frame(frame);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t frame_pipeline_init(subscreen_display_t *display)
+{
+    ESP_RETURN_ON_FALSE(display != NULL, ESP_ERR_INVALID_ARG, TAG, "display is null");
+    const size_t count = CONFIG_COMPANION_FRAME_BUFFER_COUNT;
+    s_pipeline.display = display;
+    s_pipeline.empty = xQueueCreate(count, sizeof(frame_t *));
+    s_pipeline.filled = xQueueCreate(count, sizeof(frame_t *));
+    s_pipeline.frames = heap_caps_calloc(count, sizeof(frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(s_pipeline.empty && s_pipeline.filled && s_pipeline.frames, ESP_ERR_NO_MEM, TAG, "queue alloc");
+    for (size_t i = 0; i < count; ++i) {
+        frame_t *frame = &s_pipeline.frames[i];
+        frame->data = heap_caps_aligned_alloc(16, FRAME_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_RETURN_ON_FALSE(frame->data != NULL, ESP_ERR_NO_MEM, TAG, "PSRAM frame alloc");
+        xQueueSend(s_pipeline.empty, &frame, 0);
+    }
+    ESP_RETURN_ON_FALSE(xTaskCreate(draw_task, "frame_draw", 6144, NULL,
+                                    CONFIG_COMPANION_DRAW_TASK_PRIORITY, NULL) == pdPASS,
+                        ESP_ERR_NO_MEM, TAG, "draw task");
+    ESP_LOGI(TAG, "ready: buffers=%u limit=%uKiB", (unsigned)count, CONFIG_COMPANION_FRAME_LIMIT_KB);
+    return ESP_OK;
+}
