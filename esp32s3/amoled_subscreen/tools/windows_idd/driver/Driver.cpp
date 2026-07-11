@@ -16,12 +16,12 @@ Environment:
 --*/
 
 #include "Driver.h"
-#include "Driver.tmh"
 #include "log.h"
 #include "usb_transf.h"
 #include "enc_base.h"
 #include "enc_raw_rgb.h"
 #include "enc_jpg.h"
+#include <new>
 #include <stdarg.h>
 using namespace std;
 using namespace Microsoft::IndirectDisp;
@@ -32,10 +32,10 @@ long get_fps(fps_mgr_t * mgr);
 void put_fps_data(fps_mgr_t* mgr,int64_t);
 NTSTATUS usb_send_msg_async(urb_itm_t * urb, WDFUSBPIPE pipe, WDFREQUEST Request, PUCHAR msg, int tsize);
 
-NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, TCHAR * stringBuf );
+NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, WCHAR * stringBuf );
 
 // Default modes reported for edid-less monitors. The first mode is set as preferred
-static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultModes[] = 
+static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultModes[] =
 {
     { 240, 240, 60 },
     { 280, 240, 60 },
@@ -45,14 +45,14 @@ static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultMode
 	{ 480, 480, 60 },
 	{ 640, 480, 60 },
 	{ 800 ,480, 60 },
-	{ 800 ,600, 60 },	
+	{ 800 ,600, 60 },
     { 960 ,960, 60 },
     { 1024 ,600, 60 },
     { 1024 ,768, 60 },
     { 1280 ,600, 60 },
     { 1280 ,720, 60 },
-    { 1280 ,800, 60 },   
-    { 1600 ,1200, 60 }, 
+    { 1280 ,800, 60 },
+    { 1600 ,1200, 60 },
 	{ 1920 ,1080, 60 },
 
 };
@@ -153,7 +153,7 @@ struct IndirectDeviceContextWrapper {
 
 	config_cstr_t udisp_registry_dev_info;
 	config_cstr_t udisp_dev_info;
-	TCHAR   tchar_udisp_devinfo[UDISP_CONFIG_STR_LEN];
+	WCHAR   tchar_udisp_devinfo[UDISP_CONFIG_STR_LEN];
 	int w;
 	int h;
 	int enc;
@@ -241,16 +241,16 @@ auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 
 
 	switch(IoControlCode) {
-	
+
 	 case IOCTL_UDISP_EXIT_DBG:
 		{
 		pContext->dbg_mode=0;
 		LOGD("exit dbg_mode%d\n",pContext->dbg_mode);
-	 	}
+		}
 	 break;
 	 case IOCTL_UDISP_ISSUE_URB:
 	 {
-	
+
 		status =WdfRequestRetrieveInputBuffer(Request,InputBufferLength,&buf,NULL);
 		if (!NT_SUCCESS(status)) {
 			LOGE("inbuf NG\n");
@@ -258,13 +258,13 @@ auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 		}
 		{
 		int total_bytes=0;
-		
+
 			PSLIST_ENTRY	pentry =  InterlockedPopEntrySList(pContext->purb_list);
 			urb_itm_t* purb = (urb_itm_t*)pentry;
-			
+
 			if(NULL != purb) {
-				
-				
+
+
 				memcpy(purb->urb_msg,buf,InputBufferLength);
 				total_bytes =InputBufferLength;
 				NTSTATUS ret = usb_send_msg_async(purb, pContext->BulkWritePipe, purb->Request, purb->urb_msg, total_bytes);
@@ -295,9 +295,9 @@ auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 	default:
 		LOGW("invalid ioctl\n");
 	}
-	
+
 	out:
-	
+
 	 WdfRequestCompleteWithInformation(Request, 0,OutputBufferLength );;
 }
 
@@ -347,7 +347,7 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
 
     Status = IddCxDeviceInitConfig(pDeviceInit, &IddConfig);
     if(!NT_SUCCESS(Status)) {
-		LOG("IddCxDeviceInitConfig failed with Status code %x\n", Status);
+		LOGE("IddCxDeviceInitConfig failed with Status code %x\n", Status);
         return Status;
     }
 
@@ -365,15 +365,21 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
     WDFDEVICE Device = nullptr;
     Status = WdfDeviceCreate(&pDeviceInit, &Attr, &Device);
     if(!NT_SUCCESS(Status)) {
-        LOG("WdfDeviceCreate failed with Status code %x\n", Status);
+        LOGE("WdfDeviceCreate failed with Status code %x\n", Status);
         return Status;
     }
 
+    // Create the IDD context before IddCxDeviceInitialize can trigger PnP callbacks.
+    auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    pContext->pContext = new (std::nothrow) IndirectDeviceContext(Device);
+    if (pContext->pContext == nullptr) {
+        LOGE("IndirectDeviceContext allocation failed\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-	
 	//ioctl
     {
-		
+
 		LOGI("WdfDeviceCreateDeviceInterface\n");
 #if 1
 		    //
@@ -384,24 +390,23 @@ NTSTATUS IddSampleDeviceAdd(WDFDRIVER Driver, PWDFDEVICE_INIT pDeviceInit)
 	                                            NULL); // Reference String
 
 	    if (!NT_SUCCESS(Status)) {
-	        LOGI("WdfDeviceCreateDeviceInterface failed  %!STATUS!\n", Status);
-	        goto Error;
+	        LOGE("WdfDeviceCreateDeviceInterface failed %x\n", Status);
+	        return Status;
 	    }
 
 #endif
     }
 
 
-	
+
 	LOGI("IddCxDeviceInitialize 220-defalut\n");
 
     Status = IddCxDeviceInitialize(Device);
+    if (!NT_SUCCESS(Status)) {
+        LOGE("IddCxDeviceInitialize failed with Status code %x\n", Status);
+        return Status;
+    }
 
-    // Create a new device context object and attach it to the WDF device object
-    auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
-    pContext->pContext = new IndirectDeviceContext(Device);
-
-    Error:
     LOGI("IddSampleDeviceAdd exit\n");
     return Status;
 }
@@ -414,6 +419,11 @@ NTSTATUS IddSampleDeviceD0Entry(WDFDEVICE Device, WDF_POWER_DEVICE_STATE Previou
     // This function is called by WDF to start the device in the fully-on power state.
 
     auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+    if (pContext == nullptr || pContext->pContext == nullptr) {
+        LOG("IddSampleDeviceD0Entry missing device context\n");
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
     pContext->pContext->InitAdapter();
 
     return STATUS_SUCCESS;
@@ -465,7 +475,7 @@ SwapChainProcessor::SwapChainProcessor(IDDCX_SWAPCHAIN hSwapChain, shared_ptr<Di
     : m_hSwapChain(hSwapChain), m_Device(Device), mp_WdfDevice(WdfDevice), m_hAvailableBufferEvent(NewFrameEvent)
 {
 	auto* pContext = WdfObjectGet_IndirectDeviceContextWrapper(WdfDevice);
-		
+
     m_hTerminateEvent.Attach(CreateEvent(nullptr, FALSE, FALSE, nullptr));
 	usb_transf_init(&urb_list);
 	pContext->purb_list=&urb_list;
@@ -507,18 +517,18 @@ void SwapChainProcessor::Run()
     // For improved performance, make use of the Multimedia Class Scheduler Service, which will intelligently
     // prioritize this thread for improved throughput in high CPU-load scenarios.
     DWORD AvTask = 0;
-    
+
 
 	auto* pDeviceContext = WdfObjectGet_IndirectDeviceContextWrapper(mp_WdfDevice);
     HANDLE AvTaskHandle = AvSetMmThreadCharacteristicsW(L"Distribution", &AvTask);
-    
+
 	decision_runtime_encoder(mp_WdfDevice);
     RunCore();
 
     // Always delete the swap-chain object when swap-chain processing loop terminates in order to kick the system to
     // provide a new swap-chain if necessary.
     WdfObjectDelete((WDFOBJECT)m_hSwapChain);
-	
+
 
     m_hSwapChain = nullptr;
 
@@ -574,8 +584,8 @@ void SwapChainProcessor::RunCore()
     for(;;) {
         ComPtr<IDXGIResource> AcquiredBuffer;
 		int64_t a,b,c,d,swap_t;
-	
-	
+
+
         // Ask for the next buffer from the producer
         IDARG_OUT_RELEASEANDACQUIREBUFFER Buffer = {};
         hr = IddCxSwapChainReleaseAndAcquireBuffer(m_hSwapChain, &Buffer);
@@ -635,13 +645,13 @@ void SwapChainProcessor::RunCore()
 						if(pContext->w*2 == frameDescriptor.Width) {
 							LOGD("scale...%d to %d \n",frameDescriptor.Width,pContext->w);
 						    scale_for_sample_2to1((uint32_t *)this->fb_buf, (uint32_t *)this->fb_buf, &frameDescriptor);
-						   
-						} 
-#endif	
+
+						}
+#endif
 						b=get_system_us();
-						
+
 						int total_bytes = encoder->enc(&purb->urb_msg[sizeof(udisp_frame_header_t)],this->fb_buf,0, 0, frameDescriptor.Width-1, frameDescriptor.Height-1, frameDescriptor.Width,pContext->blimit);
-						c=get_system_us();		
+						c=get_system_us();
 
 						encoder->enc_header(purb->urb_msg,0,0, frameDescriptor.Width - 1, frameDescriptor.Height - 1, total_bytes);
 						total_bytes+=sizeof(udisp_frame_header_t);
@@ -652,10 +662,10 @@ void SwapChainProcessor::RunCore()
 						if((total_bytes % pContext->max_out_pkg_size) ==0){
 							pentry =  InterlockedPopEntrySList(&urb_list);
 							purb = (urb_itm_t*)pentry;
-					
+
 							if(purb){
 								enc_base::disp_setup_frame_header(purb->urb_msg,0,0,0,0,0xff,0);
-						 		usb_send_msg_async(purb, pContext->BulkWritePipe, purb->Request, purb->urb_msg, sizeof(udisp_frame_header_t));
+								usb_send_msg_async(purb, pContext->BulkWritePipe, purb->Request, purb->urb_msg, sizeof(udisp_frame_header_t));
 								LOGM("issue zlp %d (epsize:%d)\n",purb->id,pContext->max_out_pkg_size);
 								}
                             else {
@@ -933,7 +943,7 @@ NTSTATUS IddSampleParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION
                         IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR
                     );
 
-    
+
 					LOGI("%s [%d] %d %d %d\n", __func__, ModeIndex, s_SampleDefaultModes[ModeIndex].Width,
                         s_SampleDefaultModes[ModeIndex].Height,
                         s_SampleDefaultModes[ModeIndex].VSync);
@@ -941,7 +951,7 @@ NTSTATUS IddSampleParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION
 
                 // Set the preferred mode as represented in the EDID
                 pOutArgs->PreferredMonitorModeIdx = 2;
-        		LOGI("%s perf:%d\n", __func__,pOutArgs->PreferredMonitorModeIdx);
+		LOGI("%s perf:%d\n", __func__,pOutArgs->PreferredMonitorModeIdx);
                 return STATUS_SUCCESS;
             }
         }
@@ -1016,7 +1026,7 @@ NTSTATUS IddSampleMonitorQueryModes(IDDCX_MONITOR MonitorObject, const IDARG_IN_
                 pContext->pContext->monitor_modes[ModeIndex].Height,
                 pContext->pContext->monitor_modes[ModeIndex].VSync);
 	}
-    
+
 
 	LOGI("%s in:%d out:%d\n", __func__, pInArgs->TargetModeBufferInputCount,pOutArgs->TargetModeBufferOutputCount);
 
@@ -1111,7 +1121,7 @@ int enc_grab_surface( std::shared_ptr<Direct3DDevice> m_Device,ComPtr<IDXGIResou
             DXGI_MAPPED_RECT mappedRect;
             hr = hStagingSurf->Map(&mappedRect, DXGI_MAP_READ);
 			//LOGI("%s %d %d\n",__func__,__LINE__,mappedRect.Pitch);
-			
+
             if(SUCCEEDED(hr)) {
 
 				{
@@ -1122,10 +1132,10 @@ int enc_grab_surface( std::shared_ptr<Direct3DDevice> m_Device,ComPtr<IDXGIResou
 							}
 						}
 					else
-                    	memcpy(fb_buf, mappedRect.pBits, frameDescriptor.Width * frameDescriptor.Height * 4);
-                    
+	memcpy(fb_buf, mappedRect.pBits, frameDescriptor.Width * frameDescriptor.Height * 4);
+
                 }
-			
+
 			//LOGI("%s %d %d %d\n",__func__,__LINE__,frameDescriptor.Width,frameDescriptor.Height);
 
                 hStagingSurf->Unmap();
@@ -1166,7 +1176,7 @@ VOID registry_config_base(void)
                 (LPBYTE)&debug_level,
                 &dwWritten);
             if (regErr == NO_ERROR) {
-               
+
                 LOGI(("debug Value = %d %d"), debug_level, dwWritten);
             }
             else {
@@ -1180,18 +1190,18 @@ VOID registry_config_base(void)
                 (LPBYTE)&scale_res,
                 &dwWritten);
             if (regErr == NO_ERROR) {
-               
+
                 LOGI(("scale_res Value = %d %d"), scale_res, dwWritten);
             }
             else {
                 LOGI(("query scale_res Value error:%x"), regErr);
             }
-			
-					
+
+
         } else {
             LOGD(("Could not open config section"));
         }
-    
+
     LOGI("%s debug:%d scale:%d\n",__func__,debug_level,scale_res);
 }
 
@@ -1218,7 +1228,7 @@ int  split_config_str(char * str, item_t * cfg ,int max){
 				cnt++;
 				if( cnt > max)
 					break;
-				i++;//skip 				
+				i++;//skip
 				goto redo;
 				}
 		}
@@ -1235,12 +1245,12 @@ item_t cfg[CFG_MAX] = { 0 };
 int cnt=0,t,i;
 int enc_cfged=0;
 	cnt=split_config_str(str,cfg,CFG_MAX);
-		
+
 	//cnt = sscanf(str,"%[^_]_%[^_]_%[^_]_%[^_]",type_str,whstr,enc_str,fps_str);
 	if(cnt<2){
 	LOGW("%s [%d] dev info string violation xfz1986 udisp SPEC, so use default\n",str,cnt);
 	}
-	
+
 
 	int len=strlen(cfg[0].str);
 	t=sscanf(&cfg[0].str[len-1],"%d",reg);
@@ -1249,7 +1259,7 @@ int enc_cfged=0;
 	}else {
 		*reg=0;
 		LOGW("default udisp reg idx:%d\n",*reg);
-		
+
 	}
 	//set default
 	*w=0;
@@ -1315,7 +1325,7 @@ int enc_cfged=0;
 				}else {
 					*enc=UDISP_TYPE_RGB888;
 					LOGE("wrong Enc str %s",str);
-			
+
 				}
 				break;
 			default:

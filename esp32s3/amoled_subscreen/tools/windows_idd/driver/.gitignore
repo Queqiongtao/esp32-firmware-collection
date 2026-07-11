@@ -1,6 +1,9 @@
 x64/
 Debug/
 Release/
+.vs/
 *.cat
 *.dll
 *.pdb
+*.vcxproj.user
+dist/

@@ -3,8 +3,10 @@
 #define NOMINMAX
 #include <windows.h>
 #include <bugcodes.h>
-#include <wudfwdm.h>
+#include <usb.h>
+#include <usbdi.h>
 #include <wdf.h>
+#include <wdfusb.h>
 #include <iddcx.h>
 
 #include <dxgi1_5.h>
@@ -15,9 +17,6 @@
 #include <memory>
 #include <vector>
 
-#include "usbdi.h"
-#include <wdf.h>
-#include <wdfusb.h>
 #include "Trace.h"
 #include "enc_base.h"
 namespace Microsoft
@@ -117,9 +116,9 @@ public:
     std::shared_ptr<Direct3DDevice> m_Device;
     WDFDEVICE  mp_WdfDevice;
     uint8_t		fb_buf[DISP_MAX_HEIGHT*DISP_MAX_WIDTH*4];
-	
+
     fps_mgr_t fps_mgr ;
-    
+
 	class enc_base * encoder;
 
     uint16_t gfid;
@@ -172,4 +171,3 @@ public:
 };
 }
 }
-

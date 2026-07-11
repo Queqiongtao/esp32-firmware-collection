@@ -196,11 +196,11 @@ NTSTATUS usb_send_msg(WDFUSBPIPE pipeHandle, WDFREQUEST Request, PUCHAR msg, int
 }
 
 /*************usb part*******************/
-NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, TCHAR * stringBuf ) {
+NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, WCHAR * stringBuf ) {
 
 	NTSTATUS status, ntStatus;
-	USHORT  numCharacters;
-	
+	USHORT  numCharacters = 0;
+
 	WDFMEMORY  memoryHandle;
 	USB_DEVICE_DESCRIPTOR udesc;
 	auto* pDeviceContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
@@ -218,6 +218,13 @@ NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, TCHAR * stringBuf ) {
 		udesc.iProduct,
 		0x0409
 		);
+	if (!NT_SUCCESS(status)) {
+		LOGW("query product string length failed: 0x%x\n", status);
+		return status;
+	}
+	if (numCharacters >= UDISP_CONFIG_STR_LEN) {
+		numCharacters = UDISP_CONFIG_STR_LEN - 1;
+	}
 #if  0
 	ntStatus = WdfMemoryCreate(
 		WDF_NO_OBJECT_ATTRIBUTES,
@@ -234,11 +241,18 @@ NTSTATUS get_usb_dev_string_info(_In_ WDFDEVICE Device, TCHAR * stringBuf ) {
 		pDeviceContext->UsbDevice,
 		NULL,
 		NULL,
-		stringBuf,
+		reinterpret_cast<PUSHORT>(stringBuf),
 		&numCharacters,
 		udesc.iProduct,
 		0x0409
 		);
+	if (!NT_SUCCESS(status)) {
+		LOGW("query product string failed: 0x%x\n", status);
+		return status;
+	}
+	if (numCharacters >= UDISP_CONFIG_STR_LEN) {
+		numCharacters = UDISP_CONFIG_STR_LEN - 1;
+	}
 	stringBuf[numCharacters] = '\0';
 	LOGI("product %d %S\n", numCharacters, stringBuf);
 	return status;
@@ -278,7 +292,7 @@ SelectInterfaces(
 	WDFUSBINTERFACE                     usbInterface;
 
 	PAGED_CODE();
-	
+
 
 	//pDeviceContext = GetDeviceContext(Device);
 
@@ -333,7 +347,7 @@ SelectInterfaces(
 
 		if (WdfUsbPipeTypeBulk == pipeInfo.PipeType &&
 			WdfUsbTargetPipeIsOutEndpoint(pipe)) {
-			
+
 			pDeviceContext->BulkWritePipe = pipe;
 			pDeviceContext->max_out_pkg_size = pipeInfo.MaximumPacketSize;
 			LOGI("BulkOutput Pipe is 0x%p ep_max:%d\n", pipe, pDeviceContext->max_out_pkg_size);
@@ -361,11 +375,11 @@ SelectInterfaces(
 VOID registry_config_dev_info(WDFDEVICE Device)
 {
     LOGD(("<---ReadRegistryInformation"));
-		TCHAR	tchar_udisp_registry[UDISP_CONFIG_STR_LEN];
+		WCHAR	tchar_udisp_registry[UDISP_CONFIG_STR_LEN];
 
         HKEY hOpenKey = NULL;
-        if (RegOpenKeyEx(HKEY_LOCAL_MACHINE,                     // handle to open key
-                         TEXT("SYSTEM\\CurrentControlset\\Services\\xfz1986_usb_graphic\\Parameters"),       // address of name of subkey to open
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,                     // handle to open key
+                         L"SYSTEM\\CurrentControlset\\Services\\xfz1986_usb_graphic\\Parameters",       // address of name of subkey to open
                          0,                        // options (must be NULL)
                          KEY_QUERY_VALUE|KEY_READ, // just want to QUERY a value
                          &hOpenKey                 // address of handle to open key
@@ -375,32 +389,37 @@ VOID registry_config_dev_info(WDFDEVICE Device)
             auto* pDeviceContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
 
             DWORD szType = REG_SZ;
-            DWORD reqSize = UDISP_CONFIG_STR_LEN;
-            regErr=RegQueryValueEx(hOpenKey,
-                        TEXT("udisp"),
-                        NULL, 
+            DWORD reqSize = sizeof(tchar_udisp_registry);
+            regErr=RegQueryValueExW(hOpenKey,
+                        L"udisp",
+                        NULL,
                         &szType,
                         (PBYTE)tchar_udisp_registry,
                         &reqSize);
-		if(regErr == NO_ERROR){		
+		if(regErr == NO_ERROR){
 			WideCharToMultiByte(CP_ACP,0, tchar_udisp_registry,-1, pDeviceContext->udisp_registry_dev_info.cstr,UDISP_CONFIG_STR_LEN,NULL,NULL);
-        	LOGI(("udisp_registry Value = %s %d"), pDeviceContext->udisp_registry_dev_info.cstr, reqSize);
+	LOGI(("udisp_registry Value = %s %d"), pDeviceContext->udisp_registry_dev_info.cstr, reqSize);
 		}else {
             pDeviceContext->udisp_registry_dev_info.cstr[0] = '\0';
 			 LOGD(("queryValue error:%x"),regErr);
 		}
-					
+
         } else {
             LOGD(("Could not open config section"));
         }
-    
+
     LOGD(("ReadRegistryInformation--->"));
 }
 
-void decision_runtime_policy(WDFDEVICE Device){
+NTSTATUS decision_runtime_policy(WDFDEVICE Device){
 	struct SampleMonitorMode mode;
 
 	auto* pDeviceContext = WdfObjectGet_IndirectDeviceContextWrapper(Device);
+	if (pDeviceContext == nullptr || pDeviceContext->pContext == nullptr) {
+		LOGE("decision_runtime_policy missing device context\n");
+		return STATUS_INVALID_DEVICE_STATE;
+	}
+
 	int reg,w=0,h=0,enc,quality,fps,blimit;
 	registry_config_dev_info(Device);
 	if(strlen(pDeviceContext->udisp_registry_dev_info.cstr)>3){
@@ -426,6 +445,7 @@ void decision_runtime_policy(WDFDEVICE Device){
 	pDeviceContext->pContext->monitor_modes.push_back(mode);
 	LOGI("configured AMOLED mode: 368x448@%dHz\n", fps);
 	LOGI("%s scale_res:%d monitor size:%d",__func__,scale_res,pDeviceContext->pContext->monitor_modes.size());
+	return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -488,29 +508,12 @@ idd_usbdisp_evt_device_prepareHardware(
 	// restart.
 	//
 	if (pDeviceContext->UsbDevice == NULL) {
-
-#if UMDF_VERSION_MINOR >= 25
-		WDF_USB_DEVICE_CREATE_CONFIG createParams;
-
-		WDF_USB_DEVICE_CREATE_CONFIG_INIT(&createParams,
-			USBD_CLIENT_CONTRACT_VERSION_602);
-
-		status = WdfUsbTargetDeviceCreateWithParameters(
-			Device,
-			&createParams,
-			WDF_NO_OBJECT_ATTRIBUTES,
-			&pDeviceContext->UsbDevice);
-
-#else
 		status = WdfUsbTargetDeviceCreate(Device,
 			WDF_NO_OBJECT_ATTRIBUTES,
 			&pDeviceContext->UsbDevice);
 
-
-#endif
-
 		if (!NT_SUCCESS(status)) {
-			LOG("WdfUsbTargetDeviceCreate failed with Status code %x\n", status);
+			LOGE("WdfUsbTargetDeviceCreate failed with Status code %x\n", status);
 			return status;
 		}
 	}
@@ -541,15 +544,26 @@ idd_usbdisp_evt_device_prepareHardware(
 #if 1
 	status = SelectInterfaces(Device);
 	if (!NT_SUCCESS(status)) {
-		LOG("SelectInterfaces failed 0x%x\n", status);
+		LOGE("SelectInterfaces failed 0x%x\n", status);
 		return status;
 	}
 #endif
 
 
-	get_usb_dev_string_info(Device,pDeviceContext->tchar_udisp_devinfo);
-	WideCharToMultiByte(CP_ACP,0,pDeviceContext->tchar_udisp_devinfo,-1,pDeviceContext->udisp_dev_info.cstr,UDISP_CONFIG_STR_LEN,NULL,NULL);
-	decision_runtime_policy(Device);
+	status = get_usb_dev_string_info(Device,pDeviceContext->tchar_udisp_devinfo);
+	if (NT_SUCCESS(status)) {
+		WideCharToMultiByte(CP_ACP,0,pDeviceContext->tchar_udisp_devinfo,-1,pDeviceContext->udisp_dev_info.cstr,UDISP_CONFIG_STR_LEN,NULL,NULL);
+	} else {
+		strcpy_s(pDeviceContext->udisp_dev_info.cstr, UDISP_CONFIG_STR_LEN, "esp32s3udisp0_R368x448_Ejpg6_Fps30_Bl100");
+		LOGW("using default udisp config: %s\n", pDeviceContext->udisp_dev_info.cstr);
+		status = STATUS_SUCCESS;
+	}
+
+	status = decision_runtime_policy(Device);
+	if (!NT_SUCCESS(status)) {
+		LOGE("decision_runtime_policy failed 0x%x\n", status);
+		return status;
+	}
 
 	LOG("<-- EvtDevicePrepareHardware\n");
 
@@ -587,7 +601,7 @@ int usb_transf_init(SLIST_HEADER * urb_list){
         InterlockedPushEntrySList(urb_list,
                                   &(purb->node));
 		LOGD("create urb item %d\n",purb->id);
-       
+
     }
 	return 0;
 }
@@ -601,13 +615,13 @@ int usb_transf_exit(SLIST_HEADER * urb_list){
 
     for(i = 1; i <= MAX_URB_SIZE; i++) {
 
-        PSLIST_ENTRY 	pentry = InterlockedPopEntrySList(urb_list);
+        PSLIST_ENTRY	pentry = InterlockedPopEntrySList(urb_list);
 		purb = (urb_itm_t*)pentry;
 
         if(NULL == purb) {
             LOGW("List is empty.\n");
             break;
-        }        
+        }
         LOGD("id is %d\n", purb->id);
 
         // This example assumes that the SLIST_ENTRY structure is the

@@ -52,7 +52,7 @@ int64_t get_system_us(void)
 
 
 long get_fps(fps_mgr_t * mgr)
-{	  
+{
 	 if(mgr->cur < FPS_STAT_MAX)//we ignore first loop and also ignore rollback case due to a long period
 		 return mgr->last_fps;//if <0 ,please ignore it
 	else {
@@ -60,7 +60,7 @@ long get_fps(fps_mgr_t * mgr)
 	 int64_t b=0;
 		 int64_t a = mgr->tb[(mgr->cur-1)%FPS_STAT_MAX];//cur
 	 for(i=2;i<FPS_STAT_MAX;i++){
-	 
+
 		 b = mgr->tb[(mgr->cur-i)%FPS_STAT_MAX]; //last
 	 if((a-b) > 1000000)
 		 break;
@@ -118,7 +118,41 @@ void _log(const char* fmt, ...) {
 	va_list args;
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
 	OutputDebugStringA(buf);
+
+	const char* fixedPaths[] = {
+		"C:\\Windows\\Temp\\amoled_subscreen_idd_trace.txt",
+		"C:\\Users\\Public\\amoled_subscreen_idd_trace.txt",
+	};
+	char tempPath[MAX_PATH] = { 0 };
+	char tempFile[MAX_PATH] = { 0 };
+	const DWORD tempLen = GetTempPathA((DWORD)sizeof(tempPath), tempPath);
+	if (tempLen > 0 && tempLen < sizeof(tempPath)) {
+		snprintf(tempFile, sizeof(tempFile), "%samoled_subscreen_idd_trace.txt", tempPath);
+	}
+
+	for (int i = 0; i < ARRAYSIZE(fixedPaths) + 1; ++i) {
+		const char* path = (i < ARRAYSIZE(fixedPaths)) ? fixedPaths[i] : tempFile;
+		if (path == NULL || path[0] == '\0') {
+			continue;
+		}
+
+		HANDLE file = CreateFileA(
+			path,
+			FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			NULL,
+			OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			NULL);
+
+		if (file != INVALID_HANDLE_VALUE) {
+			DWORD written = 0;
+			WriteFile(file, buf, (DWORD)strlen(buf), &written, NULL);
+			CloseHandle(file);
+		}
+	}
 }
 
 

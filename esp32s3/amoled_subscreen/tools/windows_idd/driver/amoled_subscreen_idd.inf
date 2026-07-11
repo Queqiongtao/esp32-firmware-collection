@@ -43,7 +43,7 @@ UmdfServiceOrder=xfz1986_usb_graphic
 UmdfKernelModeClientPolicy=AllowKernelModeClients
 
 [xfz1986_usb_graphic_Install]
-UmdfLibraryVersion=$UMDFVERSION$
+UmdfLibraryVersion=2.23
 ServiceBinary=%12%\UMDF\xfz1986_usb_graphic.dll
 UmdfExtensions=IddCx0102
 
