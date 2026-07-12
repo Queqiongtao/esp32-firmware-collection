@@ -21,15 +21,37 @@
 
 ## PC 客户端
 
-桌面发送端位于 `tools/desktop_client`，依赖 Rust 和 Node.js：
+桌面发送端位于 `tools/desktop_client`，依赖 Rust、Node.js 和 Tauri 2。首次在 Ubuntu/Debian 上使用时，先安装系统依赖：
+
+```bash
+sudo apt install build-essential pkg-config curl \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libpipewire-0.3-dev \
+  libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+安装 Node.js、npm 和 Rust stable 后，在 `companion_display` 工程目录执行：
 
 ```bash
 cd tools/desktop_client
-npm install
+npm ci
 npm run tauri:dev
 ```
 
-输入形如 `ws://192.168.1.42/stream` 的地址和设备屏幕上的六位配对码，点击 `Check` 确认设备状态，选择采集源后启动。`Static color bars` 是不依赖屏幕采集权限的测试源，适合验证 JPEG、网络和显示链路。
+`npm ci` 必须至少成功执行一次，否则运行时会出现 `tauri: not found`。开发窗口启动后按以下顺序完成首次联调：
+
+1. 给设备烧录与客户端同一版本的 `companion_display` 固件。
+2. 连接设备创建的 `Companion-XXXX` 热点，在浏览器访问 `http://192.168.4.1/`，让设备接入 PC 所在局域网。
+3. 确认设备屏幕显示的局域网 IP 和六位配对码。客户端默认填写 `ws://192.168.51.205/stream` 和 `728211`；设备信息不同时以屏幕显示为准。
+4. 点击 `Check`，确认状态为可连接。首次联调选择 TCP 和 `Static color bars`，再点击 `Start Wi-Fi Stream` 验证网络、JPEG 和显示链路。
+5. 基础链路正常后点击 `Stop`，选择真实屏幕来源。Linux 选择 `Portal`，在系统弹窗中选择要共享的屏幕或窗口；实时画面推荐 UDP、25 FPS、JPEG 质量 70。
+
+关闭开发窗口会停止客户端。后续仍在同一目录执行 `npm run tauri:dev` 即可启动。需要生成发布包时执行：
+
+```bash
+npm run tauri:build
+```
+
+构建产物位于 `src-tauri/target/release/`，安装包位于其 `bundle/` 子目录。`Static color bars` 不依赖屏幕采集权限，适合优先排除 Portal/PipeWire 权限或桌面环境问题。
 
 客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；采集画面会等比例缩放，并以黑边补齐。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态栏会分别显示采集等待、编码和设备耗时及替换帧数；TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
 
