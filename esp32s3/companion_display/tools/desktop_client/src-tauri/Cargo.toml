@@ -22,3 +22,4 @@ pipewire = "0.8"
 
 [patch.crates-io]
 libspa = { path = "vendor/libspa" }
+pipewire = { path = "vendor/pipewire" }

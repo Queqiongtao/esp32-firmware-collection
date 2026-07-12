@@ -432,20 +432,35 @@ fn open_capture_session(
             0,
             &config.video_transport,
         );
-        let (node_id, fd) = tauri::async_runtime::block_on(wayland_capture::open_portal())
+        let selection = tauri::async_runtime::block_on(wayland_capture::open_portal())
             .map_err(|error| format!("Screen-share request failed: {error}"))?;
+        let source_type = selection
+            .source_type
+            .map(|kind| format!("{kind:?}"))
+            .unwrap_or_else(|| "source".to_string());
+        let source_size = selection
+            .source_size
+            .map(|(width, height)| format!("{width}x{height}"))
+            .unwrap_or_else(|| "native size".to_string());
+        let is_window =
+            selection.source_type == Some(ashpd::desktop::screencast::SourceType::Window);
+        eprintln!(
+            "Portal selected: type={} logical_size={} node={}",
+            source_type, source_size, selection.node_id
+        );
         emit(
             app,
             "waiting for PipeWire frames",
-            "Waiting for the shared screen",
+            &format!("Waiting for {source_type} at {source_size}"),
             0,
             0,
             0,
             &config.video_transport,
         );
         return Ok(CaptureSession::PipeWire(wayland_capture::start(
-            node_id,
-            fd,
+            selection.node_id,
+            selection.remote,
+            is_window,
             stop,
             config.fps.clamp(1, 30),
             wayland_capture::CaptureTransform {

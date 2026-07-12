@@ -16,8 +16,38 @@ struct PipeWireData {
     format: spa::param::video::VideoInfoRaw,
     frames: Arc<LatestFrame>,
     transform: CaptureTransform,
+    is_window: bool,
+    layout_logged: bool,
+    last_alpha_status: Option<AlphaStatus>,
     stop: Arc<AtomicBool>,
     mainloop: pw::main_loop::MainLoop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CaptureRegion {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlphaStatus {
+    VideoCrop(CaptureRegion),
+    NotUsed,
+    Bounds(CaptureRegion),
+    FullyOpaque,
+    Empty,
+}
+
+struct PreparedFrame {
+    image: DynamicImage,
+    alpha_status: AlphaStatus,
+    crop: CaptureRegion,
+    draw_width: usize,
+    draw_height: usize,
+    offset_x: usize,
+    offset_y: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +58,13 @@ pub struct CaptureTransform {
     pub region_height: u32,
     pub target_width: u32,
     pub target_height: u32,
+}
+
+pub struct PortalSelection {
+    pub node_id: u32,
+    pub remote: OwnedFd,
+    pub source_type: Option<SourceType>,
+    pub source_size: Option<(u32, u32)>,
 }
 
 pub struct LatestFrame {
@@ -66,7 +103,14 @@ fn require_embedded_cursor(supported: bool) -> Result<CursorMode, String> {
         .ok_or_else(|| "Your desktop portal cannot embed the mouse cursor. Update xdg-desktop-portal and its desktop backend before sharing.".to_string())
 }
 
-pub async fn open_portal() -> Result<(u32, OwnedFd), String> {
+fn valid_source_size(size: Option<(i32, i32)>) -> Option<(u32, u32)> {
+    let (width, height) = size?;
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+pub async fn open_portal() -> Result<PortalSelection, String> {
     let portal = Screencast::new().await.map_err(|error| error.to_string())?;
     let cursor_modes = portal
         .available_cursor_modes()
@@ -103,12 +147,18 @@ pub async fn open_portal() -> Result<(u32, OwnedFd), String> {
         .open_pipe_wire_remote(&session)
         .await
         .map_err(|error| error.to_string())?;
-    Ok((stream.pipe_wire_node_id(), remote))
+    Ok(PortalSelection {
+        node_id: stream.pipe_wire_node_id(),
+        remote,
+        source_type: stream.source_type(),
+        source_size: valid_source_size(stream.size()),
+    })
 }
 
 pub fn start(
     node_id: u32,
     remote: OwnedFd,
+    is_window: bool,
     stop: Arc<AtomicBool>,
     fps: u8,
     transform: CaptureTransform,
@@ -119,7 +169,15 @@ pub fn start(
     });
     let producer = frames.clone();
     std::thread::spawn(move || {
-        if let Err(error) = run(node_id, remote, stop, producer.clone(), fps, transform) {
+        if let Err(error) = run(
+            node_id,
+            remote,
+            is_window,
+            stop,
+            producer.clone(),
+            fps,
+            transform,
+        ) {
             producer.publish(Err(error));
         }
     });
@@ -129,6 +187,7 @@ pub fn start(
 fn run(
     node_id: u32,
     remote: OwnedFd,
+    is_window: bool,
     stop: Arc<AtomicBool>,
     frames: Arc<LatestFrame>,
     fps: u8,
@@ -158,6 +217,9 @@ fn run(
             format: Default::default(),
             frames,
             transform,
+            is_window,
+            layout_logged: false,
+            last_alpha_status: None,
             stop,
             mainloop: mainloop.clone(),
         })
@@ -177,7 +239,17 @@ fn run(
                 if media_type == spa::param::format::MediaType::Video
                     && media_subtype == spa::param::format::MediaSubtype::Raw
                 {
-                    let _ = user_data.format.parse(param);
+                    if user_data.format.parse(param).is_ok() {
+                        let size = user_data.format.size();
+                        eprintln!(
+                            "PipeWire negotiated: size={}x{} format={:?}",
+                            size.width,
+                            size.height,
+                            user_data.format.format()
+                        );
+                        user_data.layout_logged = false;
+                        user_data.last_alpha_status = None;
+                    }
                 }
             }
         })
@@ -190,11 +262,66 @@ fn run(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            let video_crop = validate_video_crop(buffer.video_crop(), &user_data.format);
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
             };
-            match image_from_data(data, &user_data.format, user_data.transform) {
-                Ok(image) => user_data.frames.publish(Ok(image)),
+            match image_from_data(
+                data,
+                &user_data.format,
+                user_data.transform,
+                user_data.is_window,
+                video_crop,
+            ) {
+                Ok(Some(prepared)) => {
+                    if user_data.last_alpha_status != Some(prepared.alpha_status) {
+                        match prepared.alpha_status {
+                            AlphaStatus::VideoCrop(region) => eprintln!(
+                                "PipeWire VideoCrop: x={} y={} width={} height={}",
+                                region.x, region.y, region.width, region.height
+                            ),
+                            AlphaStatus::Bounds(region) => eprintln!(
+                                "Window alpha bounds: x={} y={} width={} height={}",
+                                region.x, region.y, region.width, region.height
+                            ),
+                            AlphaStatus::FullyOpaque => eprintln!(
+                                "Window alpha fallback: frame is fully opaque; using the complete PipeWire frame"
+                            ),
+                            AlphaStatus::NotUsed => eprintln!(
+                                "Window alpha fallback: negotiated format has no alpha; using the complete PipeWire frame"
+                            ),
+                            AlphaStatus::Empty => {}
+                        }
+                        user_data.last_alpha_status = Some(prepared.alpha_status);
+                        user_data.layout_logged = false;
+                    }
+                    if !user_data.layout_logged {
+                        let size = user_data.format.size();
+                        eprintln!(
+                            "Capture layout: source={}x{} crop={},{},{}x{} draw={}x{} offset={},{} target={}x{}",
+                            size.width,
+                            size.height,
+                            prepared.crop.x,
+                            prepared.crop.y,
+                            prepared.crop.width,
+                            prepared.crop.height,
+                            prepared.draw_width,
+                            prepared.draw_height,
+                            prepared.offset_x,
+                            prepared.offset_y,
+                            user_data.transform.target_width,
+                            user_data.transform.target_height
+                        );
+                    }
+                    user_data.layout_logged = true;
+                    user_data.frames.publish(Ok(prepared.image));
+                }
+                Ok(None) => {
+                    if user_data.last_alpha_status != Some(AlphaStatus::Empty) {
+                        eprintln!("Window alpha bounds: frame is fully transparent; skipping it");
+                        user_data.last_alpha_status = Some(AlphaStatus::Empty);
+                    }
+                }
                 Err(error) => user_data.frames.publish(Err(error)),
             }
         })
@@ -219,29 +346,11 @@ fn run(
             Choice,
             Enum,
             Id,
-            pw::spa::param::video::VideoFormat::BGRx,
-            pw::spa::param::video::VideoFormat::BGRx,
-            pw::spa::param::video::VideoFormat::RGBx,
+            pw::spa::param::video::VideoFormat::BGRA,
             pw::spa::param::video::VideoFormat::BGRA,
             pw::spa::param::video::VideoFormat::RGBA,
-        ),
-        pw::spa::pod::property!(
-            pw::spa::param::format::FormatProperties::VideoSize,
-            Choice,
-            Range,
-            Rectangle,
-            pw::spa::utils::Rectangle {
-                width: 1920,
-                height: 1080
-            },
-            pw::spa::utils::Rectangle {
-                width: 1,
-                height: 1
-            },
-            pw::spa::utils::Rectangle {
-                width: 4096,
-                height: 4096
-            }
+            pw::spa::param::video::VideoFormat::BGRx,
+            pw::spa::param::video::VideoFormat::RGBx,
         ),
         pw::spa::pod::property!(
             pw::spa::param::format::FormatProperties::VideoFramerate,
@@ -266,8 +375,33 @@ fn run(
     .map_err(|error| format!("PipeWire format serialization failed: {error}"))?
     .0
     .into_inner();
-    let mut params = [spa::pod::Pod::from_bytes(&values)
-        .ok_or_else(|| "PipeWire format creation failed".to_string())?];
+    let meta = pw::spa::pod::object!(
+        pw::spa::utils::SpaTypes::ObjectParamMeta,
+        pw::spa::param::ParamType::Meta,
+        pw::spa::pod::property!(
+            pw::spa::param::MetaProperties::Type,
+            Id,
+            pw::spa::param::MetaType::VideoCrop
+        ),
+        pw::spa::pod::property!(
+            pw::spa::param::MetaProperties::Size,
+            Int,
+            std::mem::size_of::<i32>() as i32 * 4
+        ),
+    );
+    let meta_values = pw::spa::pod::serialize::PodSerializer::serialize(
+        Cursor::new(Vec::new()),
+        &pw::spa::pod::Value::Object(meta),
+    )
+    .map_err(|error| format!("PipeWire metadata serialization failed: {error}"))?
+    .0
+    .into_inner();
+    let mut params = [
+        spa::pod::Pod::from_bytes(&values)
+            .ok_or_else(|| "PipeWire format creation failed".to_string())?,
+        spa::pod::Pod::from_bytes(&meta_values)
+            .ok_or_else(|| "PipeWire metadata request creation failed".to_string())?,
+    ];
     stream
         .connect(
             spa::utils::Direction::Input,
@@ -286,7 +420,9 @@ fn image_from_data(
     data: &mut spa::buffer::Data,
     format: &spa::param::video::VideoInfoRaw,
     transform: CaptureTransform,
-) -> Result<DynamicImage, String> {
+    is_window: bool,
+    video_crop: Option<CaptureRegion>,
+) -> Result<Option<PreparedFrame>, String> {
     let size = format.size();
     let width = size.width as usize;
     let height = size.height as usize;
@@ -318,37 +454,63 @@ fn image_from_data(
             "Unsupported PipeWire video format: {pixel_format:?}"
         ));
     }
-    let crop_x = transform.region_x as usize;
-    let crop_y = transform.region_y as usize;
+    let has_alpha = matches!(
+        pixel_format,
+        spa::param::video::VideoFormat::BGRA | spa::param::video::VideoFormat::RGBA
+    );
+    let (alpha_status, base) = if let Some(region) = video_crop {
+        (AlphaStatus::VideoCrop(region), region)
+    } else if is_window && has_alpha {
+        match detect_alpha_region(bytes, offset, stride, width, height) {
+            AlphaStatus::Bounds(region) => (AlphaStatus::Bounds(region), region),
+            AlphaStatus::FullyOpaque => (
+                AlphaStatus::FullyOpaque,
+                CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                },
+            ),
+            AlphaStatus::Empty => return Ok(None),
+            AlphaStatus::NotUsed | AlphaStatus::VideoCrop(_) => unreachable!(),
+        }
+    } else {
+        (
+            AlphaStatus::NotUsed,
+            CaptureRegion {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+        )
+    };
+    let relative_x = transform.region_x as usize;
+    let relative_y = transform.region_y as usize;
     let crop_width = if transform.region_width == 0 {
-        width
+        base.width
     } else {
         transform.region_width as usize
     };
     let crop_height = if transform.region_height == 0 {
-        height
+        base.height
     } else {
         transform.region_height as usize
     };
-    if crop_x >= width
-        || crop_y >= height
-        || crop_width > width - crop_x
-        || crop_height > height - crop_y
+    if relative_x >= base.width
+        || relative_y >= base.height
+        || crop_width > base.width - relative_x
+        || crop_height > base.height - relative_y
     {
-        return Err("capture region is outside the shared screen".to_string());
+        return Err("capture region is outside the selected source".to_string());
     }
+    let crop_x = base.x + relative_x;
+    let crop_y = base.y + relative_y;
     let target_width = transform.target_width as usize;
     let target_height = transform.target_height as usize;
-    let scale =
-        (target_width as f32 / crop_width as f32).min(target_height as f32 / crop_height as f32);
-    let draw_width = ((crop_width as f32 * scale).round() as usize)
-        .max(1)
-        .min(target_width);
-    let draw_height = ((crop_height as f32 * scale).round() as usize)
-        .max(1)
-        .min(target_height);
-    let offset_x = (target_width - draw_width) / 2;
-    let offset_y = (target_height - draw_height) / 2;
+    let (draw_width, draw_height, offset_x, offset_y) =
+        letterbox_layout(crop_width, crop_height, target_width, target_height);
     let mut output = ImageBuffer::from_pixel(
         transform.target_width,
         transform.target_height,
@@ -396,7 +558,146 @@ fn image_from_data(
             );
         }
     }
-    Ok(DynamicImage::ImageRgb8(output))
+    Ok(Some(PreparedFrame {
+        image: DynamicImage::ImageRgb8(output),
+        alpha_status,
+        crop: CaptureRegion {
+            x: crop_x,
+            y: crop_y,
+            width: crop_width,
+            height: crop_height,
+        },
+        draw_width,
+        draw_height,
+        offset_x,
+        offset_y,
+    }))
+}
+
+fn validate_video_crop(
+    crop: Option<pw::buffer::VideoCrop>,
+    format: &spa::param::video::VideoInfoRaw,
+) -> Option<CaptureRegion> {
+    let crop = crop?;
+    let x = usize::try_from(crop.x).ok()?;
+    let y = usize::try_from(crop.y).ok()?;
+    let width = usize::try_from(crop.width).ok()?;
+    let height = usize::try_from(crop.height).ok()?;
+    let size = format.size();
+    let frame_width = usize::try_from(size.width).ok()?;
+    let frame_height = usize::try_from(size.height).ok()?;
+    (width > 0
+        && height > 0
+        && x < frame_width
+        && y < frame_height
+        && width <= frame_width - x
+        && height <= frame_height - y)
+        .then_some(CaptureRegion {
+            x,
+            y,
+            width,
+            height,
+        })
+}
+
+fn detect_alpha_region(
+    bytes: &[u8],
+    offset: usize,
+    stride: usize,
+    width: usize,
+    height: usize,
+) -> AlphaStatus {
+    let mut row_spans = Vec::with_capacity(height);
+    let mut opaque_pixels = 0usize;
+    for y in 0..height {
+        let mut first = width;
+        let mut last = 0usize;
+        let mut count = 0usize;
+        for x in 0..width {
+            if bytes[offset + y * stride + x * 4 + 3] != 0 {
+                first = first.min(x);
+                last = x;
+                count += 1;
+            }
+        }
+        opaque_pixels += count;
+        row_spans.push((first, last, count));
+    }
+    if opaque_pixels == 0 {
+        return AlphaStatus::Empty;
+    }
+    if opaque_pixels == width * height {
+        return AlphaStatus::FullyOpaque;
+    }
+
+    let minimum_row_pixels = (width / 100).max(2);
+    let mut best_start = 0usize;
+    let mut best_end = 0usize;
+    let mut current_start = None;
+    for (y, (_, _, count)) in row_spans.iter().enumerate() {
+        if *count >= minimum_row_pixels {
+            current_start.get_or_insert(y);
+        } else if let Some(start) = current_start.take() {
+            if y - start > best_end - best_start {
+                best_start = start;
+                best_end = y;
+            }
+        }
+    }
+    if let Some(start) = current_start {
+        if height - start > best_end - best_start {
+            best_start = start;
+            best_end = height;
+        }
+    }
+    if best_end == best_start {
+        return AlphaStatus::Empty;
+    }
+
+    let run_height = best_end - best_start;
+    let minimum_column_pixels = (run_height / 20).max(2);
+    let mut first_x = width;
+    let mut last_x = 0usize;
+    for x in 0..width {
+        let count = (best_start..best_end)
+            .filter(|y| bytes[offset + y * stride + x * 4 + 3] != 0)
+            .count();
+        if count >= minimum_column_pixels {
+            first_x = first_x.min(x);
+            last_x = x;
+        }
+    }
+    if first_x == width {
+        return AlphaStatus::Empty;
+    }
+    AlphaStatus::Bounds(CaptureRegion {
+        x: first_x,
+        y: best_start,
+        width: last_x - first_x + 1,
+        height: run_height,
+    })
+}
+
+fn letterbox_layout(
+    source_width: usize,
+    source_height: usize,
+    target_width: usize,
+    target_height: usize,
+) -> (usize, usize, usize, usize) {
+    let scale = (target_width as f32 / source_width as f32)
+        .min(target_height as f32 / source_height as f32);
+    let draw_width = ((source_width as f32 * scale).round() as usize)
+        .max(1)
+        .min(target_width);
+    let draw_height = ((source_height as f32 * scale).round() as usize)
+        .max(1)
+        .min(target_height);
+    (
+        draw_width,
+        draw_height,
+        (target_width - draw_width) / 2,
+        (target_height - draw_height) / 2,
+    )
 }
 
 #[cfg(test)]
@@ -430,5 +731,99 @@ mod tests {
         assert!(require_embedded_cursor(false)
             .unwrap_err()
             .contains("cannot embed the mouse cursor"));
+    }
+
+    #[test]
+    fn portal_source_size_must_be_positive() {
+        assert_eq!(valid_source_size(Some((1600, 900))), Some((1600, 900)));
+        assert_eq!(valid_source_size(None), None);
+        assert_eq!(valid_source_size(Some((0, 900))), None);
+        assert_eq!(valid_source_size(Some((-1, 900))), None);
+    }
+
+    #[test]
+    fn letterbox_layout_preserves_wide_window() {
+        assert_eq!(letterbox_layout(1600, 900, 368, 448), (368, 207, 0, 120));
+    }
+
+    #[test]
+    fn letterbox_layout_preserves_tall_window() {
+        assert_eq!(letterbox_layout(900, 1600, 368, 448), (252, 448, 58, 0));
+    }
+
+    #[test]
+    fn letterbox_layout_fills_matching_aspect_ratio() {
+        assert_eq!(letterbox_layout(736, 896, 368, 448), (368, 448, 0, 0));
+    }
+
+    fn alpha_frame(width: usize, height: usize, regions: &[CaptureRegion]) -> Vec<u8> {
+        let mut bytes = vec![0_u8; width * height * 4];
+        for region in regions {
+            for y in region.y..region.y + region.height {
+                for x in region.x..region.x + region.width {
+                    bytes[(y * width + x) * 4 + 3] = 255;
+                }
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn alpha_bounds_extract_the_window_from_a_transparent_canvas() {
+        let window = CaptureRegion {
+            x: 2,
+            y: 1,
+            width: 6,
+            height: 5,
+        };
+        let bytes = alpha_frame(10, 8, &[window]);
+        assert_eq!(
+            detect_alpha_region(&bytes, 0, 40, 10, 8),
+            AlphaStatus::Bounds(window)
+        );
+    }
+
+    #[test]
+    fn alpha_bounds_ignore_an_isolated_cursor_outside_the_window() {
+        let cursor = CaptureRegion {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+        };
+        let window = CaptureRegion {
+            x: 4,
+            y: 3,
+            width: 12,
+            height: 10,
+        };
+        let bytes = alpha_frame(20, 16, &[cursor, window]);
+        assert_eq!(
+            detect_alpha_region(&bytes, 0, 80, 20, 16),
+            AlphaStatus::Bounds(window)
+        );
+    }
+
+    #[test]
+    fn alpha_bounds_report_empty_and_fully_opaque_frames() {
+        let empty = alpha_frame(10, 8, &[]);
+        assert_eq!(
+            detect_alpha_region(&empty, 0, 40, 10, 8),
+            AlphaStatus::Empty
+        );
+        let full = alpha_frame(
+            10,
+            8,
+            &[CaptureRegion {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 8,
+            }],
+        );
+        assert_eq!(
+            detect_alpha_region(&full, 0, 40, 10, 8),
+            AlphaStatus::FullyOpaque
+        );
     }
 }

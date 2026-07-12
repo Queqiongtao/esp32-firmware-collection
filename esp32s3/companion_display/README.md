@@ -53,7 +53,18 @@ npm run tauri:build
 
 构建产物位于 `src-tauri/target/release/`，安装包位于其 `bundle/` 子目录。`Static color bars` 不依赖屏幕采集权限，适合优先排除 Portal/PipeWire 权限或桌面环境问题。
 
-客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；采集画面会等比例缩放，并以黑边补齐。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态栏会分别显示采集等待、编码和设备耗时及替换帧数；TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
+客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；采集画面会等比例缩放到设备可容纳的最大尺寸，不拉伸、不裁剪，并只在宽高比不一致时居中补齐必要黑边。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；选择单个窗口时，客户端优先请求标准 `SPA_META_VideoCrop` 有效区域，没有该元数据时再尝试 BGRA/RGBA Alpha，从 GNOME Portal 的透明全屏画布中识别真正的窗口主体。窗口内部的黑色内容不会被误裁，手动 Crop 坐标相对于识别后的窗口区域。Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态栏会分别显示采集等待、编码和设备耗时及替换帧数；TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
+
+部分 GNOME Portal 后端即使选择了单个窗口，仍会报告全屏大小的 Portal/PipeWire 外层画布。客户端会读取每帧的 `SPA_META_VideoCrop`，只处理其中声明的窗口有效区域。正常日志类似：
+
+```text
+Portal selected: type=Window logical_size=1738x3600 node=38
+PipeWire negotiated: size=1738x3600 format=VideoFormat::BGRx
+PipeWire VideoCrop: x=120 y=240 width=1200 height=900
+Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 target=368x448
+```
+
+其中 `logical_size` 和 `PipeWire negotiated.size` 可以仍是全屏画布；`PipeWire VideoCrop` 的 `width`、`height` 才是实际窗口区域，`Capture layout.crop` 应与其一致。客户端将该区域完整等比缩放到 `368x448`，不拉伸、不裁剪，只在宽高比不同时补最少黑边。若后端没有提供 `VideoCrop`，客户端会尝试使用 BGRA/RGBA Alpha 边界；日志出现 `Window alpha fallback: negotiated format has no alpha` 时表示两种精确边界信息都不可用，回退到完整帧后可能再次包含窗口外黑色背景。
 
 静态画面会复用最后一次成功编码的 JPEG，以 `1 FPS` 重复发送，并为每次发送生成新帧序号；画面恢复变化后立即回到用户设置的实时帧率。这样静态内容不会占用实时带宽，也不会使设备认为视频会话失活。UDP 模式同时每 2 秒保持一次 WebSocket 控制心跳；控制连接异常时客户端会显示 `Reconnecting control channel`，最多自动重连 5 次并重新协商 UDP session，成功后继续发送当前画面。
 
@@ -77,6 +88,7 @@ npm run tauri:build
 ## 联调与排障
 
 - 先用 TCP 和 `Static color bars` 验证基础链路。设备显示 `TCP VIDEO` 或 `RECEIVING FRAME` 即表示已进入视频接收。
+- Portal 选择单个窗口后仍看到整屏黑色背景时，检查终端是否打印 `PipeWire VideoCrop`。有该日志时以其矩形为实际窗口范围；只有 `Window alpha fallback` 而没有 `PipeWire VideoCrop` 时，说明当前桌面 Portal 后端未提供可精确裁取的窗口边界。
 - UDP 无画面时，查看设备串口的 `UDP stats`。`rx` 增长说明数据已到设备；`accepted` 为零时查看 `last` 拒绝原因；`submitted` 增长才表示完整帧已进入显示管线。发送端会以 1 ms 间隔发送分片，并限制单帧发送在 120 ms 内；设备 UDP 邮箱为 24 包，持续 `timeout` 仍表示 Wi-Fi 丢包或发送端负载过高。
 - `accepted` 增长而 `completed` 不增长：完整帧有分片丢失、被较新帧替换，或发送端未在预算内发完。`completed` 增长而 `submitted` 不增长：完整帧已收齐，但 `CDP1` 校验或显示管线提交失败。
 - `source_ip`：UDP 来源地址与已绑定地址不一致。PC 必须将 UDP socket 绑定到 WebSocket 控制连接使用的本机 IPv4；重新启动流可创建新会话。

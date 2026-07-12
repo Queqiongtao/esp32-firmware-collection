@@ -63,6 +63,37 @@ impl ParamType {
     }
 }
 
+#[derive(Copy, Clone)]
+pub struct MetaProperties(pub spa_sys::spa_param_meta);
+
+#[allow(non_upper_case_globals)]
+impl MetaProperties {
+    pub const Type: Self = Self(spa_sys::SPA_PARAM_META_type);
+    pub const Size: Self = Self(spa_sys::SPA_PARAM_META_size);
+
+    pub fn as_raw(self) -> spa_sys::spa_param_meta {
+        self.0
+    }
+}
+
+impl From<MetaProperties> for u32 {
+    fn from(value: MetaProperties) -> Self {
+        value.0
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct MetaType(pub spa_sys::spa_meta_type);
+
+#[allow(non_upper_case_globals)]
+impl MetaType {
+    pub const VideoCrop: Self = Self(spa_sys::SPA_META_VideoCrop);
+
+    pub fn as_raw(self) -> spa_sys::spa_meta_type {
+        self.0
+    }
+}
+
 impl Debug for ParamType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let c_str = unsafe {
