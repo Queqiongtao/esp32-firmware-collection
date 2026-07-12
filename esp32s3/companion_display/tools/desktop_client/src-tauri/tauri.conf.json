@@ -3,7 +3,12 @@
   "productName": "Companion Display",
   "version": "0.1.0",
   "identifier": "com.companiondisplay.client",
-  "build": { "frontendDist": "../dist", "devUrl": "http://localhost:5173" },
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173"
+  },
   "app": { "windows": [{ "title": "Companion Display", "width": 920, "height": 640 }] },
   "bundle": { "active": true, "targets": "all" }
 }

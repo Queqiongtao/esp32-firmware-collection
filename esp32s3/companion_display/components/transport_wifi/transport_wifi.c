@@ -18,7 +18,7 @@
 static const char *TAG = "transport_wifi";
 static esp_netif_t *s_sta_netif;
 static httpd_handle_t s_server;
-static char s_token[33];
+static char s_token[7];
 static char s_ipv4[16];
 static subscreen_network_status_t s_network_status;
 static subscreen_display_t *s_display;
@@ -29,7 +29,33 @@ static void update_network_status(subscreen_network_status_t status, const char 
     s_network_status = status;
     strlcpy(s_ipv4, ip != NULL ? ip : "", sizeof(s_ipv4));
     if (s_display != NULL) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(subscreen_display_set_network_status(s_display, status, s_ipv4));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(subscreen_display_set_network_status(s_display, status, s_ipv4, s_token));
+    }
+}
+
+static void update_transport_status(subscreen_transport_status_t status)
+{
+    if (s_display != NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(subscreen_display_set_transport_status(s_display, status));
+    }
+}
+
+static subscreen_transport_status_t submit_result_status(frame_pipeline_submit_result_t result)
+{
+    switch (result) {
+    case FRAME_PIPELINE_SUBMIT_BAD_HEADER:
+        return SUBSCREEN_TRANSPORT_BAD_HEADER;
+    case FRAME_PIPELINE_SUBMIT_BAD_CRC:
+        return SUBSCREEN_TRANSPORT_BAD_CRC;
+    case FRAME_PIPELINE_SUBMIT_NO_BUFFER:
+        return SUBSCREEN_TRANSPORT_NO_BUFFER;
+    case FRAME_PIPELINE_SUBMIT_BUSY:
+        return SUBSCREEN_TRANSPORT_DEVICE_BUSY;
+    case FRAME_PIPELINE_SUBMIT_INVALID_ARG:
+        return SUBSCREEN_TRANSPORT_FRAME_REJECTED;
+    case FRAME_PIPELINE_SUBMIT_OK:
+    default:
+        return SUBSCREEN_TRANSPORT_RECEIVING_FRAME;
     }
 }
 
@@ -56,12 +82,13 @@ static void nvs_set_string(const char *key, const char *value)
 
 static void ensure_token(void)
 {
-    if (nvs_get_string("token", s_token, sizeof(s_token)) == ESP_OK && strlen(s_token) == 32) return;
-    static const char hex[] = "0123456789abcdef";
-    uint8_t raw[16];
-    esp_fill_random(raw, sizeof(raw));
-    for (size_t i = 0; i < sizeof(raw); ++i) { s_token[i * 2] = hex[raw[i] >> 4]; s_token[i * 2 + 1] = hex[raw[i] & 0x0f]; }
-    s_token[32] = '\0';
+    if (nvs_get_string("token", s_token, sizeof(s_token)) == ESP_OK && strlen(s_token) == 6) {
+        bool numeric = true;
+        for (size_t i = 0; i < 6; ++i) numeric = numeric && s_token[i] >= '0' && s_token[i] <= '9';
+        if (numeric) return;
+    }
+    const unsigned long code = 100000UL + (esp_random() % 900000UL);
+    snprintf(s_token, sizeof(s_token), "%06lu", code);
     nvs_set_string("token", s_token);
 }
 
@@ -75,8 +102,16 @@ static esp_err_t root_get(httpd_req_t *req)
 static esp_err_t status_get(httpd_req_t *req)
 {
     char response[256];
-    const char *source = frame_pipeline_active_transport() == COMPANION_TRANSPORT_USB ? "usb" :
-                         frame_pipeline_active_transport() == COMPANION_TRANSPORT_WIFI ? "wifi" : "none";
+    companion_transport_t active_transport = frame_pipeline_active_transport();
+    subscreen_transport_status_t transport_status = SUBSCREEN_TRANSPORT_DEVICE_BUSY;
+    if (active_transport == COMPANION_TRANSPORT_NONE) {
+        transport_status = SUBSCREEN_TRANSPORT_HTTP_STATUS_CHECK;
+    } else if (active_transport == COMPANION_TRANSPORT_WIFI) {
+        transport_status = SUBSCREEN_TRANSPORT_WS_CONNECTED;
+    }
+    update_transport_status(transport_status);
+    const char *source = active_transport == COMPANION_TRANSPORT_USB ? "usb" :
+                         active_transport == COMPANION_TRANSPORT_WIFI ? "wifi" : "none";
     const char *wifi = s_network_status == SUBSCREEN_NETWORK_CONNECTED ? "connected" :
                        s_network_status == SUBSCREEN_NETWORK_CONNECTING ? "connecting" : "setup_required";
     snprintf(response, sizeof(response), "{\"name\":\"companion-display\",\"width\":368,\"height\":448,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true}",
@@ -118,23 +153,72 @@ static bool websocket_authorized(httpd_req_t *req)
 static esp_err_t stream_ws(httpd_req_t *req)
 {
     if (req->method == HTTP_GET) {
-        if (!websocket_authorized(req)) return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "pairing token required");
-        if (!frame_pipeline_acquire(COMPANION_TRANSPORT_WIFI)) return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "other transport active");
+        if (!websocket_authorized(req)) {
+            update_transport_status(SUBSCREEN_TRANSPORT_BAD_PAIRING_CODE);
+            ESP_LOGW(TAG, "WebSocket rejected: invalid pairing code");
+            return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "pairing code required");
+        }
+        if (!frame_pipeline_acquire(COMPANION_TRANSPORT_WIFI)) {
+            update_transport_status(SUBSCREEN_TRANSPORT_DEVICE_BUSY);
+            ESP_LOGW(TAG, "WebSocket rejected: another transport is active");
+            return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "other transport active");
+        }
+        update_transport_status(SUBSCREEN_TRANSPORT_WAITING_FRAME);
         ESP_LOGI(TAG, "WebSocket client connected");
         return ESP_OK;
     }
     httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_BINARY};
-    ESP_RETURN_ON_ERROR(httpd_ws_recv_frame(req, &frame, 0), TAG, "frame header");
-    if (frame.type == HTTPD_WS_TYPE_CLOSE) { frame_pipeline_release(COMPANION_TRANSPORT_WIFI); return ESP_OK; }
-    if (frame.type != HTTPD_WS_TYPE_BINARY || frame.len < sizeof(companion_frame_header_t)) return ESP_ERR_INVALID_SIZE;
+    esp_err_t err = httpd_ws_recv_frame(req, &frame, 0);
+    if (err != ESP_OK) {
+        update_transport_status(SUBSCREEN_TRANSPORT_BAD_WS_FRAME);
+        ESP_RETURN_ON_ERROR(err, TAG, "frame header");
+    }
+    if (frame.type == HTTPD_WS_TYPE_CLOSE) {
+        frame_pipeline_release(COMPANION_TRANSPORT_WIFI);
+        update_transport_status(SUBSCREEN_TRANSPORT_READY);
+        return ESP_OK;
+    }
+    if (frame.type != HTTPD_WS_TYPE_BINARY || frame.len < sizeof(companion_frame_header_t)) {
+        update_transport_status(frame.type != HTTPD_WS_TYPE_BINARY ?
+                                SUBSCREEN_TRANSPORT_BAD_WS_FRAME :
+                                SUBSCREEN_TRANSPORT_BAD_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    update_transport_status(SUBSCREEN_TRANSPORT_RECEIVING_FRAME);
     uint8_t *data = malloc(frame.len);
-    ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_NO_MEM, TAG, "websocket buffer");
+    if (data == NULL) {
+        update_transport_status(SUBSCREEN_TRANSPORT_NO_BUFFER);
+        ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "websocket buffer");
+    }
     frame.payload = data;
-    esp_err_t err = httpd_ws_recv_frame(req, &frame, frame.len);
+    err = httpd_ws_recv_frame(req, &frame, frame.len);
+    bool websocket_payload_read_failed = err != ESP_OK;
+    bool logged_reject = false;
     if (err == ESP_OK) {
         const companion_frame_header_t *header = (const companion_frame_header_t *)data;
-        if (frame.len != sizeof(*header) + header->payload_size) err = ESP_ERR_INVALID_SIZE;
-        else err = frame_pipeline_submit(COMPANION_TRANSPORT_WIFI, header, data + sizeof(*header));
+        if (frame.len != sizeof(*header) + header->payload_size) {
+            update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
+            err = ESP_ERR_INVALID_SIZE;
+        } else {
+            frame_pipeline_submit_result_t result = frame_pipeline_submit(COMPANION_TRANSPORT_WIFI,
+                                                                          header,
+                                                                          data + sizeof(*header));
+            if (result != FRAME_PIPELINE_SUBMIT_OK) {
+                update_transport_status(submit_result_status(result));
+                err = frame_pipeline_submit_result_to_esp_err(result);
+                ESP_LOGW(TAG, "WebSocket frame rejected: %s",
+                         frame_pipeline_submit_result_name(result));
+                logged_reject = true;
+            }
+        }
+    }
+    if (err != ESP_OK) {
+        if (websocket_payload_read_failed) {
+            update_transport_status(SUBSCREEN_TRANSPORT_BAD_WS_FRAME);
+        }
+        if (!logged_reject) {
+            ESP_LOGW(TAG, "WebSocket frame rejected: %s", esp_err_to_name(err));
+        }
     }
     free(data);
     return err;

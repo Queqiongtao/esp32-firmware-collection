@@ -4,13 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2" }
+tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 crc32fast = "1"
-nusb = "0.1"
-tokio = { version = "1", features = ["rt", "time"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 xcap = "0.1"
+tungstenite = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11", features = ["tokio"] }
+pipewire = "0.8"
+
+[patch.crates-io]
+libspa = { path = "vendor/libspa" }

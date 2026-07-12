@@ -14,8 +14,17 @@ typedef struct subscreen_display subscreen_display_t;
 
 typedef enum {
     SUBSCREEN_TRANSPORT_READY,
+    SUBSCREEN_TRANSPORT_HTTP_STATUS_CHECK,
+    SUBSCREEN_TRANSPORT_WS_CONNECTED,
     SUBSCREEN_TRANSPORT_WAITING_FRAME,
     SUBSCREEN_TRANSPORT_RECEIVING_FRAME,
+    SUBSCREEN_TRANSPORT_BAD_PAIRING_CODE,
+    SUBSCREEN_TRANSPORT_DEVICE_BUSY,
+    SUBSCREEN_TRANSPORT_BAD_WS_FRAME,
+    SUBSCREEN_TRANSPORT_BAD_SIZE,
+    SUBSCREEN_TRANSPORT_BAD_HEADER,
+    SUBSCREEN_TRANSPORT_BAD_CRC,
+    SUBSCREEN_TRANSPORT_NO_BUFFER,
     SUBSCREEN_TRANSPORT_FRAME_REJECTED,
     SUBSCREEN_TRANSPORT_FRAME_FAILED,
 } subscreen_transport_status_t;
@@ -39,7 +48,8 @@ esp_err_t subscreen_display_set_transport_status(subscreen_display_t *display,
                                                  subscreen_transport_status_t status);
 esp_err_t subscreen_display_set_network_status(subscreen_display_t *display,
                                                subscreen_network_status_t status,
-                                               const char *ipv4_address);
+                                               const char *ipv4_address,
+                                               const char *pairing_token);
 bool subscreen_display_supports_frame_size(const subscreen_display_t *display,
                                            uint16_t width,
                                            uint16_t height);

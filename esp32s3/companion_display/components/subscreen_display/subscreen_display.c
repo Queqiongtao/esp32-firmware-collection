@@ -26,6 +26,7 @@ static const char *TAG = "subscreen_display";
 #define COLOR_ACCENT 0xFBE0
 #define COLOR_TRACK 0x39E7
 #define COLOR_CARD 0x2945
+#define COLOR_DARK 0x0000
 #define COLOR_TEXT 0xFFFF
 #define COLOR_SUCCESS 0x07E0
 #define COLOR_WARNING 0xFBE0
@@ -45,6 +46,7 @@ struct subscreen_display {
     subscreen_transport_status_t transport_status;
     subscreen_network_status_t network_status;
     char network_ipv4[16];
+    char pairing_token[7];
     bool has_frame;
 };
 
@@ -195,6 +197,10 @@ static void draw_network_status(uint16_t *pixels, int width, int height,
     case SUBSCREEN_NETWORK_CONNECTED:
         draw_centered_text(pixels, width, height, 150, 3, "WIFI CONNECTED", COLOR_SUCCESS);
         draw_centered_text(pixels, width, height, 222, 4, display->network_ipv4, COLOR_TEXT);
+        if (strlen(display->pairing_token) == 6) {
+            draw_centered_text(pixels, width, height, 292, 2, "PAIRING CODE", COLOR_ACCENT);
+            draw_centered_text(pixels, width, height, 328, 6, display->pairing_token, COLOR_TEXT);
+        }
         break;
     case SUBSCREEN_NETWORK_CONNECTING:
         draw_centered_text(pixels, width, height, 160, 3, "WIFI CONNECTING", COLOR_WARNING);
@@ -212,10 +218,20 @@ static void draw_network_status(uint16_t *pixels, int width, int height,
 static uint16_t transport_status_color(subscreen_transport_status_t status)
 {
     switch (status) {
+    case SUBSCREEN_TRANSPORT_HTTP_STATUS_CHECK:
+        return COLOR_WARNING;
+    case SUBSCREEN_TRANSPORT_WS_CONNECTED:
     case SUBSCREEN_TRANSPORT_WAITING_FRAME:
         return COLOR_HEADER;
     case SUBSCREEN_TRANSPORT_RECEIVING_FRAME:
-        return 0x07E0;
+        return COLOR_SUCCESS;
+    case SUBSCREEN_TRANSPORT_BAD_PAIRING_CODE:
+    case SUBSCREEN_TRANSPORT_DEVICE_BUSY:
+    case SUBSCREEN_TRANSPORT_BAD_WS_FRAME:
+    case SUBSCREEN_TRANSPORT_BAD_SIZE:
+    case SUBSCREEN_TRANSPORT_BAD_HEADER:
+    case SUBSCREEN_TRANSPORT_BAD_CRC:
+    case SUBSCREEN_TRANSPORT_NO_BUFFER:
     case SUBSCREEN_TRANSPORT_FRAME_REJECTED:
         return 0xF800;
     case SUBSCREEN_TRANSPORT_FRAME_FAILED:
@@ -223,6 +239,41 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
     case SUBSCREEN_TRANSPORT_READY:
     default:
         return COLOR_ACCENT;
+    }
+}
+
+static const char *transport_status_text(subscreen_transport_status_t status)
+{
+    switch (status) {
+    case SUBSCREEN_TRANSPORT_HTTP_STATUS_CHECK:
+        return "HTTP STATUS CHECK";
+    case SUBSCREEN_TRANSPORT_WS_CONNECTED:
+        return "WS CONNECTED";
+    case SUBSCREEN_TRANSPORT_WAITING_FRAME:
+        return "WAITING FIRST FRAME";
+    case SUBSCREEN_TRANSPORT_RECEIVING_FRAME:
+        return "RECEIVING FRAME";
+    case SUBSCREEN_TRANSPORT_BAD_PAIRING_CODE:
+        return "BAD PAIRING CODE";
+    case SUBSCREEN_TRANSPORT_DEVICE_BUSY:
+        return "DEVICE BUSY";
+    case SUBSCREEN_TRANSPORT_BAD_WS_FRAME:
+        return "BAD WS FRAME";
+    case SUBSCREEN_TRANSPORT_BAD_SIZE:
+        return "BAD SIZE";
+    case SUBSCREEN_TRANSPORT_BAD_HEADER:
+        return "BAD HEADER";
+    case SUBSCREEN_TRANSPORT_BAD_CRC:
+        return "BAD CRC";
+    case SUBSCREEN_TRANSPORT_NO_BUFFER:
+        return "NO BUFFER";
+    case SUBSCREEN_TRANSPORT_FRAME_REJECTED:
+        return "FRAME REJECTED";
+    case SUBSCREEN_TRANSPORT_FRAME_FAILED:
+        return "FRAME DRAW FAILED";
+    case SUBSCREEN_TRANSPORT_READY:
+    default:
+        return "READY";
     }
 }
 
@@ -244,6 +295,9 @@ static esp_err_t draw_placeholder_locked(subscreen_display_t *display)
         }
     }
     draw_network_status(pixels, display->physical_width, display->physical_height, display);
+    draw_centered_text(pixels, display->physical_width, display->physical_height,
+                       display->physical_height - 20, 2,
+                       transport_status_text(display->transport_status), COLOR_DARK);
 
     for (int y = 0; y < display->physical_height; y += PLACEHOLDER_CHUNK_LINES) {
         const int y2 = (y + PLACEHOLDER_CHUNK_LINES < display->physical_height) ?
@@ -330,14 +384,19 @@ esp_err_t subscreen_display_set_transport_status(subscreen_display_t *display,
 
 esp_err_t subscreen_display_set_network_status(subscreen_display_t *display,
                                                subscreen_network_status_t status,
-                                               const char *ipv4_address)
+                                               const char *ipv4_address,
+                                               const char *pairing_token)
 {
     ESP_RETURN_ON_FALSE(display != NULL && display->lock != NULL, ESP_ERR_INVALID_STATE, TAG, "display not ready");
     xSemaphoreTake(display->lock, portMAX_DELAY);
     const char *ip = ipv4_address != NULL ? ipv4_address : "";
-    const bool changed = display->network_status != status || strcmp(display->network_ipv4, ip) != 0;
+    const char *token = pairing_token != NULL ? pairing_token : "";
+    const bool changed = display->network_status != status ||
+                         strcmp(display->network_ipv4, ip) != 0 ||
+                         strcmp(display->pairing_token, token) != 0;
     display->network_status = status;
     strlcpy(display->network_ipv4, ip, sizeof(display->network_ipv4));
+    strlcpy(display->pairing_token, token, sizeof(display->pairing_token));
     esp_err_t err = ESP_OK;
     if (changed && !display->has_frame) {
         err = draw_placeholder_locked(display);

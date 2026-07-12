@@ -79,20 +79,67 @@ companion_transport_t frame_pipeline_active_transport(void)
     return active;
 }
 
-esp_err_t frame_pipeline_submit(companion_transport_t source, const companion_frame_header_t *header,
-                                const uint8_t *payload)
+esp_err_t frame_pipeline_submit_result_to_esp_err(frame_pipeline_submit_result_t result)
 {
-    ESP_RETURN_ON_FALSE(header != NULL && payload != NULL, ESP_ERR_INVALID_ARG, TAG, "empty frame");
-    ESP_RETURN_ON_FALSE(frame_pipeline_acquire(source), ESP_ERR_INVALID_STATE, TAG, "transport busy");
-    ESP_RETURN_ON_FALSE(header->magic == COMPANION_FRAME_MAGIC && header->version == COMPANION_FRAME_VERSION &&
-                            header->format == COMPANION_FRAME_FORMAT_JPEG &&
-                            header->header_size == sizeof(*header) && header->payload_size > 0 &&
-                            header->payload_size <= FRAME_LIMIT,
-                        ESP_ERR_INVALID_ARG, TAG, "bad frame header");
-    ESP_RETURN_ON_FALSE(esp_crc32_le(UINT32_MAX, payload, header->payload_size) == header->crc32,
-                        ESP_ERR_INVALID_CRC, TAG, "bad frame CRC");
+    switch (result) {
+    case FRAME_PIPELINE_SUBMIT_OK:
+        return ESP_OK;
+    case FRAME_PIPELINE_SUBMIT_INVALID_ARG:
+    case FRAME_PIPELINE_SUBMIT_BAD_HEADER:
+        return ESP_ERR_INVALID_ARG;
+    case FRAME_PIPELINE_SUBMIT_BUSY:
+        return ESP_ERR_INVALID_STATE;
+    case FRAME_PIPELINE_SUBMIT_BAD_CRC:
+        return ESP_ERR_INVALID_CRC;
+    case FRAME_PIPELINE_SUBMIT_NO_BUFFER:
+    default:
+        return ESP_ERR_NO_MEM;
+    }
+}
+
+const char *frame_pipeline_submit_result_name(frame_pipeline_submit_result_t result)
+{
+    switch (result) {
+    case FRAME_PIPELINE_SUBMIT_OK:
+        return "ok";
+    case FRAME_PIPELINE_SUBMIT_INVALID_ARG:
+        return "invalid argument";
+    case FRAME_PIPELINE_SUBMIT_BUSY:
+        return "transport busy";
+    case FRAME_PIPELINE_SUBMIT_BAD_HEADER:
+        return "bad frame header";
+    case FRAME_PIPELINE_SUBMIT_BAD_CRC:
+        return "bad frame CRC";
+    case FRAME_PIPELINE_SUBMIT_NO_BUFFER:
+        return "no frame buffer";
+    default:
+        return "unknown submit result";
+    }
+}
+
+frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t source, const companion_frame_header_t *header,
+                                                     const uint8_t *payload)
+{
+    if (header == NULL || payload == NULL) {
+        ESP_LOGW(TAG, "empty frame");
+        return FRAME_PIPELINE_SUBMIT_INVALID_ARG;
+    }
+    if (!frame_pipeline_acquire(source)) {
+        ESP_LOGW(TAG, "transport busy");
+        return FRAME_PIPELINE_SUBMIT_BUSY;
+    }
+    if (header->magic != COMPANION_FRAME_MAGIC || header->version != COMPANION_FRAME_VERSION ||
+        header->format != COMPANION_FRAME_FORMAT_JPEG || header->header_size != sizeof(*header) ||
+        header->payload_size == 0 || header->payload_size > FRAME_LIMIT) {
+        ESP_LOGW(TAG, "bad frame header");
+        return FRAME_PIPELINE_SUBMIT_BAD_HEADER;
+    }
+    if (esp_crc32_le(0, payload, header->payload_size) != header->crc32) {
+        ESP_LOGW(TAG, "bad frame CRC");
+        return FRAME_PIPELINE_SUBMIT_BAD_CRC;
+    }
     frame_t *frame = NULL;
-    if (xQueueReceive(s_pipeline.empty, &frame, 0) != pdPASS) return ESP_ERR_NO_MEM;
+    if (xQueueReceive(s_pipeline.empty, &frame, 0) != pdPASS) return FRAME_PIPELINE_SUBMIT_NO_BUFFER;
     memcpy(frame->data, payload, header->payload_size);
     frame->length = header->payload_size;
     frame->width = header->width;
@@ -100,9 +147,9 @@ esp_err_t frame_pipeline_submit(companion_transport_t source, const companion_fr
     frame->received_us = esp_timer_get_time();
     if (xQueueSend(s_pipeline.filled, &frame, 0) != pdPASS) {
         return_frame(frame);
-        return ESP_ERR_NO_MEM;
+        return FRAME_PIPELINE_SUBMIT_NO_BUFFER;
     }
-    return ESP_OK;
+    return FRAME_PIPELINE_SUBMIT_OK;
 }
 
 esp_err_t frame_pipeline_init(subscreen_display_t *display)

@@ -1,0 +1,21 @@
+:root { color: #e7edf0; background: #13191d; font-family: Inter, system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 680px; }
+main { max-width: 900px; margin: 0 auto; padding: 28px; }
+h1 { margin: 0 0 24px; font-size: 26px; }
+h2 { margin: 0 0 16px; font-size: 17px; }
+section { border-top: 1px solid #344047; padding: 20px 0; }
+label { display: grid; gap: 6px; color: #aebbc2; font-size: 13px; }
+input, select, button { min-height: 36px; border: 1px solid #45525a; border-radius: 4px; background: #1d272d; color: inherit; padding: 7px 10px; font: inherit; }
+input:focus, select:focus { outline: 2px solid #42b7c9; outline-offset: 1px; }
+button { cursor: pointer; background: #176f7d; border-color: #2292a2; }
+button:disabled { cursor: default; opacity: .45; }
+section > label { max-width: 480px; margin-bottom: 12px; }
+.source-row, .region { display: flex; gap: 10px; align-items: end; }
+.source-row select { flex: 1; }
+.region { margin-top: 14px; }
+.region label { width: 100px; }
+p { color: #aebbc2; font-size: 13px; }
+#status { color: #6fe4a0; font-size: 15px; }
+#device-status { margin: 0; align-self: center; }
+#metrics { font-family: ui-monospace, monospace; }

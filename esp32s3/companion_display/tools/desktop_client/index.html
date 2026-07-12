@@ -1,1 +1,21 @@
-<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>Companion Display</title></head><body><main><h1>Companion Display</h1><section><h2>Wi-Fi</h2><input id="address" placeholder="ws://companion-display.local/stream"/><input id="token" placeholder="Pairing token"/><button id="wifi">Connect</button></section><section><h2>USB</h2><button id="usb">Refresh USB devices</button><p id="status">Disconnected</p></section><section><h2>Capture</h2><button id="source">Choose display, window, or region</button><button id="start">Start streaming</button></section></main><script type="module" src="/src/main.ts"></script></body></html>
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>Companion Display</title></head>
+<body><main>
+  <h1>Companion Display</h1>
+  <section><h2>Wi-Fi Device</h2>
+    <label>Device address<input id="endpoint" value="ws://192.168.4.1/stream"/></label>
+    <div class="source-row"><button id="check-device">Check device</button><p id="device-status">Device not checked</p></div>
+    <label>Pairing code<input id="token" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"/></label>
+  </section>
+  <section><h2>Capture Source</h2>
+    <div class="source-row"><select id="source"><option value="">Refresh sources first</option></select><button id="refresh">Refresh</button></div>
+    <div class="region"><label>X<input id="region-x" type="number" min="0" value="0"/></label><label>Y<input id="region-y" type="number" min="0" value="0"/></label><label>Width<input id="region-width" type="number" min="0" value="0"/></label><label>Height<input id="region-height" type="number" min="0" value="0"/></label></div>
+    <p>Select Static color bars to test the JPEG and Wi-Fi path without screen capture. Use zero width and height to send the complete selected source with black letterboxing.</p>
+  </section>
+  <section><h2>Stream</h2>
+    <label>FPS<input id="fps" type="number" min="1" max="30" value="30"/></label>
+    <label>JPEG quality<input id="quality" type="number" min="30" max="95" value="80"/></label>
+    <div class="source-row"><button id="start" disabled>Start Wi-Fi Stream</button><button id="stop" disabled>Stop</button></div>
+    <p id="status">Disconnected</p><p id="metrics"></p>
+  </section>
+</main><script type="module" src="/src/main.ts"></script></body></html>

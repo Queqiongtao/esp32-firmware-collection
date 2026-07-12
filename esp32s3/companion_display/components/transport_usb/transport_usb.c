@@ -47,8 +47,11 @@ static void process_bytes(const uint8_t *data, size_t size)
         memcpy(s_payload + s_payload_used, data, take);
         s_payload_used += take; data += take; size -= take;
         if (s_payload_used == s_header.payload_size) {
-            esp_err_t err = frame_pipeline_submit(COMPANION_TRANSPORT_USB, &s_header, s_payload);
-            if (err != ESP_OK) ESP_LOGW(TAG, "drop USB frame: %s", esp_err_to_name(err));
+            frame_pipeline_submit_result_t result = frame_pipeline_submit(COMPANION_TRANSPORT_USB, &s_header, s_payload);
+            if (result != FRAME_PIPELINE_SUBMIT_OK) {
+                ESP_LOGW(TAG, "drop USB frame: %s",
+                         esp_err_to_name(frame_pipeline_submit_result_to_esp_err(result)));
+            }
             reset_rx();
         }
     }
