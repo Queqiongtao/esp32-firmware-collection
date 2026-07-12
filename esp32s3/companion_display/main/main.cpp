@@ -4,7 +4,6 @@
 #include "esp_log.h"
 #include "frame_pipeline.h"
 #include "subscreen_display.h"
-#include "transport_usb.h"
 #include "transport_wifi.h"
 
 static const char *TAG = "companion_display";
@@ -22,6 +21,5 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(subscreen_display_init(&display));
     ESP_ERROR_CHECK(subscreen_display_show_placeholder(display));
     ESP_ERROR_CHECK(frame_pipeline_init(display));
-    ESP_ERROR_CHECK(transport_usb_init());
     ESP_ERROR_CHECK(transport_wifi_init(display));
 }

@@ -24,6 +24,15 @@ static struct {
     portMUX_TYPE lock;
 } s_pipeline = {.lock = portMUX_INITIALIZER_UNLOCKED};
 
+static const char *transport_name(companion_transport_t source)
+{
+    switch (source) {
+    case COMPANION_TRANSPORT_TCP_VIDEO: return "tcp";
+    case COMPANION_TRANSPORT_UDP_VIDEO: return "udp";
+    case COMPANION_TRANSPORT_NONE: default: return "none";
+    }
+}
+
 static void return_frame(frame_t *frame)
 {
     if (frame != NULL) xQueueSend(s_pipeline.empty, &frame, 0);
@@ -121,25 +130,31 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
                                                      const uint8_t *payload)
 {
     if (header == NULL || payload == NULL) {
-        ESP_LOGW(TAG, "empty frame");
+        ESP_LOGW(TAG, "empty frame: transport=%s", transport_name(source));
         return FRAME_PIPELINE_SUBMIT_INVALID_ARG;
     }
     if (!frame_pipeline_acquire(source)) {
-        ESP_LOGW(TAG, "transport busy");
+        ESP_LOGW(TAG, "transport busy: source=%s active=%s", transport_name(source), transport_name(frame_pipeline_active_transport()));
         return FRAME_PIPELINE_SUBMIT_BUSY;
     }
     if (header->magic != COMPANION_FRAME_MAGIC || header->version != COMPANION_FRAME_VERSION ||
         header->format != COMPANION_FRAME_FORMAT_JPEG || header->header_size != sizeof(*header) ||
         header->payload_size == 0 || header->payload_size > FRAME_LIMIT) {
-        ESP_LOGW(TAG, "bad frame header");
+        ESP_LOGW(TAG, "bad frame header: transport=%s seq=%lu magic=%08lx version=%u format=%u payload=%lu",
+                 transport_name(source), (unsigned long)header->sequence, (unsigned long)header->magic,
+                 header->version, header->format, (unsigned long)header->payload_size);
         return FRAME_PIPELINE_SUBMIT_BAD_HEADER;
     }
     if (esp_crc32_le(0, payload, header->payload_size) != header->crc32) {
-        ESP_LOGW(TAG, "bad frame CRC");
+        ESP_LOGW(TAG, "bad frame CRC: transport=%s seq=%lu payload=%lu", transport_name(source),
+                 (unsigned long)header->sequence, (unsigned long)header->payload_size);
         return FRAME_PIPELINE_SUBMIT_BAD_CRC;
     }
     frame_t *frame = NULL;
-    if (xQueueReceive(s_pipeline.empty, &frame, 0) != pdPASS) return FRAME_PIPELINE_SUBMIT_NO_BUFFER;
+    if (xQueueReceive(s_pipeline.empty, &frame, 0) != pdPASS) {
+        ESP_LOGW(TAG, "no frame buffer: transport=%s seq=%lu", transport_name(source), (unsigned long)header->sequence);
+        return FRAME_PIPELINE_SUBMIT_NO_BUFFER;
+    }
     memcpy(frame->data, payload, header->payload_size);
     frame->length = header->payload_size;
     frame->width = header->width;
@@ -147,6 +162,7 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
     frame->received_us = esp_timer_get_time();
     if (xQueueSend(s_pipeline.filled, &frame, 0) != pdPASS) {
         return_frame(frame);
+        ESP_LOGW(TAG, "frame queue full: transport=%s seq=%lu", transport_name(source), (unsigned long)header->sequence);
         return FRAME_PIPELINE_SUBMIT_NO_BUFFER;
     }
     return FRAME_PIPELINE_SUBMIT_OK;

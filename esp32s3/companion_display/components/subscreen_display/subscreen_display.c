@@ -222,6 +222,9 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
         return COLOR_WARNING;
     case SUBSCREEN_TRANSPORT_WS_CONNECTED:
     case SUBSCREEN_TRANSPORT_WAITING_FRAME:
+    case SUBSCREEN_TRANSPORT_NEGOTIATING:
+    case SUBSCREEN_TRANSPORT_TCP_VIDEO:
+    case SUBSCREEN_TRANSPORT_UDP_VIDEO:
         return COLOR_HEADER;
     case SUBSCREEN_TRANSPORT_RECEIVING_FRAME:
         return COLOR_SUCCESS;
@@ -233,6 +236,9 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
     case SUBSCREEN_TRANSPORT_BAD_CRC:
     case SUBSCREEN_TRANSPORT_NO_BUFFER:
     case SUBSCREEN_TRANSPORT_FRAME_REJECTED:
+    case SUBSCREEN_TRANSPORT_UDP_DROPPED:
+    case SUBSCREEN_TRANSPORT_UDP_REJECTED:
+    case SUBSCREEN_TRANSPORT_SESSION_EXPIRED:
         return 0xF800;
     case SUBSCREEN_TRANSPORT_FRAME_FAILED:
         return 0xF81F;
@@ -249,6 +255,12 @@ static const char *transport_status_text(subscreen_transport_status_t status)
         return "HTTP STATUS CHECK";
     case SUBSCREEN_TRANSPORT_WS_CONNECTED:
         return "WS CONNECTED";
+    case SUBSCREEN_TRANSPORT_NEGOTIATING:
+        return "NEGOTIATING";
+    case SUBSCREEN_TRANSPORT_TCP_VIDEO:
+        return "TCP VIDEO";
+    case SUBSCREEN_TRANSPORT_UDP_VIDEO:
+        return "UDP VIDEO";
     case SUBSCREEN_TRANSPORT_WAITING_FRAME:
         return "WAITING FIRST FRAME";
     case SUBSCREEN_TRANSPORT_RECEIVING_FRAME:
@@ -271,6 +283,12 @@ static const char *transport_status_text(subscreen_transport_status_t status)
         return "FRAME REJECTED";
     case SUBSCREEN_TRANSPORT_FRAME_FAILED:
         return "FRAME DRAW FAILED";
+    case SUBSCREEN_TRANSPORT_UDP_DROPPED:
+        return "UDP FRAME DROPPED";
+    case SUBSCREEN_TRANSPORT_UDP_REJECTED:
+        return "UDP REJECTED";
+    case SUBSCREEN_TRANSPORT_SESSION_EXPIRED:
+        return "SESSION EXPIRED";
     case SUBSCREEN_TRANSPORT_READY:
     default:
         return "READY";

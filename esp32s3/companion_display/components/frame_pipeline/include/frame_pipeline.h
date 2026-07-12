@@ -13,8 +13,8 @@ struct subscreen_display;
 
 typedef enum {
     COMPANION_TRANSPORT_NONE,
-    COMPANION_TRANSPORT_USB,
-    COMPANION_TRANSPORT_WIFI,
+    COMPANION_TRANSPORT_TCP_VIDEO,
+    COMPANION_TRANSPORT_UDP_VIDEO,
 } companion_transport_t;
 
 typedef struct __attribute__((packed)) {

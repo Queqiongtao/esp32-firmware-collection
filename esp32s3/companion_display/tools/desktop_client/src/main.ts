@@ -3,8 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import "./style.css";
 
 type CaptureSource = { id: string; kind: string; label: string; width: number; height: number };
-type StreamEvent = { state: string; detail: string; fps: number; jpegBytes: number; droppedFrames: number };
-type DeviceStatus = { name: string; width: number; height: number; wifi: string; ipv4: string; activeTransport: string; tokenSet: boolean };
+type StreamEvent = { state: string; detail: string; fps: number; jpegBytes: number; droppedFrames: number; videoTransport: string };
+type UdpDiagnostics = { rxPackets: number; acceptedFragments: number; rejectedPackets: number; completedFrames: number; submittedFrames: number; submitFailures: number; reassemblyTimeouts: number; lastReject: string };
+type DeviceStatus = { name: string; width: number; height: number; wifi: string; ipv4: string; activeTransport: string; tokenSet: boolean; protocolVersion: number; videoTransports: string[]; droppedFrames: number; udp: UdpDiagnostics };
 
 const byId = <T extends HTMLElement>(id: string) => document.querySelector<T>(`#${id}`)!;
 
@@ -33,6 +34,7 @@ const regionWidth = byId<HTMLInputElement>("region-width");
 const regionHeight = byId<HTMLInputElement>("region-height");
 const fps = byId<HTMLInputElement>("fps");
 const quality = byId<HTMLInputElement>("quality");
+const videoTransport = byId<HTMLSelectElement>("video-transport");
 
 const sourcesById = new Map<string, CaptureSource>();
 let lastDevice: DeviceStatus | null = null;
@@ -74,6 +76,8 @@ function validationMessage() {
   if (!normalizeEndpoint(endpoint.value)) return "Enter the device address";
   if (token.value.length !== 6) return "Enter the 6-digit pairing code";
   if (!source.value) return "Choose a capture source";
+  if (lastDevice && lastDevice.protocolVersion !== 1) return "Flash firmware with control protocol v1";
+  if (lastDevice?.videoTransports?.length && !lastDevice.videoTransports.includes(videoTransport.value)) return `Device does not support ${videoTransport.value.toUpperCase()} video`;
   if (lastDevice?.wifi && lastDevice.wifi !== "connected") return "Device Wi-Fi is not connected";
   if (lastDevice?.activeTransport && lastDevice.activeTransport !== "none") return `Device is busy with ${lastDevice.activeTransport}`;
   return "";
@@ -111,7 +115,12 @@ function applyDevice(device: DeviceStatus) {
   deviceStatus.textContent = device.ipv4 ? `Online at ${device.ipv4}` : "Online, no IP reported";
   deviceWifi.textContent = device.wifi;
   deviceScreen.textContent = `${device.width}x${device.height}`;
-  deviceTransport.textContent = device.activeTransport;
+  const udp = device.udp;
+  deviceTransport.textContent = device.activeTransport === "udp"
+    ? `udp | rx ${udp.rxPackets} | accepted ${udp.acceptedFragments} | rejected ${udp.rejectedPackets} (${udp.lastReject}) | frames ${udp.submittedFrames}`
+    : device.activeTransport;
+  for (const option of videoTransport.options) option.disabled = !device.videoTransports.includes(option.value);
+  if (videoTransport.selectedOptions[0]?.disabled) videoTransport.value = "tcp";
   updateReadyState();
 }
 
@@ -123,7 +132,7 @@ function applyStreamStatus(payload: StreamEvent) {
   streamActive = !failed && !stopped;
   setPill(streamPill, stopped ? "Stopped" : payload.state, failed ? "bad" : streamActive ? "active" : "muted");
   setStatus(`${payload.state}: ${payload.detail}`, failed ? "bad" : stopped ? "normal" : "good");
-  metrics.textContent = `FPS ${payload.fps} | JPEG ${payload.jpegBytes} bytes | Dropped ${payload.droppedFrames}`;
+  metrics.textContent = `${payload.videoTransport.toUpperCase()} | FPS ${payload.fps} | JPEG ${payload.jpegBytes} bytes | Dropped ${payload.droppedFrames}`;
   updateReadyState();
 }
 
@@ -135,6 +144,11 @@ async function probeDevice() {
   if (device.activeTransport !== "none") throw new Error(`Device is busy with ${device.activeTransport} transport`);
   if (device.wifi !== "connected") throw new Error("Device Wi-Fi is not connected");
   return device;
+}
+
+async function refreshDeviceDiagnostics() {
+  const device = await invoke<DeviceStatus>("probe_wifi_device", { endpoint: normalizeEndpoint(endpoint.value) });
+  applyDevice(device);
 }
 
 async function refreshSources() {
@@ -216,6 +230,7 @@ start.onclick = async () => {
         regionHeight: cropEnabled.checked ? Number(regionHeight.value) : 0,
         fps: Number(fps.value),
         jpegQuality: Number(quality.value),
+        videoTransport: videoTransport.value,
       },
     });
   } catch (error) {
@@ -252,7 +267,7 @@ source.addEventListener("change", updateSourceSummary);
 cropEnabled.addEventListener("change", () => {
   cropFields.hidden = !cropEnabled.checked;
 });
-for (const input of [fps, quality, regionX, regionY, regionWidth, regionHeight]) {
+for (const input of [fps, quality, regionX, regionY, regionWidth, regionHeight, videoTransport]) {
   input.addEventListener("input", updateReadyState);
 }
 
@@ -264,6 +279,7 @@ async function initialize() {
   await refreshSources();
   window.setInterval(() => {
     invoke<StreamEvent>("get_stream_status").then(applyStreamStatus).catch(() => undefined);
+    if (streamActive) refreshDeviceDiagnostics().catch(() => undefined);
   }, 300);
   updateReadyState();
 }
