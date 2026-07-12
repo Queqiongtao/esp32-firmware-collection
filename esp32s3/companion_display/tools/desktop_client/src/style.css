@@ -179,7 +179,9 @@ h2 {
   color: #405164;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
-  white-space: nowrap;
+  max-width: 100%;
+  text-align: right;
+  white-space: normal;
 }
 
 .workspace {

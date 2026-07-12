@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tungstenite::{client, Error as WebSocketError, HandshakeError, Message, WebSocket};
+#[cfg(not(target_os = "linux"))]
 use xcap::{Monitor, Window};
 
 #[derive(Clone, Serialize)]
@@ -51,6 +52,10 @@ struct StreamEvent {
     jpeg_bytes: usize,
     dropped_frames: u32,
     video_transport: String,
+    capture_encode_ms: u32,
+    capture_wait_ms: u32,
+    device_ms: u32,
+    device_replaced_frames: u32,
 }
 
 impl Default for StreamEvent {
@@ -62,6 +67,10 @@ impl Default for StreamEvent {
             jpeg_bytes: 0,
             dropped_frames: 0,
             video_transport: "none".into(),
+            capture_encode_ms: 0,
+            capture_wait_ms: 0,
+            device_ms: 0,
+            device_replaced_frames: 0,
         }
     }
 }
@@ -85,6 +94,8 @@ struct DeviceStatus {
     dropped_frames: u32,
     #[serde(default)]
     udp: UdpDiagnostics,
+    #[serde(default)]
+    performance: DevicePerformance,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -98,6 +109,18 @@ struct UdpDiagnostics {
     submit_failures: u32,
     reassembly_timeouts: u32,
     last_reject: String,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicePerformance {
+    sequence: u32,
+    queue_wait_us: u32,
+    jpeg_decode_us: u32,
+    lcd_wait_us: u32,
+    lcd_submit_us: u32,
+    previous_dma_us: u32,
+    replaced_frames: u32,
 }
 
 #[derive(Deserialize)]
@@ -120,6 +143,19 @@ struct ControlReply {
     udp: Option<UdpParameters>,
 }
 
+#[derive(Deserialize)]
+struct FramePresented {
+    #[serde(rename = "type")]
+    kind: String,
+    sequence: u32,
+    queue_wait_us: u32,
+    jpeg_decode_us: u32,
+    lcd_wait_us: u32,
+    lcd_submit_us: u32,
+    previous_dma_us: u32,
+    replaced_frames: u32,
+}
+
 enum VideoSender {
     Tcp,
     Udp {
@@ -138,15 +174,49 @@ struct StreamState {
 
 enum CaptureSession {
     StaticColorBars(DynamicImage),
-    Xcap(String),
     #[cfg(target_os = "linux")]
-    PipeWire(std::sync::mpsc::Receiver<Result<DynamicImage, String>>),
+    PipeWire(Arc<wayland_capture::LatestFrame>),
+    #[cfg(not(target_os = "linux"))]
+    Monitor(Monitor),
+    #[cfg(not(target_os = "linux"))]
+    Window(Mutex<Window>),
 }
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTROL_PROTOCOL_VERSION: u8 = 1;
+const CONTROL_PROTOCOL_VERSION: u8 = 2;
 const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
+const UDP_FRAGMENT_SPACING: Duration = Duration::from_millis(1);
+const UDP_FRAME_SEND_LIMIT: Duration = Duration::from_millis(120);
+const STATIC_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+const CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
+const CONTROL_HEARTBEAT_MISSES: u8 = 3;
+const CONTROL_RECONNECT_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(5),
+    Duration::from_secs(5),
+];
 
+struct UdpControlHeartbeat {
+    next_ping: Instant,
+    pending_request_id: Option<String>,
+    misses: u8,
+    sequence: u32,
+}
+
+impl UdpControlHeartbeat {
+    fn new() -> Self {
+        Self {
+            next_ping: Instant::now() + CONTROL_HEARTBEAT_INTERVAL,
+            pending_request_id: None,
+            misses: 0,
+            sequence: 0,
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
 fn xcap_error(error: impl std::fmt::Display) -> String {
     format!("capture error: {error}")
 }
@@ -160,39 +230,42 @@ fn list_capture_sources_impl() -> Result<Vec<CaptureSourceInfo>, String> {
         height: u32::from(protocol::HEIGHT),
     }];
     #[cfg(target_os = "linux")]
-    if wayland_session() {
+    {
         sources.push(CaptureSourceInfo {
-            id: "wayland:portal".into(),
-            kind: "wayland".into(),
+            id: "linux:portal".into(),
+            kind: "portal".into(),
             label: "Choose in system dialog".into(),
             width: 0,
             height: 0,
         });
         return Ok(sources);
     }
-    for (index, monitor) in Monitor::all().map_err(xcap_error)?.into_iter().enumerate() {
-        sources.push(CaptureSourceInfo {
-            id: format!("monitor:{index}"),
-            kind: "monitor".into(),
-            label: monitor.name().to_owned(),
-            width: monitor.width(),
-            height: monitor.height(),
-        });
-    }
-    for (index, window) in Window::all().map_err(xcap_error)?.into_iter().enumerate() {
-        let title = window.title().to_owned();
-        if title.trim().is_empty() {
-            continue;
+    #[cfg(not(target_os = "linux"))]
+    {
+        for (index, monitor) in Monitor::all().map_err(xcap_error)?.into_iter().enumerate() {
+            sources.push(CaptureSourceInfo {
+                id: format!("monitor:{index}"),
+                kind: "monitor".into(),
+                label: monitor.name().to_owned(),
+                width: monitor.width(),
+                height: monitor.height(),
+            });
         }
-        sources.push(CaptureSourceInfo {
-            id: format!("window:{index}"),
-            kind: "window".into(),
-            label: title,
-            width: window.width(),
-            height: window.height(),
-        });
+        for (index, window) in Window::all().map_err(xcap_error)?.into_iter().enumerate() {
+            let title = window.title().to_owned();
+            if title.trim().is_empty() {
+                continue;
+            }
+            sources.push(CaptureSourceInfo {
+                id: format!("window:{index}"),
+                kind: "window".into(),
+                label: title,
+                width: window.width(),
+                height: window.height(),
+            });
+        }
+        Ok(sources)
     }
-    Ok(sources)
 }
 
 fn static_color_bars() -> DynamicImage {
@@ -214,7 +287,8 @@ fn static_color_bars() -> DynamicImage {
     DynamicImage::ImageRgb8(image)
 }
 
-fn capture_source(source_id: &str) -> Result<DynamicImage, String> {
+#[cfg(not(target_os = "linux"))]
+fn open_xcap_source(source_id: &str) -> Result<CaptureSession, String> {
     let (kind, index) = source_id
         .split_once(':')
         .ok_or_else(|| "invalid capture source".to_string())?;
@@ -228,9 +302,7 @@ fn capture_source(source_id: &str) -> Result<DynamicImage, String> {
                 .into_iter()
                 .nth(index)
                 .ok_or_else(|| "selected monitor is no longer available".to_string())?;
-            Ok(DynamicImage::ImageRgba8(
-                monitor.capture_image().map_err(xcap_error)?,
-            ))
+            Ok(CaptureSession::Monitor(monitor))
         }
         "window" => {
             let window = Window::all()
@@ -238,9 +310,7 @@ fn capture_source(source_id: &str) -> Result<DynamicImage, String> {
                 .into_iter()
                 .nth(index)
                 .ok_or_else(|| "selected window is no longer available".to_string())?;
-            Ok(DynamicImage::ImageRgba8(
-                window.capture_image().map_err(xcap_error)?,
-            ))
+            Ok(CaptureSession::Window(Mutex::new(window)))
         }
         _ => Err("unsupported capture source".to_string()),
     }
@@ -317,9 +387,27 @@ fn build_frame(
     Ok((protocol::encode_frame(sequence, &jpeg)?, jpeg_bytes))
 }
 
-fn wayland_session() -> bool {
-    std::env::var_os("XDG_SESSION_TYPE").is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
-        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+fn build_prepared_frame(
+    image: DynamicImage,
+    jpeg_quality: u8,
+    sequence: u32,
+) -> Result<(Vec<u8>, usize), String> {
+    let jpeg = encode_jpeg(&image, jpeg_quality)?;
+    let jpeg_bytes = jpeg.len();
+    Ok((protocol::encode_frame(sequence, &jpeg)?, jpeg_bytes))
+}
+
+fn build_capture_frame(
+    image: DynamicImage,
+    session: &CaptureSession,
+    config: &StreamConfig,
+    sequence: u32,
+) -> Result<(Vec<u8>, usize), String> {
+    #[cfg(target_os = "linux")]
+    if matches!(session, CaptureSession::PipeWire(_)) {
+        return build_prepared_frame(image, config.jpeg_quality, sequence);
+    }
+    build_frame(image, config, sequence)
 }
 
 fn open_capture_session(
@@ -331,9 +419,9 @@ fn open_capture_session(
         return Ok(CaptureSession::StaticColorBars(static_color_bars()));
     }
     #[cfg(target_os = "linux")]
-    if wayland_session() {
-        if config.source_id != "wayland:portal" {
-            return Err("refresh capture sources and choose the Wayland portal source".to_string());
+    {
+        if config.source_id != "linux:portal" {
+            return Err("refresh capture sources and choose the Linux portal source".to_string());
         }
         emit(
             app,
@@ -356,23 +444,68 @@ fn open_capture_session(
             &config.video_transport,
         );
         return Ok(CaptureSession::PipeWire(wayland_capture::start(
-            node_id, fd, stop,
+            node_id,
+            fd,
+            stop,
+            config.fps.clamp(1, 30),
+            wayland_capture::CaptureTransform {
+                region_x: config.region_x,
+                region_y: config.region_y,
+                region_width: config.region_width,
+                region_height: config.region_height,
+                target_width: u32::from(protocol::WIDTH),
+                target_height: u32::from(protocol::HEIGHT),
+            },
         )));
     }
-    Ok(CaptureSession::Xcap(config.source_id.clone()))
+    #[cfg(not(target_os = "linux"))]
+    open_xcap_source(&config.source_id)
 }
 
 fn capture_next(session: &CaptureSession) -> Result<DynamicImage, String> {
     match session {
         CaptureSession::StaticColorBars(image) => Ok(image.clone()),
-        CaptureSession::Xcap(source_id) => capture_source(source_id),
         #[cfg(target_os = "linux")]
-        CaptureSession::PipeWire(receiver) => match receiver.recv_timeout(Duration::from_secs(10)) {
-            Ok(frame) => frame,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("PipeWire did not provide a frame within 10 seconds after screen sharing was approved".to_string()),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("PipeWire capture stopped before providing a frame".to_string()),
-        },
+        CaptureSession::PipeWire(receiver) => receiver.receive(Duration::from_secs(10)),
+        #[cfg(not(target_os = "linux"))]
+        CaptureSession::Monitor(monitor) => Ok(DynamicImage::ImageRgba8(
+            monitor.capture_image().map_err(xcap_error)?,
+        )),
+        #[cfg(not(target_os = "linux"))]
+        CaptureSession::Window(window) => {
+            let mut window = window
+                .lock()
+                .map_err(|_| "capture window lock failed".to_string())?;
+            window.refresh().map_err(xcap_error)?;
+            Ok(DynamicImage::ImageRgba8(
+                window.capture_image().map_err(xcap_error)?,
+            ))
+        }
     }
+}
+
+fn capture_next_optional(
+    session: &CaptureSession,
+    timeout: Duration,
+) -> Result<Option<DynamicImage>, String> {
+    match session {
+        #[cfg(target_os = "linux")]
+        CaptureSession::PipeWire(receiver) => receiver.receive_optional(timeout),
+        _ => capture_next(session).map(Some),
+    }
+}
+
+fn image_fingerprint(image: &DynamicImage) -> u32 {
+    crc32fast::hash(image.to_rgb8().as_raw())
+}
+
+fn replay_frame(frame: &[u8], sequence: u32) -> Result<Vec<u8>, String> {
+    if frame.len() < protocol::HEADER_LEN || &frame[..4] != b"CDP1" {
+        return Err("cached frame is invalid".to_string());
+    }
+    let mut replay = frame.to_vec();
+    replay[8..12].copy_from_slice(&sequence.to_le_bytes());
+    Ok(replay)
 }
 
 fn emit(
@@ -384,6 +517,34 @@ fn emit(
     dropped_frames: u32,
     video_transport: &str,
 ) {
+    emit_metrics(
+        app,
+        state,
+        detail,
+        fps,
+        jpeg_bytes,
+        dropped_frames,
+        video_transport,
+        0,
+        0,
+        0,
+        0,
+    );
+}
+
+fn emit_metrics(
+    app: &AppHandle,
+    state: &str,
+    detail: impl Into<String>,
+    fps: u8,
+    jpeg_bytes: usize,
+    dropped_frames: u32,
+    video_transport: &str,
+    capture_encode_ms: u32,
+    capture_wait_ms: u32,
+    device_ms: u32,
+    device_replaced_frames: u32,
+) {
     let event = StreamEvent {
         state: state.into(),
         detail: detail.into(),
@@ -391,11 +552,37 @@ fn emit(
         jpeg_bytes,
         dropped_frames,
         video_transport: video_transport.into(),
+        capture_encode_ms,
+        capture_wait_ms,
+        device_ms,
+        device_replaced_frames,
     };
     if let Ok(mut current) = app.state::<StreamState>().event.lock() {
         *current = event.clone();
     }
     let _ = app.emit("stream-status", event);
+}
+
+fn wait_for_presented(
+    socket: &mut WebSocket<TcpStream>,
+    sequence: u32,
+) -> Result<FramePresented, String> {
+    loop {
+        let message = socket
+            .read()
+            .map_err(|error| format!("Cannot receive device frame feedback: {error}"))?;
+        match message {
+            Message::Text(text) => {
+                if let Ok(feedback) = serde_json::from_str::<FramePresented>(&text) {
+                    if feedback.kind == "frame_presented" && feedback.sequence == sequence {
+                        return Ok(feedback);
+                    }
+                }
+            }
+            Message::Close(_) => return Err("Device closed the control connection".to_string()),
+            _ => {}
+        }
+    }
 }
 
 fn describe_websocket_error(error: WebSocketError) -> String {
@@ -454,6 +641,141 @@ fn connect_wifi(endpoint: &str) -> Result<WebSocket<TcpStream>, String> {
     ))
 }
 
+fn stream_endpoint(config: &StreamConfig) -> String {
+    format!(
+        "{}{}token={}",
+        config.endpoint.trim_end_matches('/'),
+        if config.endpoint.contains('?') {
+            "&"
+        } else {
+            "?"
+        },
+        config.token
+    )
+}
+
+fn configure_udp_control_socket(socket: &mut WebSocket<TcpStream>) -> Result<(), String> {
+    socket
+        .get_mut()
+        .set_nonblocking(true)
+        .map_err(|error| format!("Cannot configure UDP control socket: {error}"))
+}
+
+fn service_udp_control(
+    socket: &mut WebSocket<TcpStream>,
+    heartbeat: &mut UdpControlHeartbeat,
+) -> Result<(), String> {
+    loop {
+        match socket.read() {
+            Ok(Message::Text(text)) => {
+                let is_pending_pong =
+                    serde_json::from_str::<Value>(&text)
+                        .ok()
+                        .is_some_and(|message| {
+                            message.get("type").and_then(Value::as_str) == Some("pong")
+                                && heartbeat.pending_request_id.as_deref()
+                                    == message.get("request_id").and_then(Value::as_str)
+                        });
+                if is_pending_pong {
+                    heartbeat.pending_request_id = None;
+                    heartbeat.misses = 0;
+                }
+            }
+            Ok(Message::Ping(payload)) => socket
+                .send(Message::Pong(payload))
+                .map_err(|error| format!("Cannot respond to device heartbeat: {error}"))?,
+            Ok(Message::Close(_)) => return Err("Device closed the control connection".to_string()),
+            Ok(_) => {}
+            Err(WebSocketError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                break
+            }
+            Err(WebSocketError::ConnectionClosed) | Err(WebSocketError::AlreadyClosed) => {
+                return Err("Device closed the control connection".to_string());
+            }
+            Err(error) => return Err(format!("UDP control connection failed: {error}")),
+        }
+    }
+
+    let now = Instant::now();
+    if now < heartbeat.next_ping {
+        return Ok(());
+    }
+    if heartbeat.pending_request_id.take().is_some() {
+        heartbeat.misses += 1;
+        if heartbeat.misses >= CONTROL_HEARTBEAT_MISSES {
+            return Err("Control heartbeat timed out".to_string());
+        }
+    }
+    heartbeat.sequence = heartbeat.sequence.wrapping_add(1);
+    let request_id = format!("ping-{}", heartbeat.sequence);
+    socket
+        .send(Message::Text(
+            json!({"type": "ping", "request_id": request_id})
+                .to_string()
+                .into(),
+        ))
+        .map_err(|error| format!("Cannot send control heartbeat: {error}"))?;
+    heartbeat.pending_request_id = Some(format!("ping-{}", heartbeat.sequence));
+    heartbeat.next_ping = now + CONTROL_HEARTBEAT_INTERVAL;
+    Ok(())
+}
+
+fn reconnect_udp_control(
+    app: &AppHandle,
+    config: &StreamConfig,
+    stop: &AtomicBool,
+    reason: &str,
+    dropped_frames: u32,
+) -> Result<(WebSocket<TcpStream>, VideoSender), String> {
+    let endpoint = stream_endpoint(config);
+    let mut last_error = reason.to_string();
+    for (index, delay) in CONTROL_RECONNECT_DELAYS.iter().enumerate() {
+        emit(
+            app,
+            "reconnecting",
+            format!(
+                "Reconnecting control channel ({}/{})",
+                index + 1,
+                CONTROL_RECONNECT_DELAYS.len()
+            ),
+            0,
+            0,
+            dropped_frames,
+            "udp",
+        );
+        let deadline = Instant::now() + *delay;
+        while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        if stop.load(Ordering::Relaxed) {
+            return Err("Stream stopped".to_string());
+        }
+        match connect_wifi(&endpoint).and_then(|mut socket| {
+            let sender = negotiate_stream(&mut socket, "udp")?;
+            configure_udp_control_socket(&mut socket)?;
+            Ok((socket, sender))
+        }) {
+            Ok(connection) => {
+                emit(
+                    app,
+                    "streaming",
+                    "UDP control channel reconnected",
+                    0,
+                    0,
+                    dropped_frames,
+                    "udp",
+                );
+                return Ok(connection);
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!(
+        "Control reconnection failed after {} attempts: {last_error}",
+        CONTROL_RECONNECT_DELAYS.len()
+    ))
+}
+
 fn control_request(
     socket: &mut WebSocket<TcpStream>,
     request: Value,
@@ -491,7 +813,7 @@ fn negotiate_stream(
     let hello = control_request(
         socket,
         json!({
-            "type": "hello", "request_id": "hello-1", "protocol_version": 1,
+            "type": "hello", "request_id": "hello-1", "protocol_version": CONTROL_PROTOCOL_VERSION,
             "video_transport": requested_transport, "capabilities": {"touch": true, "audio_capture": true, "text_input": true}
         }),
         "hello-1",
@@ -507,8 +829,14 @@ fn negotiate_stream(
             return Err("Device provided an invalid UDP payload limit".to_string());
         }
         let control = socket.get_ref();
-        let local_ip = control.local_addr().map_err(|error| format!("Cannot read local control address: {error}"))?.ip();
-        let remote_ip = control.peer_addr().map_err(|error| format!("Cannot read device control address: {error}"))?.ip();
+        let local_ip = control
+            .local_addr()
+            .map_err(|error| format!("Cannot read local control address: {error}"))?
+            .ip();
+        let remote_ip = control
+            .peer_addr()
+            .map_err(|error| format!("Cannot read device control address: {error}"))?
+            .ip();
         let (IpAddr::V4(local_ip), IpAddr::V4(remote_ip)) = (local_ip, remote_ip) else {
             return Err("UDP video requires an IPv4 control connection".to_string());
         };
@@ -516,9 +844,19 @@ fn negotiate_stream(
             .map_err(|error| format!("Cannot create UDP socket: {error}"))?;
         udp.connect(SocketAddr::new(IpAddr::V4(remote_ip), parameters.port))
             .map_err(|error| format!("Cannot connect UDP socket: {error}"))?;
-        let udp_local = udp.local_addr().map_err(|error| format!("Cannot read UDP local address: {error}"))?;
-        let udp_remote = udp.peer_addr().map_err(|error| format!("Cannot read UDP remote address: {error}"))?;
-        eprintln!("UDP video route: TCP {} -> {}; UDP {} -> {}", control.local_addr().unwrap_or(udp_local), control.peer_addr().unwrap_or(udp_remote), udp_local, udp_remote);
+        let udp_local = udp
+            .local_addr()
+            .map_err(|error| format!("Cannot read UDP local address: {error}"))?;
+        let udp_remote = udp
+            .peer_addr()
+            .map_err(|error| format!("Cannot read UDP remote address: {error}"))?;
+        eprintln!(
+            "UDP video route: TCP {} -> {}; UDP {} -> {}",
+            control.local_addr().unwrap_or(udp_local),
+            control.peer_addr().unwrap_or(udp_remote),
+            udp_local,
+            udp_remote
+        );
         VideoSender::Udp {
             socket: udp,
             parameters,
@@ -655,19 +993,37 @@ fn send_video_frame(
             .map_err(|error| format!("WebSocket send failed: {error}")),
         VideoSender::Udp {
             socket: udp,
-        parameters, sent_packets, sent_bytes,
+            parameters,
+            sent_packets,
+            sent_bytes,
         } => {
-            for datagram in protocol::encode_udp_fragments(
+            let started = Instant::now();
+            let fragments = protocol::encode_udp_fragments(
                 &frame,
                 parameters.session_id,
                 parameters.session_token,
                 sequence,
                 parameters.max_payload,
-            )? {
-                let sent = udp.send(&datagram).map_err(|error| format!("UDP send failed: {error}"))?;
-                if sent != datagram.len() { return Err(format!("UDP send was truncated: {sent} of {} bytes", datagram.len())); }
+            )?;
+            let fragment_count = fragments.len();
+            for (index, datagram) in fragments.into_iter().enumerate() {
+                let sent = udp
+                    .send(&datagram)
+                    .map_err(|error| format!("UDP send failed: {error}"))?;
+                if sent != datagram.len() {
+                    return Err(format!(
+                        "UDP send was truncated: {sent} of {} bytes",
+                        datagram.len()
+                    ));
+                }
                 *sent_packets += 1;
                 *sent_bytes += sent as u64;
+                if index > 0 && started.elapsed() > UDP_FRAME_SEND_LIMIT {
+                    return Err("UDP frame exceeded the 120 ms send budget".to_string());
+                }
+                if index + 1 < fragment_count {
+                    thread::sleep(UDP_FRAGMENT_SPACING);
+                }
             }
             Ok(())
         }
@@ -676,7 +1032,11 @@ fn send_video_frame(
 
 fn udp_sender_stats(sender: &VideoSender) -> (u64, u64) {
     match sender {
-        VideoSender::Udp { sent_packets, sent_bytes, .. } => (*sent_packets, *sent_bytes),
+        VideoSender::Udp {
+            sent_packets,
+            sent_bytes,
+            ..
+        } => (*sent_packets, *sent_bytes),
         VideoSender::Tcp => (0, 0),
     }
 }
@@ -690,6 +1050,15 @@ fn run_stream(
 ) {
     let video_transport = config.video_transport.as_str();
     let frame_interval = Duration::from_millis(1000 / u64::from(config.fps.clamp(1, 30)));
+    let mut heartbeat = if matches!(sender, VideoSender::Udp { .. }) {
+        if let Err(error) = configure_udp_control_socket(&mut socket) {
+            emit(&app, "error", error, 0, 0, 0, video_transport);
+            return;
+        }
+        Some(UdpControlHeartbeat::new())
+    } else {
+        None
+    };
     let mut sequence = 0_u32;
     let mut dropped_frames = 0_u32;
     let capture = match open_capture_session(&app, &config, stop.clone()) {
@@ -708,22 +1077,43 @@ fn run_stream(
         0,
         video_transport,
     );
-    let (frame, jpeg_bytes) =
-        match capture_next(&capture).and_then(|image| build_frame(image, &config, sequence)) {
-            Ok(frame) => frame,
-            Err(error) => {
-                emit(
-                    &app,
-                    "error",
-                    format!("First screenshot failed: {error}"),
-                    0,
-                    0,
-                    0,
-                    video_transport,
-                );
-                return;
-            }
-        };
+    let capture_wait_started = Instant::now();
+    let image = match capture_next(&capture) {
+        Ok(image) => image,
+        Err(error) => {
+            emit(
+                &app,
+                "error",
+                format!("First screenshot failed: {error}"),
+                0,
+                0,
+                0,
+                video_transport,
+            );
+            return;
+        }
+    };
+    let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
+    let first_fingerprint = image_fingerprint(&image);
+    let encode_started = Instant::now();
+    let (frame, jpeg_bytes) = match build_capture_frame(image, &capture, &config, sequence) {
+        Ok(frame) => frame,
+        Err(error) => {
+            emit(
+                &app,
+                "error",
+                format!("First screenshot failed: {error}"),
+                0,
+                0,
+                0,
+                video_transport,
+            );
+            return;
+        }
+    };
+    let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
+    let mut cached_frame = frame.clone();
+    let mut last_fingerprint = first_fingerprint;
     emit(
         &app,
         "frame ready",
@@ -745,17 +1135,45 @@ fn run_stream(
         );
         return;
     }
+    let mut last_video_sent = Instant::now();
+    let mut static_frames = 0_u32;
+    let mut device_ms = 0;
+    let mut device_replaced_frames = 0;
+    if matches!(sender, VideoSender::Tcp) {
+        match wait_for_presented(&mut socket, sequence) {
+            Ok(feedback) => {
+                device_ms = (feedback.queue_wait_us
+                    + feedback.jpeg_decode_us
+                    + feedback.lcd_wait_us
+                    + feedback.lcd_submit_us)
+                    / 1000;
+                device_replaced_frames = feedback.replaced_frames;
+                eprintln!("Frame {} presented: queue={}us decode={}us lcd_wait={}us dma={}us previous_dma={}us", feedback.sequence, feedback.queue_wait_us, feedback.jpeg_decode_us, feedback.lcd_wait_us, feedback.lcd_submit_us, feedback.previous_dma_us);
+            }
+            Err(error) => {
+                emit(&app, "error", error, 0, jpeg_bytes, 0, video_transport);
+                return;
+            }
+        }
+    }
     sequence = sequence.wrapping_add(1);
     let (udp_packets, udp_bytes) = udp_sender_stats(&sender);
-    emit(
+    emit_metrics(
         &app,
         "snapshot sent",
-        if video_transport == "udp" { format!("First screenshot sent over UDP ({udp_packets} datagrams, {udp_bytes} bytes)") }
-        else { "First screenshot sent over TCP".to_string() },
+        if video_transport == "udp" {
+            format!("First screenshot sent over UDP ({udp_packets} datagrams, {udp_bytes} bytes)")
+        } else {
+            "First screenshot sent over TCP".to_string()
+        },
         0,
         jpeg_bytes,
         0,
         video_transport,
+        first_capture_encode_ms,
+        first_capture_wait_ms,
+        device_ms,
+        device_replaced_frames,
     );
     let mut next_frame = Instant::now() + frame_interval;
     while !stop.load(Ordering::Relaxed) {
@@ -764,24 +1182,118 @@ fn run_stream(
             thread::sleep(next_frame - now);
         }
         next_frame = Instant::now() + frame_interval;
-        let (frame, jpeg_bytes) =
-            match capture_next(&capture).and_then(|image| build_frame(image, &config, sequence)) {
-                Ok(frame) => frame,
-                Err(error) => {
-                    dropped_frames += 1;
-                    emit(
-                        &app,
-                        "dropping",
-                        error,
-                        0,
-                        0,
-                        dropped_frames,
-                        video_transport,
-                    );
+        if let Some(heartbeat) = heartbeat.as_mut() {
+            if let Err(reason) = service_udp_control(&mut socket, heartbeat) {
+                match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames) {
+                    Ok((new_socket, new_sender)) => {
+                        socket = new_socket;
+                        sender = new_sender;
+                        *heartbeat = UdpControlHeartbeat::new();
+                        last_video_sent = Instant::now() - STATIC_FRAME_INTERVAL;
+                        continue;
+                    }
+                    Err(error) => {
+                        emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
+                        break;
+                    }
+                }
+            }
+        }
+        let capture_wait_started = Instant::now();
+        let image = match capture_next_optional(&capture, frame_interval) {
+            Ok(image) => image,
+            Err(error) => {
+                dropped_frames += 1;
+                emit(
+                    &app,
+                    "dropping",
+                    error,
+                    0,
+                    0,
+                    dropped_frames,
+                    video_transport,
+                );
+                continue;
+            }
+        };
+        let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
+        let mut static_frame = image.is_none();
+        let encode_started = Instant::now();
+        let (frame, jpeg_bytes) = match image {
+            Some(image) if image_fingerprint(&image) != last_fingerprint => {
+                let fingerprint = image_fingerprint(&image);
+                match build_capture_frame(image, &capture, &config, sequence) {
+                    Ok(frame) => {
+                        cached_frame = frame.0.clone();
+                        last_fingerprint = fingerprint;
+                        static_frames = 0;
+                        frame
+                    }
+                    Err(error) => {
+                        dropped_frames += 1;
+                        emit(
+                            &app,
+                            "dropping",
+                            error,
+                            0,
+                            0,
+                            dropped_frames,
+                            video_transport,
+                        );
+                        continue;
+                    }
+                }
+            }
+            Some(_) => {
+                static_frame = true;
+                if last_video_sent.elapsed() < STATIC_FRAME_INTERVAL {
                     continue;
                 }
-            };
+                match replay_frame(&cached_frame, sequence) {
+                    Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN),
+                    Err(error) => {
+                        emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
+                        break;
+                    }
+                }
+            }
+            None => {
+                if last_video_sent.elapsed() < STATIC_FRAME_INTERVAL {
+                    continue;
+                }
+                match replay_frame(&cached_frame, sequence) {
+                    Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN),
+                    Err(error) => {
+                        emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
+                        break;
+                    }
+                }
+            }
+        };
         if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
+            if matches!(sender, VideoSender::Udp { .. }) {
+                match reconnect_udp_control(&app, &config, &stop, &error, dropped_frames) {
+                    Ok((new_socket, new_sender)) => {
+                        socket = new_socket;
+                        sender = new_sender;
+                        heartbeat = Some(UdpControlHeartbeat::new());
+                        last_video_sent = Instant::now() - STATIC_FRAME_INTERVAL;
+                        continue;
+                    }
+                    Err(reconnect_error) => {
+                        emit(
+                            &app,
+                            "error",
+                            reconnect_error,
+                            0,
+                            jpeg_bytes,
+                            dropped_frames,
+                            video_transport,
+                        );
+                        break;
+                    }
+                }
+            }
             emit(
                 &app,
                 "error",
@@ -793,17 +1305,59 @@ fn run_stream(
             );
             break;
         }
+        let capture_encode_ms = encode_started.elapsed().as_millis() as u32;
+        if matches!(sender, VideoSender::Tcp) {
+            match wait_for_presented(&mut socket, sequence) {
+                Ok(feedback) => {
+                    device_ms = (feedback.queue_wait_us
+                        + feedback.jpeg_decode_us
+                        + feedback.lcd_wait_us
+                        + feedback.lcd_submit_us)
+                        / 1000;
+                    device_replaced_frames = feedback.replaced_frames;
+                }
+                Err(error) => {
+                    emit_metrics(
+                        &app,
+                        "error",
+                        error,
+                        0,
+                        jpeg_bytes,
+                        dropped_frames,
+                        video_transport,
+                        capture_encode_ms,
+                        capture_wait_ms,
+                        device_ms,
+                        device_replaced_frames,
+                    );
+                    break;
+                }
+            }
+        }
+        last_video_sent = Instant::now();
+        if static_frame {
+            static_frames += 1;
+        }
         sequence = sequence.wrapping_add(1);
         let (udp_packets, udp_bytes) = udp_sender_stats(&sender);
-        emit(
+        emit_metrics(
             &app,
             "streaming",
-            if video_transport == "udp" { format!("Sending UDP video ({udp_packets} datagrams, {udp_bytes} bytes)") }
-            else { "Sending TCP video frames".to_string() },
+            if static_frame {
+                format!("Static 1 FPS ({static_frames} cached frames)")
+            } else if video_transport == "udp" {
+                format!("Sending UDP video ({udp_packets} datagrams, {udp_bytes} bytes)")
+            } else {
+                "Sending TCP video frames".to_string()
+            },
             config.fps.clamp(1, 30),
             jpeg_bytes,
             dropped_frames,
             video_transport,
+            capture_encode_ms,
+            capture_wait_ms,
+            device_ms,
+            device_replaced_frames,
         );
     }
     let _ = socket.send(Message::Text(
@@ -867,17 +1421,27 @@ fn start_wifi_stream(
             device.protocol_version, CONTROL_PROTOCOL_VERSION
         ));
     }
-    if !device.video_transports.iter().any(|transport| transport == &config.video_transport) {
-        return Err(format!("Device does not support {} video", config.video_transport.to_uppercase()));
+    if !device
+        .video_transports
+        .iter()
+        .any(|transport| transport == &config.video_transport)
+    {
+        return Err(format!(
+            "Device does not support {} video",
+            config.video_transport.to_uppercase()
+        ));
     }
     if device.wifi != "connected" {
         return Err("Device Wi-Fi is not connected".to_string());
     }
     if device.active_transport != "none" {
-        return Err(format!("Device is busy with {} transport", device.active_transport));
+        return Err(format!(
+            "Device is busy with {} transport",
+            device.active_transport
+        ));
     }
     let valid_source = config.source_id == STATIC_COLOR_BARS_ID
-        || config.source_id == "wayland:portal"
+        || config.source_id == "linux:portal"
         || config
             .source_id
             .split_once(':')
@@ -904,17 +1468,7 @@ fn start_wifi_stream(
         0,
         &config.video_transport,
     );
-    let endpoint = format!(
-        "{}{}token={}",
-        config.endpoint.trim_end_matches('/'),
-        if config.endpoint.contains('?') {
-            "&"
-        } else {
-            "?"
-        },
-        config.token
-    );
-    let mut socket = connect_wifi(&endpoint)?;
+    let mut socket = connect_wifi(&stream_endpoint(&config))?;
     emit(
         &app,
         "negotiating",
@@ -976,7 +1530,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_frame, parse_http_response, static_color_bars, StreamConfig};
+    use super::{build_frame, parse_http_response, replay_frame, static_color_bars, StreamConfig};
     use crate::protocol;
 
     fn test_config() -> StreamConfig {
@@ -1028,6 +1582,15 @@ mod tests {
             &frame[protocol::HEADER_LEN..protocol::HEADER_LEN + 2],
             [0xff, 0xd8]
         );
+    }
+
+    #[test]
+    fn replays_cached_frame_with_a_new_sequence() {
+        let frame = protocol::encode_frame(4, &[1, 2, 3, 4]).unwrap();
+        let replay = replay_frame(&frame, 9).unwrap();
+        assert_eq!(u32::from_le_bytes(replay[8..12].try_into().unwrap()), 9);
+        assert_eq!(&replay[..8], &frame[..8]);
+        assert_eq!(&replay[12..], &frame[12..]);
     }
 
     #[test]

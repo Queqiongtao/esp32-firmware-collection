@@ -3,9 +3,10 @@ import { listen } from "@tauri-apps/api/event";
 import "./style.css";
 
 type CaptureSource = { id: string; kind: string; label: string; width: number; height: number };
-type StreamEvent = { state: string; detail: string; fps: number; jpegBytes: number; droppedFrames: number; videoTransport: string };
+type StreamEvent = { state: string; detail: string; fps: number; jpegBytes: number; droppedFrames: number; videoTransport: string; captureEncodeMs: number; captureWaitMs: number; deviceMs: number; deviceReplacedFrames: number };
 type UdpDiagnostics = { rxPackets: number; acceptedFragments: number; rejectedPackets: number; completedFrames: number; submittedFrames: number; submitFailures: number; reassemblyTimeouts: number; lastReject: string };
-type DeviceStatus = { name: string; width: number; height: number; wifi: string; ipv4: string; activeTransport: string; tokenSet: boolean; protocolVersion: number; videoTransports: string[]; droppedFrames: number; udp: UdpDiagnostics };
+type Performance = { sequence: number; queueWaitUs: number; jpegDecodeUs: number; lcdWaitUs: number; lcdSubmitUs: number; previousDmaUs: number; replacedFrames: number };
+type DeviceStatus = { name: string; width: number; height: number; wifi: string; ipv4: string; activeTransport: string; tokenSet: boolean; protocolVersion: number; videoTransports: string[]; droppedFrames: number; performance: Performance; udp: UdpDiagnostics };
 
 const byId = <T extends HTMLElement>(id: string) => document.querySelector<T>(`#${id}`)!;
 
@@ -68,7 +69,7 @@ function selectedSource() {
 
 function sourceLabel(item: CaptureSource) {
   const size = item.width > 0 && item.height > 0 ? `${item.width}x${item.height}` : "system dialog";
-  const kind = item.kind === "test" ? "Test" : item.kind === "wayland" ? "Wayland" : item.kind;
+  const kind = item.kind === "test" ? "Test" : item.kind === "portal" ? "Portal" : item.kind;
   return `${kind}: ${item.label} (${size})`;
 }
 
@@ -76,7 +77,7 @@ function validationMessage() {
   if (!normalizeEndpoint(endpoint.value)) return "Enter the device address";
   if (token.value.length !== 6) return "Enter the 6-digit pairing code";
   if (!source.value) return "Choose a capture source";
-  if (lastDevice && lastDevice.protocolVersion !== 1) return "Flash firmware with control protocol v1";
+  if (lastDevice && lastDevice.protocolVersion !== 2) return "Flash firmware with low-latency control protocol v2";
   if (lastDevice?.videoTransports?.length && !lastDevice.videoTransports.includes(videoTransport.value)) return `Device does not support ${videoTransport.value.toUpperCase()} video`;
   if (lastDevice?.wifi && lastDevice.wifi !== "connected") return "Device Wi-Fi is not connected";
   if (lastDevice?.activeTransport && lastDevice.activeTransport !== "none") return `Device is busy with ${lastDevice.activeTransport}`;
@@ -100,7 +101,7 @@ function updateSourceSummary() {
   }
   if (item.id === "test:color-bars") {
     sourceSummary.textContent = "Static color bars test the JPEG and Wi-Fi path without screen capture.";
-  } else if (item.id === "wayland:portal") {
+  } else if (item.id === "linux:portal") {
     sourceSummary.textContent = "The system dialog will ask which screen or window to share.";
   } else {
     sourceSummary.textContent = `Selected ${item.kind} source, ${item.width}x${item.height}.`;
@@ -118,7 +119,7 @@ function applyDevice(device: DeviceStatus) {
   const udp = device.udp;
   deviceTransport.textContent = device.activeTransport === "udp"
     ? `udp | rx ${udp.rxPackets} | accepted ${udp.acceptedFragments} | rejected ${udp.rejectedPackets} (${udp.lastReject}) | frames ${udp.submittedFrames}`
-    : device.activeTransport;
+    : `${device.activeTransport} | device ${Math.round((device.performance.queueWaitUs + device.performance.jpegDecodeUs + device.performance.lcdWaitUs + device.performance.lcdSubmitUs) / 1000)} ms | replaced ${device.performance.replacedFrames}`;
   for (const option of videoTransport.options) option.disabled = !device.videoTransports.includes(option.value);
   if (videoTransport.selectedOptions[0]?.disabled) videoTransport.value = "tcp";
   updateReadyState();
@@ -132,7 +133,8 @@ function applyStreamStatus(payload: StreamEvent) {
   streamActive = !failed && !stopped;
   setPill(streamPill, stopped ? "Stopped" : payload.state, failed ? "bad" : streamActive ? "active" : "muted");
   setStatus(`${payload.state}: ${payload.detail}`, failed ? "bad" : stopped ? "normal" : "good");
-  metrics.textContent = `${payload.videoTransport.toUpperCase()} | FPS ${payload.fps} | JPEG ${payload.jpegBytes} bytes | Dropped ${payload.droppedFrames}`;
+  const slow = payload.captureWaitMs > 40 || payload.captureEncodeMs > 40 || payload.deviceMs > 40;
+  metrics.textContent = `${payload.videoTransport.toUpperCase()} | FPS ${payload.fps} | Capture ${payload.captureWaitMs} ms | Encode ${payload.captureEncodeMs} ms | Device ${payload.deviceMs} ms | Replaced ${payload.deviceReplacedFrames} | Dropped ${payload.droppedFrames}${slow ? " | Performance limited" : ""}`;
   updateReadyState();
 }
 
@@ -215,7 +217,7 @@ start.onclick = async () => {
   streamActive = true;
   setPill(streamPill, "Starting", "active");
   setStatus("Checking device before streaming...");
-  metrics.textContent = "FPS 0 | JPEG 0 bytes | Dropped 0";
+  metrics.textContent = "UDP | FPS 0 | Capture 0 ms | Encode 0 ms | Device 0 ms | Replaced 0 | Dropped 0";
   try {
     await probeDevice();
     setStatus("Opening Wi-Fi stream...");

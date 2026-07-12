@@ -44,6 +44,19 @@ typedef enum {
     FRAME_PIPELINE_SUBMIT_NO_BUFFER,
 } frame_pipeline_submit_result_t;
 
+typedef struct {
+    uint32_t sequence;
+    uint32_t queue_wait_us;
+    uint32_t jpeg_decode_us;
+    uint32_t lcd_wait_us;
+    uint32_t lcd_submit_us;
+    uint32_t previous_dma_us;
+    uint32_t replaced_frames;
+} frame_pipeline_presented_frame_t;
+
+typedef void (*frame_pipeline_presented_callback_t)(const frame_pipeline_presented_frame_t *frame,
+                                                    void *context);
+
 esp_err_t frame_pipeline_init(struct subscreen_display *display);
 frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t source,
                                                      const companion_frame_header_t *header,
@@ -53,6 +66,7 @@ const char *frame_pipeline_submit_result_name(frame_pipeline_submit_result_t res
 bool frame_pipeline_acquire(companion_transport_t source);
 void frame_pipeline_release(companion_transport_t source);
 companion_transport_t frame_pipeline_active_transport(void);
+void frame_pipeline_set_presented_callback(frame_pipeline_presented_callback_t callback, void *context);
 
 #ifdef __cplusplus
 }
