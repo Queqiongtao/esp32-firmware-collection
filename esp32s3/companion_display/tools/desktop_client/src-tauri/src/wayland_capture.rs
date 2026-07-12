@@ -60,8 +60,19 @@ impl LatestFrame {
     }
 }
 
+fn require_embedded_cursor(supported: bool) -> Result<CursorMode, String> {
+    supported
+        .then_some(CursorMode::Embedded)
+        .ok_or_else(|| "Your desktop portal cannot embed the mouse cursor. Update xdg-desktop-portal and its desktop backend before sharing.".to_string())
+}
+
 pub async fn open_portal() -> Result<(u32, OwnedFd), String> {
     let portal = Screencast::new().await.map_err(|error| error.to_string())?;
+    let cursor_modes = portal
+        .available_cursor_modes()
+        .await
+        .map_err(|error| format!("Cannot query desktop cursor support: {error}"))?;
+    let cursor_mode = require_embedded_cursor(cursor_modes.contains(CursorMode::Embedded))?;
     let session = portal
         .create_session()
         .await
@@ -69,7 +80,7 @@ pub async fn open_portal() -> Result<(u32, OwnedFd), String> {
     portal
         .select_sources(
             &session,
-            CursorMode::Hidden,
+            cursor_mode,
             (SourceType::Monitor | SourceType::Window).into(),
             false,
             None,
@@ -411,5 +422,13 @@ mod tests {
                 .get_pixel(0, 0)[0],
             2
         );
+    }
+
+    #[test]
+    fn embedded_cursor_is_required_for_linux_capture() {
+        assert_eq!(require_embedded_cursor(true).unwrap(), CursorMode::Embedded);
+        assert!(require_embedded_cursor(false)
+            .unwrap_err()
+            .contains("cannot embed the mouse cursor"));
     }
 }
