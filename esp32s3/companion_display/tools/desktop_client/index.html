@@ -1,21 +1,94 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><title>Companion Display</title></head>
-<body><main>
-  <h1>Companion Display</h1>
-  <section><h2>Wi-Fi Device</h2>
-    <label>Device address<input id="endpoint" value="ws://192.168.4.1/stream"/></label>
-    <div class="source-row"><button id="check-device">Check device</button><p id="device-status">Device not checked</p></div>
-    <label>Pairing code<input id="token" inputmode="numeric" pattern="[0-9]{6}" maxlength="6"/></label>
-  </section>
-  <section><h2>Capture Source</h2>
-    <div class="source-row"><select id="source"><option value="">Refresh sources first</option></select><button id="refresh">Refresh</button></div>
-    <div class="region"><label>X<input id="region-x" type="number" min="0" value="0"/></label><label>Y<input id="region-y" type="number" min="0" value="0"/></label><label>Width<input id="region-width" type="number" min="0" value="0"/></label><label>Height<input id="region-height" type="number" min="0" value="0"/></label></div>
-    <p>Select Static color bars to test the JPEG and Wi-Fi path without screen capture. Use zero width and height to send the complete selected source with black letterboxing.</p>
-  </section>
-  <section><h2>Stream</h2>
-    <label>FPS<input id="fps" type="number" min="1" max="30" value="30"/></label>
-    <label>JPEG quality<input id="quality" type="number" min="30" max="95" value="80"/></label>
-    <div class="source-row"><button id="start" disabled>Start Wi-Fi Stream</button><button id="stop" disabled>Stop</button></div>
-    <p id="status">Disconnected</p><p id="metrics"></p>
-  </section>
-</main><script type="module" src="/src/main.ts"></script></body></html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Companion Display</title>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h1>Companion Display</h1>
+        <p class="subtitle">Wi-Fi sender for the ESP32 companion screen</p>
+      </div>
+      <div class="status-strip" aria-live="polite">
+        <span id="device-pill" class="pill muted">Device unchecked</span>
+        <span id="stream-pill" class="pill muted">Idle</span>
+      </div>
+    </header>
+
+    <section class="hero-status">
+      <div>
+        <p class="eyebrow">Current status</p>
+        <p id="status" class="headline">Disconnected</p>
+      </div>
+      <p id="metrics" class="metrics">FPS 0 | JPEG 0 bytes | Dropped 0</p>
+    </section>
+
+    <div class="workspace">
+      <section class="panel device-panel">
+        <div class="section-title">
+          <h2>Device</h2>
+          <button id="check-device" class="secondary" type="button">Check</button>
+        </div>
+        <div class="field-stack">
+          <label>Address
+            <input id="endpoint" autocomplete="off" spellcheck="false" value="ws://192.168.4.1/stream"/>
+          </label>
+          <label>Pairing code
+            <input id="token" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000"/>
+          </label>
+        </div>
+        <dl class="device-facts">
+          <div><dt>Connection</dt><dd id="device-status">Not checked</dd></div>
+          <div><dt>Wi-Fi</dt><dd id="device-wifi">--</dd></div>
+          <div><dt>Screen</dt><dd id="device-screen">--</dd></div>
+          <div><dt>Transport</dt><dd id="device-transport">--</dd></div>
+        </dl>
+      </section>
+
+      <section class="panel source-panel">
+        <div class="section-title">
+          <h2>Source</h2>
+          <button id="refresh" class="secondary" type="button">Refresh</button>
+        </div>
+        <label>Capture source
+          <select id="source"><option value="">Refresh sources first</option></select>
+        </label>
+        <div id="source-summary" class="source-summary">No source selected</div>
+        <label class="toggle-row">
+          <input id="crop-enabled" type="checkbox"/>
+          <span>Crop selected source</span>
+        </label>
+        <div id="crop-fields" class="region" hidden>
+          <label>X<input id="region-x" type="number" min="0" value="0"/></label>
+          <label>Y<input id="region-y" type="number" min="0" value="0"/></label>
+          <label>Width<input id="region-width" type="number" min="0" value="0"/></label>
+          <label>Height<input id="region-height" type="number" min="0" value="0"/></label>
+        </div>
+      </section>
+
+      <section class="panel stream-panel">
+        <div class="section-title">
+          <h2>Stream</h2>
+          <span id="ready-label" class="ready-label">Not ready</span>
+        </div>
+        <div class="control-grid">
+          <label>FPS
+            <input id="fps" type="number" min="1" max="30" value="30"/>
+          </label>
+          <label>JPEG quality
+            <input id="quality" type="number" min="30" max="95" value="80"/>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="start" class="primary" type="button" disabled>Start Wi-Fi Stream</button>
+          <button id="stop" class="danger" type="button" disabled>Stop</button>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
