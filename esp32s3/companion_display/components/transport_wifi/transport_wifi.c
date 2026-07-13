@@ -12,6 +12,8 @@
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "companion_control.h"
+#include "companion_udp.h"
 #include "frame_pipeline.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -22,41 +24,11 @@
 #include "nvs_flash.h"
 #include "subscreen_display.h"
 
-#define CONTROL_PROTOCOL_VERSION 2
-#define UDP_MAGIC 0x31554443UL /* CDU1, little-endian */
-#define UDP_STREAM_VIDEO 1
-#define UDP_MAX_PAYLOAD 1200U
-#define UDP_MAX_FRAGMENTS 128U
 #define UDP_REASSEMBLY_TIMEOUT_US (250 * 1000)
 #define UDP_SESSION_TIMEOUT_US (5 * 1000 * 1000)
 #define FRAME_LIMIT ((size_t)CONFIG_COMPANION_FRAME_LIMIT_KB * 1024U)
 
 typedef enum { VIDEO_TRANSPORT_NONE, VIDEO_TRANSPORT_TCP, VIDEO_TRANSPORT_UDP } video_transport_t;
-typedef enum {
-    UDP_REJECT_NONE,
-    UDP_REJECT_INACTIVE,
-    UDP_REJECT_SOURCE,
-    UDP_REJECT_HEADER,
-    UDP_REJECT_SESSION,
-    UDP_REJECT_FRAGMENT,
-    UDP_REJECT_LENGTH,
-} udp_reject_reason_t;
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint8_t version;
-    uint8_t stream_type;
-    uint16_t header_size;
-    uint32_t session_id;
-    uint32_t session_token;
-    uint32_t frame_sequence;
-    uint32_t frame_length;
-    uint16_t fragment_index;
-    uint16_t fragment_count;
-    uint32_t fragment_offset;
-    uint16_t payload_length;
-    uint16_t reserved;
-} companion_udp_header_t;
 
 typedef struct {
     bool active;
@@ -79,7 +51,7 @@ typedef struct {
     uint32_t udp_submitted_frames;
     uint32_t udp_submit_failures;
     uint32_t udp_reassembly_timeouts;
-    udp_reject_reason_t udp_last_reject;
+    companion_udp_reject_reason_t udp_last_reject;
     frame_pipeline_presented_frame_t last_presented;
     uint32_t reassembly_sequence;
     uint32_t reassembly_length;
@@ -103,7 +75,7 @@ static uint8_t *s_udp_reassembly;
 static int64_t s_last_udp_summary_us;
 static int64_t s_last_udp_reject_log_us;
 static int64_t s_last_control_heartbeat_log_us;
-static udp_reject_reason_t s_last_logged_reject;
+static companion_udp_reject_reason_t s_last_logged_reject;
 
 typedef struct {
     int ws_fd;
@@ -126,12 +98,7 @@ static void send_frame_feedback_work(void *arg)
 {
     frame_feedback_work_t *work = arg;
     char message[256];
-    snprintf(message, sizeof(message),
-             "{\"type\":\"frame_presented\",\"sequence\":%lu,\"queue_wait_us\":%lu,\"jpeg_decode_us\":%lu,\"lcd_wait_us\":%lu,\"lcd_submit_us\":%lu,\"previous_dma_us\":%lu,\"replaced_frames\":%lu}",
-             (unsigned long)work->frame.sequence, (unsigned long)work->frame.queue_wait_us,
-             (unsigned long)work->frame.jpeg_decode_us, (unsigned long)work->frame.lcd_wait_us,
-             (unsigned long)work->frame.lcd_submit_us, (unsigned long)work->frame.previous_dma_us,
-             (unsigned long)work->frame.replaced_frames);
+    companion_control_build_frame_presented(message, sizeof(message), &work->frame);
     httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)message, .len = strlen(message)};
     esp_err_t err = httpd_ws_send_frame_async(s_server, work->ws_fd, &frame);
     if (err != ESP_OK) ESP_LOGW(TAG, "frame feedback failed: %s", esp_err_to_name(err));
@@ -165,19 +132,6 @@ static const char *video_transport_name(video_transport_t transport)
     return transport == VIDEO_TRANSPORT_UDP ? "udp" : transport == VIDEO_TRANSPORT_TCP ? "tcp" : "none";
 }
 
-static const char *udp_reject_reason_name(udp_reject_reason_t reason)
-{
-    switch (reason) {
-    case UDP_REJECT_INACTIVE: return "inactive";
-    case UDP_REJECT_SOURCE: return "source_ip";
-    case UDP_REJECT_HEADER: return "header";
-    case UDP_REJECT_SESSION: return "session";
-    case UDP_REJECT_FRAGMENT: return "fragment";
-    case UDP_REJECT_LENGTH: return "length";
-    case UDP_REJECT_NONE: default: return "none";
-    }
-}
-
 static void log_udp_summary(void)
 {
     const int64_t now = esp_timer_get_time();
@@ -191,7 +145,7 @@ static void log_udp_summary(void)
     const uint32_t submitted = s_session.udp_submitted_frames;
     const uint32_t timeouts = s_session.udp_reassembly_timeouts;
     const uint32_t failed = s_session.udp_submit_failures;
-    const char *last_reject = udp_reject_reason_name(s_session.udp_last_reject);
+    const char *last_reject = companion_udp_reject_reason_name(s_session.udp_last_reject);
     xSemaphoreGive(s_session_lock);
     if (active) {
         ESP_LOGI(TAG, "UDP stats: rx=%lu accepted=%lu rejected=%lu completed=%lu submitted=%lu timeout=%lu failed=%lu last=%s",
@@ -282,33 +236,9 @@ static void reset_session_for_fd(int ws_fd)
 static void json_error(httpd_req_t *req, const char *request_id, const char *code)
 {
     char response[160];
-    snprintf(response, sizeof(response), "{\"type\":\"error\",\"request_id\":\"%s\",\"code\":\"%s\"}", request_id != NULL ? request_id : "", code);
+    companion_control_build_error(response, sizeof(response), request_id, code);
     send_control(req, response);
     ESP_LOGW(TAG, "control rejected: request=%s code=%s", request_id != NULL ? request_id : "", code);
-}
-
-static bool json_get_string(const char *json, const char *name, char *value, size_t value_size)
-{
-    char key[40];
-    snprintf(key, sizeof(key), "\"%s\"", name);
-    const char *item = strstr(json, key);
-    if (item == NULL || (item = strchr(item + strlen(key), ':')) == NULL) return false;
-    while (*++item == ' ' || *item == '\t') {}
-    if (*item++ != '\"') return false;
-    const char *end = strchr(item, '\"');
-    if (end == NULL || (size_t)(end - item) >= value_size) return false;
-    memcpy(value, item, (size_t)(end - item));
-    value[end - item] = '\0';
-    return true;
-}
-
-static bool json_get_int(const char *json, const char *name, int *value)
-{
-    char key[40];
-    snprintf(key, sizeof(key), "\"%s\"", name);
-    const char *item = strstr(json, key);
-    if (item == NULL || (item = strchr(item + strlen(key), ':')) == NULL) return false;
-    return sscanf(item + 1, "%d", value) == 1;
 }
 
 static bool peer_address(httpd_req_t *req, struct in_addr *address)
@@ -323,13 +253,11 @@ static bool peer_address(httpd_req_t *req, struct in_addr *address)
     return true;
 }
 
-static void handle_hello(httpd_req_t *req, const char *message, const char *request_id)
+static void handle_hello(httpd_req_t *req, const companion_control_message_t *message)
 {
-    int version = 0;
-    char desired[8] = {};
-    if (!json_get_int(message, "protocol_version", &version) || version != CONTROL_PROTOCOL_VERSION || !json_get_string(message, "video_transport", desired, sizeof(desired)) ||
-        (strcmp(desired, "tcp") != 0 && strcmp(desired, "udp") != 0)) {
-        json_error(req, request_id, "unsupported_protocol");
+    if (message->protocol_version != COMPANION_CONTROL_PROTOCOL_VERSION ||
+        !companion_control_transport_supported(message->video_transport)) {
+        json_error(req, message->request_id, "unsupported_protocol");
         return;
     }
     struct in_addr peer_addr = {};
@@ -338,7 +266,7 @@ static void handle_hello(httpd_req_t *req, const char *message, const char *requ
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     if (s_session.active && s_session.ws_fd != ws_fd) {
         xSemaphoreGive(s_session_lock);
-        json_error(req, request_id, "device_busy");
+        json_error(req, message->request_id, "device_busy");
         return;
     }
     if (s_session.active) reset_session_locked();
@@ -346,7 +274,7 @@ static void handle_hello(httpd_req_t *req, const char *message, const char *requ
     s_session.active = true;
     s_session.negotiated = true;
     s_session.ws_fd = ws_fd;
-    s_session.video_transport = strcmp(desired, "udp") == 0 ? VIDEO_TRANSPORT_UDP : VIDEO_TRANSPORT_TCP;
+    s_session.video_transport = strcmp(message->video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0 ? VIDEO_TRANSPORT_UDP : VIDEO_TRANSPORT_TCP;
     s_session.peer_addr = peer_addr;
     s_session.peer_addr_bound = peer_addr_valid;
     s_session.session_id = esp_random();
@@ -364,15 +292,11 @@ static void handle_hello(httpd_req_t *req, const char *message, const char *requ
                  ws_fd, video_transport_name(transport));
     }
     char response[420];
-    snprintf(response, sizeof(response),
-             "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":2,\"video_transport\":\"%s\",\"width\":368,\"height\":448,\"max_frame_bytes\":%u,\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":true,\"audio_capture\":true,\"text_input\":true}}",
-             request_id, video_transport_name(transport), (unsigned)(FRAME_LIMIT + sizeof(companion_frame_header_t)));
-    if (transport == VIDEO_TRANSPORT_UDP) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":2,\"video_transport\":\"udp\",\"width\":368,\"height\":448,\"max_frame_bytes\":%u,\"udp\":{\"port\":%d,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":true,\"audio_capture\":true,\"text_input\":true}}",
-                 request_id, (unsigned)(FRAME_LIMIT + sizeof(companion_frame_header_t)), CONFIG_COMPANION_UDP_PORT,
-                 (unsigned long)session_id, (unsigned long)session_token, UDP_MAX_PAYLOAD);
-    }
+    companion_control_build_hello_ack(response, sizeof(response), message->request_id,
+                                      video_transport_name(transport),
+                                      FRAME_LIMIT + sizeof(companion_frame_header_t),
+                                      CONFIG_COMPANION_UDP_PORT, session_id, session_token,
+                                      COMPANION_UDP_MAX_PAYLOAD);
     update_transport_status(SUBSCREEN_TRANSPORT_NEGOTIATING);
     send_control(req, response);
 }
@@ -393,7 +317,7 @@ static void handle_start(httpd_req_t *req, const char *request_id)
     xSemaphoreGive(s_session_lock);
     ESP_LOGI(TAG, "stream started: fd=%d transport=%s", ws_fd, video_transport_name(transport));
     char response[160];
-    snprintf(response, sizeof(response), "{\"type\":\"stream_started\",\"request_id\":\"%s\",\"video_transport\":\"%s\"}", request_id, video_transport_name(transport));
+    companion_control_build_stream_started(response, sizeof(response), request_id, video_transport_name(transport));
     update_transport_status(transport == VIDEO_TRANSPORT_UDP ? SUBSCREEN_TRANSPORT_UDP_VIDEO : SUBSCREEN_TRANSPORT_TCP_VIDEO);
     send_control(req, response);
 }
@@ -402,35 +326,34 @@ static void handle_stop(httpd_req_t *req, const char *request_id)
 {
     reset_session_for_fd(httpd_req_to_sockfd(req));
     char response[128];
-    snprintf(response, sizeof(response), "{\"type\":\"stream_stopped\",\"request_id\":\"%s\"}", request_id);
+    companion_control_build_stream_stopped(response, sizeof(response), request_id);
     send_control(req, response);
 }
 
 static void handle_control(httpd_req_t *req, const uint8_t *payload, size_t length)
 {
-    (void)length;
     const char *message = (const char *)payload;
-    char type[32] = {}, request_id[48] = {};
-    if (!json_get_string(message, "type", type, sizeof(type)) || !json_get_string(message, "request_id", request_id, sizeof(request_id))) {
+    companion_control_message_t control = {};
+    if (!companion_control_parse(message, length, &control)) {
         json_error(req, "", "invalid_control_message");
         return;
     }
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     if (s_session.active && s_session.ws_fd == httpd_req_to_sockfd(req)) s_session.last_control_us = esp_timer_get_time();
     xSemaphoreGive(s_session_lock);
-    if (strcmp(type, "hello") == 0) handle_hello(req, message, request_id);
-    else if (strcmp(type, "start_stream") == 0) handle_start(req, request_id);
-    else if (strcmp(type, "stop_stream") == 0) handle_stop(req, request_id);
-    else if (strcmp(type, "ping") == 0) {
+    if (strcmp(control.type, "hello") == 0) handle_hello(req, &control);
+    else if (strcmp(control.type, "start_stream") == 0) handle_start(req, control.request_id);
+    else if (strcmp(control.type, "stop_stream") == 0) handle_stop(req, control.request_id);
+    else if (strcmp(control.type, "ping") == 0) {
         char response[128];
-        snprintf(response, sizeof(response), "{\"type\":\"pong\",\"request_id\":\"%s\"}", request_id);
+        companion_control_build_pong(response, sizeof(response), control.request_id);
         const int64_t now = esp_timer_get_time();
         if (now - s_last_control_heartbeat_log_us >= 30 * 1000 * 1000) {
             ESP_LOGI(TAG, "control heartbeat: fd=%d", httpd_req_to_sockfd(req));
             s_last_control_heartbeat_log_us = now;
         }
         send_control(req, response);
-    } else json_error(req, request_id, "unsupported_message");
+    } else json_error(req, control.request_id, "unsupported_message");
 }
 
 static void handle_tcp_frame(const uint8_t *data, size_t length)
@@ -525,7 +448,7 @@ static bool reassembly_complete_locked(void)
 static void udp_task(void *arg)
 {
     (void)arg;
-    uint8_t packet[sizeof(companion_udp_header_t) + UDP_MAX_PAYLOAD];
+    uint8_t packet[sizeof(companion_udp_header_t) + COMPANION_UDP_MAX_PAYLOAD];
     while (true) {
         struct sockaddr_in source = {};
         socklen_t source_length = sizeof(source);
@@ -536,17 +459,14 @@ static void udp_task(void *arg)
             size_t packet_payload = (size_t)received - sizeof(*header);
             xSemaphoreTake(s_session_lock, portMAX_DELAY);
             s_session.udp_rx_packets++;
-            udp_reject_reason_t reject = UDP_REJECT_NONE;
-            if (!s_session.active || !s_session.started || s_session.video_transport != VIDEO_TRANSPORT_UDP) reject = UDP_REJECT_INACTIVE;
-            else if (header->magic != UDP_MAGIC || header->version != COMPANION_FRAME_VERSION ||
-                     header->stream_type != UDP_STREAM_VIDEO || header->header_size != sizeof(*header)) reject = UDP_REJECT_HEADER;
-            else if (header->session_id != s_session.session_id || header->session_token != s_session.session_token) reject = UDP_REJECT_SESSION;
-            else if (header->fragment_count == 0 || header->fragment_count > UDP_MAX_FRAGMENTS || header->fragment_index >= header->fragment_count) reject = UDP_REJECT_FRAGMENT;
-            else if (header->payload_length != packet_payload || header->payload_length > UDP_MAX_PAYLOAD ||
-                     header->frame_length < sizeof(companion_frame_header_t) || header->frame_length > FRAME_LIMIT + sizeof(companion_frame_header_t) ||
-                     header->fragment_offset > header->frame_length || header->payload_length > header->frame_length - header->fragment_offset) reject = UDP_REJECT_LENGTH;
-            else if (s_session.peer_addr_bound && source.sin_addr.s_addr != s_session.peer_addr.s_addr) reject = UDP_REJECT_SOURCE;
-            if (reject == UDP_REJECT_NONE) {
+            const bool session_active = s_session.active && s_session.started &&
+                                        s_session.video_transport == VIDEO_TRANSPORT_UDP;
+            companion_udp_reject_reason_t reject = companion_udp_validate_packet(
+                header, packet_payload, FRAME_LIMIT + sizeof(companion_frame_header_t),
+                session_active, s_session.session_id, s_session.session_token,
+                s_session.peer_addr_bound, s_session.peer_addr.s_addr,
+                source.sin_addr.s_addr);
+            if (reject == COMPANION_UDP_REJECT_NONE) {
                 if (s_session.udp_media_paused) {
                     s_session.udp_media_paused = false;
                     ESP_LOGI(TAG, "UDP resumed: session=%08lx frame=%lu", (unsigned long)s_session.session_id,
@@ -608,7 +528,7 @@ static void udp_task(void *arg)
                     strlcpy(source_ip, inet_ntoa(source.sin_addr), sizeof(source_ip));
                     strlcpy(expected_ip, inet_ntoa(s_session.peer_addr), sizeof(expected_ip));
                     ESP_LOGW(TAG, "UDP rejected: reason=%s source=%s expected=%s frame=%lu session=%08lx len=%d",
-                             udp_reject_reason_name(reject), source_ip, expected_ip,
+                             companion_udp_reject_reason_name(reject), source_ip, expected_ip,
                              (unsigned long)header->frame_sequence, (unsigned long)header->session_id, received);
                     s_last_logged_reject = reject;
                     s_last_udp_reject_log_us = now;
@@ -648,21 +568,23 @@ static esp_err_t root_get(httpd_req_t *req)
 static esp_err_t status_get(httpd_req_t *req)
 {
     char response[896];
+    companion_status_snapshot_t snapshot = {};
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
-    const char *video = s_session.started ? video_transport_name(s_session.video_transport) : "none";
-    uint32_t dropped = s_session.dropped_frames;
-    uint32_t rx_packets = s_session.udp_rx_packets;
-    uint32_t accepted_fragments = s_session.udp_accepted_fragments;
-    uint32_t rejected_packets = s_session.udp_rejected_packets;
-    uint32_t completed_frames = s_session.udp_completed_frames;
-    uint32_t submitted_frames = s_session.udp_submitted_frames;
-    uint32_t submit_failures = s_session.udp_submit_failures;
-    uint32_t reassembly_timeouts = s_session.udp_reassembly_timeouts;
-    const char *last_reject = udp_reject_reason_name(s_session.udp_last_reject);
-    frame_pipeline_presented_frame_t presented = s_session.last_presented;
+    snapshot.active_transport = s_session.started ? video_transport_name(s_session.video_transport) : "none";
+    snapshot.dropped_frames = s_session.dropped_frames;
+    snapshot.udp_rx_packets = s_session.udp_rx_packets;
+    snapshot.udp_accepted_fragments = s_session.udp_accepted_fragments;
+    snapshot.udp_rejected_packets = s_session.udp_rejected_packets;
+    snapshot.udp_completed_frames = s_session.udp_completed_frames;
+    snapshot.udp_submitted_frames = s_session.udp_submitted_frames;
+    snapshot.udp_submit_failures = s_session.udp_submit_failures;
+    snapshot.udp_reassembly_timeouts = s_session.udp_reassembly_timeouts;
+    snapshot.udp_last_reject = companion_udp_reject_reason_name(s_session.udp_last_reject);
+    snapshot.performance = s_session.last_presented;
     xSemaphoreGive(s_session_lock);
-    const char *wifi = s_network_status == SUBSCREEN_NETWORK_CONNECTED ? "connected" : s_network_status == SUBSCREEN_NETWORK_CONNECTING ? "connecting" : "setup_required";
-    snprintf(response, sizeof(response), "{\"name\":\"companion-display\",\"width\":368,\"height\":448,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":2,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":true,\"audio_capture\":true,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"lastReject\":\"%s\"}}", wifi, s_ipv4, video, (unsigned long)dropped, (unsigned long)presented.sequence, (unsigned long)presented.queue_wait_us, (unsigned long)presented.jpeg_decode_us, (unsigned long)presented.lcd_wait_us, (unsigned long)presented.lcd_submit_us, (unsigned long)presented.previous_dma_us, (unsigned long)presented.replaced_frames, (unsigned long)rx_packets, (unsigned long)accepted_fragments, (unsigned long)rejected_packets, (unsigned long)completed_frames, (unsigned long)submitted_frames, (unsigned long)submit_failures, (unsigned long)reassembly_timeouts, last_reject);
+    snapshot.wifi = s_network_status == SUBSCREEN_NETWORK_CONNECTED ? "connected" : s_network_status == SUBSCREEN_NETWORK_CONNECTING ? "connecting" : "setup_required";
+    snapshot.ipv4 = s_ipv4;
+    companion_control_build_status(response, sizeof(response), &snapshot);
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, response);
 }

@@ -104,4 +104,43 @@ mod tests {
             2400
         );
     }
+
+    #[test]
+    fn udp_rejects_invalid_payload_limits() {
+        let frame = encode_frame(1, &[9; 16]).unwrap();
+        assert!(encode_udp_fragments(&frame, 1, 2, 1, 0).is_err());
+        assert!(encode_udp_fragments(&frame, 1, 2, 1, 1201).is_err());
+    }
+
+    #[test]
+    fn udp_rejects_too_many_fragments() {
+        let frame = encode_frame(1, &vec![1; MAX_JPEG_BYTES]).unwrap();
+        assert!(encode_udp_fragments(&frame, 1, 2, 1, 1).is_err());
+    }
+
+    #[test]
+    fn udp_allows_the_protocol_fragment_ceiling() {
+        let frame = encode_frame(42, &vec![5; MAX_JPEG_BYTES]).unwrap();
+        let fragments = encode_udp_fragments(&frame, 7, 8, 42, 801).unwrap();
+        assert_eq!(fragments.len(), 128);
+        assert_eq!(
+            u16::from_le_bytes(fragments[127][24..26].try_into().unwrap()),
+            127
+        );
+        assert_eq!(
+            u16::from_le_bytes(fragments[127][26..28].try_into().unwrap()),
+            128
+        );
+    }
+
+    #[test]
+    fn udp_fragments_reconstruct_the_original_frame() {
+        let frame = encode_frame(11, &vec![3; 4096]).unwrap();
+        let fragments = encode_udp_fragments(&frame, 9, 10, 11, 777).unwrap();
+        let mut reconstructed = Vec::new();
+        for fragment in fragments {
+            reconstructed.extend_from_slice(&fragment[UDP_HEADER_LEN..]);
+        }
+        assert_eq!(reconstructed, frame);
+    }
 }

@@ -6,7 +6,7 @@
 
 ## 固件
 
-在仓库根目录执行：
+在 `esp32s3/companion_display` 工程目录执行：
 
 ```bash
 ./dev.sh build
