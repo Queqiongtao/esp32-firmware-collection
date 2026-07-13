@@ -53,6 +53,8 @@ npm run tauri:build
 
 构建产物位于 `src-tauri/target/release/`，安装包位于其 `bundle/` 子目录。`Static color bars` 不依赖屏幕采集权限，适合优先排除 Portal/PipeWire 权限或桌面环境问题。
 
+Linux 客户端会在 WebKitGTK 初始化前自动设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。这用于规避 Wayland 下部分虚拟 GPU 或显卡驱动的 DMA-BUF 合成兼容问题；该问题会使客户端窗口出现固定颜色杂块。此设置只影响客户端界面渲染，不影响 Portal/PipeWire 采集、JPEG 编码或视频传输。
+
 客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；采集画面会等比例缩放到设备可容纳的最大尺寸，不拉伸、不裁剪，并只在宽高比不一致时居中补齐必要黑边。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；选择单个窗口时，客户端优先请求标准 `SPA_META_VideoCrop` 有效区域，没有该元数据时再尝试 BGRA/RGBA Alpha，从 GNOME Portal 的透明全屏画布中识别真正的窗口主体。窗口内部的黑色内容不会被误裁，手动 Crop 坐标相对于识别后的窗口区域。Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态栏会分别显示采集等待、编码和设备耗时及替换帧数；TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
 
 部分 GNOME Portal 后端即使选择了单个窗口，仍会报告全屏大小的 Portal/PipeWire 外层画布。客户端会读取每帧的 `SPA_META_VideoCrop`，只处理其中声明的窗口有效区域。正常日志类似：
@@ -87,6 +89,7 @@ Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 
 
 ## 联调与排障
 
+- Linux 客户端窗口出现固定颜色杂块时，确认使用的是当前版本客户端。当前版本会自动禁用 WebKitGTK DMA-BUF 渲染；使用旧版本时可通过 `WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri:dev` 验证。该现象与 ESP32 屏幕画面和视频传输链路无关。
 - 先用 TCP 和 `Static color bars` 验证基础链路。设备显示 `TCP VIDEO` 或 `RECEIVING FRAME` 即表示已进入视频接收。
 - Portal 选择单个窗口后仍看到整屏黑色背景时，检查终端是否打印 `PipeWire VideoCrop`。有该日志时以其矩形为实际窗口范围；只有 `Window alpha fallback` 而没有 `PipeWire VideoCrop` 时，说明当前桌面 Portal 后端未提供可精确裁取的窗口边界。
 - UDP 无画面时，查看设备串口的 `UDP stats`。`rx` 增长说明数据已到设备；`accepted` 为零时查看 `last` 拒绝原因；`submitted` 增长才表示完整帧已进入显示管线。发送端会以 1 ms 间隔发送分片，并限制单帧发送在 120 ms 内；设备 UDP 邮箱为 24 包，持续 `timeout` 仍表示 Wi-Fi 丢包或发送端负载过高。

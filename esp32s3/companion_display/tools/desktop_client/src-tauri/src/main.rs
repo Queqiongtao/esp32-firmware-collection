@@ -1605,6 +1605,9 @@ fn stop_wifi_stream(app: AppHandle, state: State<'_, StreamState>) -> Result<(),
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(StreamState::default())
