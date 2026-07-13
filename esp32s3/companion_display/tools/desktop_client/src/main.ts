@@ -40,6 +40,8 @@ const videoTransport = byId<HTMLSelectElement>("video-transport");
 const sourcesById = new Map<string, CaptureSource>();
 let lastDevice: DeviceStatus | null = null;
 let streamActive = false;
+let streamStopping = false;
+let stoppingStatusPoll: number | null = null;
 
 function setPill(element: HTMLElement, text: string, tone: "muted" | "good" | "warn" | "bad" | "active") {
   element.textContent = text;
@@ -86,10 +88,24 @@ function validationMessage() {
 
 function updateReadyState() {
   const message = validationMessage();
-  start.disabled = streamActive || Boolean(message);
-  stop.disabled = !streamActive;
-  readyLabel.textContent = streamActive ? "Streaming" : message || "Ready";
-  readyLabel.dataset.tone = streamActive ? "active" : message ? "warn" : "good";
+  start.disabled = streamActive || streamStopping || Boolean(message);
+  stop.disabled = !streamActive || streamStopping;
+  readyLabel.textContent = streamStopping ? "Stopping" : streamActive ? "Streaming" : message || "Ready";
+  readyLabel.dataset.tone = streamActive || streamStopping ? "active" : message ? "warn" : "good";
+}
+
+function stopStoppingStatusPoll() {
+  if (stoppingStatusPoll !== null) {
+    window.clearInterval(stoppingStatusPoll);
+    stoppingStatusPoll = null;
+  }
+}
+
+function ensureStoppingStatusPoll() {
+  if (stoppingStatusPoll !== null) return;
+  stoppingStatusPoll = window.setInterval(() => {
+    invoke<StreamEvent>("get_stream_status").then(applyStreamStatus).catch(() => undefined);
+  }, 200);
 }
 
 function updateSourceSummary() {
@@ -128,11 +144,22 @@ function applyDevice(device: DeviceStatus) {
 function applyStreamStatus(payload: StreamEvent) {
   if (payload.state === "idle") return;
   const state = payload.state.toLowerCase();
-  const failed = state === "error" || state === "dropping";
+  const failed = state === "error";
+  const warning = state === "dropping";
   const stopped = state === "stopped";
+  const stopping = state === "stopping";
+  streamStopping = stopping;
   streamActive = !failed && !stopped;
-  setPill(streamPill, stopped ? "Stopped" : payload.state, failed ? "bad" : streamActive ? "active" : "muted");
-  setStatus(`${payload.state}: ${payload.detail}`, failed ? "bad" : stopped ? "normal" : "good");
+  if (stopped) {
+    stopStoppingStatusPoll();
+    lastDevice = null;
+    setPill(devicePill, "Device unchecked", "muted");
+    deviceTransport.textContent = "--";
+  } else if (failed) {
+    stopStoppingStatusPoll();
+  }
+  setPill(streamPill, stopped ? "Stopped" : payload.state, failed ? "bad" : warning ? "warn" : streamActive ? "active" : "muted");
+  setStatus(`${payload.state}: ${payload.detail}`, failed ? "bad" : warning ? "warn" : stopped ? "normal" : "good");
   const slow = payload.captureWaitMs > 40 || payload.captureEncodeMs > 40 || payload.deviceMs > 40;
   metrics.textContent = `${payload.videoTransport.toUpperCase()} | FPS ${payload.fps} | Capture ${payload.captureWaitMs} ms | Encode ${payload.captureEncodeMs} ms | Device ${payload.deviceMs} ms | Replaced ${payload.deviceReplacedFrames} | Dropped ${payload.droppedFrames}${slow ? " | Performance limited" : ""}`;
   updateReadyState();
@@ -150,6 +177,7 @@ async function probeDevice() {
 
 async function refreshDeviceDiagnostics() {
   const device = await invoke<DeviceStatus>("probe_wifi_device", { endpoint: normalizeEndpoint(endpoint.value) });
+  if (!streamActive && !streamStopping) return;
   applyDevice(device);
 }
 
@@ -215,6 +243,7 @@ start.onclick = async () => {
   start.disabled = true;
   stop.disabled = false;
   streamActive = true;
+  streamStopping = false;
   setPill(streamPill, "Starting", "active");
   setStatus("Checking device before streaming...");
   metrics.textContent = "UDP | FPS 0 | Capture 0 ms | Encode 0 ms | Device 0 ms | Replaced 0 | Dropped 0";
@@ -236,20 +265,44 @@ start.onclick = async () => {
       },
     });
   } catch (error) {
-    streamActive = false;
-    setPill(streamPill, "Error", "bad");
-    setStatus(String(error), "bad");
+    const message = String(error);
+    if (message.includes("still stopping")) {
+      streamActive = true;
+      streamStopping = true;
+      setPill(streamPill, "Stopping", "active");
+      ensureStoppingStatusPoll();
+    } else if (message.includes("already running")) {
+      streamActive = true;
+      streamStopping = false;
+      stopStoppingStatusPoll();
+      setPill(streamPill, "Streaming", "active");
+    } else {
+      streamActive = false;
+      streamStopping = false;
+      stopStoppingStatusPoll();
+      setPill(streamPill, "Error", "bad");
+    }
+    setStatus(message, streamActive ? "warn" : "bad");
     updateReadyState();
   }
 };
 
 stop.onclick = async () => {
   stop.disabled = true;
+  streamActive = true;
+  streamStopping = true;
+  setPill(streamPill, "Stopping", "active");
   setStatus("Stopping stream...");
-  await invoke("stop_wifi_stream");
-  streamActive = false;
-  setPill(streamPill, "Stopped", "muted");
-  updateReadyState();
+  try {
+    await invoke("stop_wifi_stream");
+    ensureStoppingStatusPoll();
+  } catch (error) {
+    streamStopping = false;
+    stopStoppingStatusPoll();
+    setStatus(String(error), "bad");
+  } finally {
+    updateReadyState();
+  }
 };
 
 endpoint.addEventListener("blur", () => {

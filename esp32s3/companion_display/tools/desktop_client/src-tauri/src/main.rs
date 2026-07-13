@@ -188,6 +188,7 @@ const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
 const UDP_FRAGMENT_SPACING: Duration = Duration::from_millis(1);
 const UDP_FRAME_SEND_LIMIT: Duration = Duration::from_millis(120);
 const STATIC_FRAME_INTERVAL: Duration = Duration::from_secs(1);
+const TCP_PRESENTED_POLL_INTERVAL: Duration = Duration::from_millis(200);
 const CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const CONTROL_HEARTBEAT_MISSES: u8 = 3;
 const CONTROL_RECONNECT_DELAYS: [Duration; 5] = [
@@ -581,11 +582,28 @@ fn emit_metrics(
 fn wait_for_presented(
     socket: &mut WebSocket<TcpStream>,
     sequence: u32,
+    stop: &AtomicBool,
 ) -> Result<FramePresented, String> {
+    socket
+        .get_mut()
+        .set_read_timeout(Some(TCP_PRESENTED_POLL_INTERVAL))
+        .map_err(|error| format!("Cannot configure device feedback timeout: {error}"))?;
     loop {
-        let message = socket
-            .read()
-            .map_err(|error| format!("Cannot receive device frame feedback: {error}"))?;
+        if stop.load(Ordering::Relaxed) {
+            return Err("Stream stopped".to_string());
+        }
+        let message = match socket.read() {
+            Ok(message) => message,
+            Err(WebSocketError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(format!("Cannot receive device frame feedback: {error}")),
+        };
         match message {
             Message::Text(text) => {
                 if let Ok(feedback) = serde_json::from_str::<FramePresented>(&text) {
@@ -597,6 +615,26 @@ fn wait_for_presented(
             Message::Close(_) => return Err("Device closed the control connection".to_string()),
             _ => {}
         }
+    }
+}
+
+fn close_device_stream(socket: &mut WebSocket<TcpStream>) {
+    let _ = socket.get_mut().set_nonblocking(false);
+    let _ = socket.send(Message::Text(
+        json!({"type": "stop_stream", "request_id": "stop-1"})
+            .to_string()
+            .into(),
+    ));
+    let _ = socket.close(None);
+}
+
+fn active_stream_error(active: Option<&Arc<AtomicBool>>) -> Option<&'static str> {
+    match active {
+        Some(stop) if stop.load(Ordering::Relaxed) => {
+            Some("previous Wi-Fi stream is still stopping")
+        }
+        Some(_) => Some("a Wi-Fi stream is already running"),
+        None => None,
     }
 }
 
@@ -1062,25 +1100,27 @@ fn run_stream(
     stop: Arc<AtomicBool>,
     mut socket: WebSocket<TcpStream>,
     mut sender: VideoSender,
-) {
+) -> u32 {
     let video_transport = config.video_transport.as_str();
     let frame_interval = Duration::from_millis(1000 / u64::from(config.fps.clamp(1, 30)));
+    let mut dropped_frames = 0_u32;
     let mut heartbeat = if matches!(sender, VideoSender::Udp { .. }) {
         if let Err(error) = configure_udp_control_socket(&mut socket) {
             emit(&app, "error", error, 0, 0, 0, video_transport);
-            return;
+            close_device_stream(&mut socket);
+            return dropped_frames;
         }
         Some(UdpControlHeartbeat::new())
     } else {
         None
     };
     let mut sequence = 0_u32;
-    let mut dropped_frames = 0_u32;
     let capture = match open_capture_session(&app, &config, stop.clone()) {
         Ok(capture) => capture,
         Err(error) => {
             emit(&app, "error", error, 0, 0, 0, video_transport);
-            return;
+            close_device_stream(&mut socket);
+            return dropped_frames;
         }
     };
     emit(
@@ -1096,34 +1136,44 @@ fn run_stream(
     let image = match capture_next(&capture) {
         Ok(image) => image,
         Err(error) => {
-            emit(
-                &app,
-                "error",
-                format!("First screenshot failed: {error}"),
-                0,
-                0,
-                0,
-                video_transport,
-            );
-            return;
+            if !stop.load(Ordering::Relaxed) {
+                emit(
+                    &app,
+                    "error",
+                    format!("First screenshot failed: {error}"),
+                    0,
+                    0,
+                    0,
+                    video_transport,
+                );
+            }
+            close_device_stream(&mut socket);
+            return dropped_frames;
         }
     };
+    if stop.load(Ordering::Relaxed) {
+        close_device_stream(&mut socket);
+        return dropped_frames;
+    }
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
     let first_fingerprint = image_fingerprint(&image);
     let encode_started = Instant::now();
     let (frame, jpeg_bytes) = match build_capture_frame(image, &capture, &config, sequence) {
         Ok(frame) => frame,
         Err(error) => {
-            emit(
-                &app,
-                "error",
-                format!("First screenshot failed: {error}"),
-                0,
-                0,
-                0,
-                video_transport,
-            );
-            return;
+            if !stop.load(Ordering::Relaxed) {
+                emit(
+                    &app,
+                    "error",
+                    format!("First screenshot failed: {error}"),
+                    0,
+                    0,
+                    0,
+                    video_transport,
+                );
+            }
+            close_device_stream(&mut socket);
+            return dropped_frames;
         }
     };
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
@@ -1139,23 +1189,26 @@ fn run_stream(
         video_transport,
     );
     if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
-        emit(
-            &app,
-            "error",
-            format!("First screenshot send failed: {error}"),
-            0,
-            jpeg_bytes,
-            0,
-            video_transport,
-        );
-        return;
+        if !stop.load(Ordering::Relaxed) {
+            emit(
+                &app,
+                "error",
+                format!("First screenshot send failed: {error}"),
+                0,
+                jpeg_bytes,
+                0,
+                video_transport,
+            );
+        }
+        close_device_stream(&mut socket);
+        return dropped_frames;
     }
     let mut last_video_sent = Instant::now();
     let mut static_frames = 0_u32;
     let mut device_ms = 0;
     let mut device_replaced_frames = 0;
     if matches!(sender, VideoSender::Tcp) {
-        match wait_for_presented(&mut socket, sequence) {
+        match wait_for_presented(&mut socket, sequence, &stop) {
             Ok(feedback) => {
                 device_ms = (feedback.queue_wait_us
                     + feedback.jpeg_decode_us
@@ -1166,8 +1219,11 @@ fn run_stream(
                 eprintln!("Frame {} presented: queue={}us decode={}us lcd_wait={}us dma={}us previous_dma={}us", feedback.sequence, feedback.queue_wait_us, feedback.jpeg_decode_us, feedback.lcd_wait_us, feedback.lcd_submit_us, feedback.previous_dma_us);
             }
             Err(error) => {
-                emit(&app, "error", error, 0, jpeg_bytes, 0, video_transport);
-                return;
+                if !stop.load(Ordering::Relaxed) {
+                    emit(&app, "error", error, 0, jpeg_bytes, 0, video_transport);
+                }
+                close_device_stream(&mut socket);
+                return dropped_frames;
             }
         }
     }
@@ -1322,7 +1378,7 @@ fn run_stream(
         }
         let capture_encode_ms = encode_started.elapsed().as_millis() as u32;
         if matches!(sender, VideoSender::Tcp) {
-            match wait_for_presented(&mut socket, sequence) {
+            match wait_for_presented(&mut socket, sequence, &stop) {
                 Ok(feedback) => {
                     device_ms = (feedback.queue_wait_us
                         + feedback.jpeg_decode_us
@@ -1332,19 +1388,21 @@ fn run_stream(
                     device_replaced_frames = feedback.replaced_frames;
                 }
                 Err(error) => {
-                    emit_metrics(
-                        &app,
-                        "error",
-                        error,
-                        0,
-                        jpeg_bytes,
-                        dropped_frames,
-                        video_transport,
-                        capture_encode_ms,
-                        capture_wait_ms,
-                        device_ms,
-                        device_replaced_frames,
-                    );
+                    if !stop.load(Ordering::Relaxed) {
+                        emit_metrics(
+                            &app,
+                            "error",
+                            error,
+                            0,
+                            jpeg_bytes,
+                            dropped_frames,
+                            video_transport,
+                            capture_encode_ms,
+                            capture_wait_ms,
+                            device_ms,
+                            device_replaced_frames,
+                        );
+                    }
                     break;
                 }
             }
@@ -1375,21 +1433,8 @@ fn run_stream(
             device_replaced_frames,
         );
     }
-    let _ = socket.send(Message::Text(
-        json!({"type": "stop_stream", "request_id": "stop-1"})
-            .to_string()
-            .into(),
-    ));
-    let _ = socket.close(None);
-    emit(
-        &app,
-        "stopped",
-        "Wi-Fi stream stopped",
-        0,
-        0,
-        dropped_frames,
-        video_transport,
-    );
+    close_device_stream(&mut socket);
+    dropped_frames
 }
 
 #[tauri::command]
@@ -1429,6 +1474,12 @@ fn start_wifi_stream(
     if !matches!(config.video_transport.as_str(), "tcp" | "udp") {
         return Err("select TCP or UDP video transport".to_string());
     }
+    {
+        let guard = state.stop.lock().map_err(|_| "stream state unavailable")?;
+        if let Some(error) = active_stream_error(guard.as_ref()) {
+            return Err(error.to_string());
+        }
+    }
     let device = probe_wifi_device_impl(&config.endpoint)?;
     if device.protocol_version != CONTROL_PROTOCOL_VERSION {
         return Err(format!(
@@ -1466,14 +1517,6 @@ fn start_wifi_stream(
     if !valid_source {
         return Err("select a capture source before starting the stream".to_string());
     }
-    if state
-        .stop
-        .lock()
-        .map_err(|_| "stream state unavailable")?
-        .is_some()
-    {
-        return Err("a Wi-Fi stream is already running".to_string());
-    }
     emit(
         &app,
         "connecting",
@@ -1498,17 +1541,32 @@ fn start_wifi_stream(
     );
     let sender = negotiate_stream(&mut socket, &config.video_transport)?;
     let mut guard = state.stop.lock().map_err(|_| "stream state unavailable")?;
-    if guard.is_some() {
-        return Err("a Wi-Fi stream is already running".to_string());
+    if let Some(error) = active_stream_error(guard.as_ref()) {
+        close_device_stream(&mut socket);
+        return Err(error.to_string());
     }
     let stop = Arc::new(AtomicBool::new(false));
     *guard = Some(stop.clone());
     drop(guard);
     let controller = state.stop.clone();
+    let final_app = app.clone();
+    let final_transport = config.video_transport.clone();
+    let final_stop = stop.clone();
     thread::spawn(move || {
-        run_stream(app, config, stop, socket, sender);
+        let dropped_frames = run_stream(app, config, stop, socket, sender);
         if let Ok(mut active) = controller.lock() {
             *active = None;
+        }
+        if final_stop.load(Ordering::Relaxed) {
+            emit(
+                &final_app,
+                "stopped",
+                "Wi-Fi stream stopped",
+                0,
+                0,
+                dropped_frames,
+                &final_transport,
+            );
         }
     });
     Ok(())
@@ -1516,15 +1574,33 @@ fn start_wifi_stream(
 
 #[tauri::command]
 fn stop_wifi_stream(app: AppHandle, state: State<'_, StreamState>) -> Result<(), String> {
-    if let Some(stop) = state
-        .stop
+    let active = state.stop.lock().map_err(|_| "stream state unavailable")?;
+    let transport = state
+        .event
         .lock()
-        .map_err(|_| "stream state unavailable")?
-        .take()
-    {
-        stop.store(true, Ordering::Relaxed);
+        .ok()
+        .map(|event| event.video_transport.clone())
+        .filter(|transport| transport != "none")
+        .unwrap_or_else(|| "none".to_string());
+    match active.as_ref() {
+        Some(stop) => {
+            let was_stopping = stop.swap(true, Ordering::Relaxed);
+            emit(
+                &app,
+                "stopping",
+                if was_stopping {
+                    "Wi-Fi stream is already stopping"
+                } else {
+                    "Stopping Wi-Fi stream and releasing device transport"
+                },
+                0,
+                0,
+                0,
+                &transport,
+            );
+        }
+        None => emit(&app, "stopped", "Stream stopped", 0, 0, 0, "none"),
     }
-    emit(&app, "stopped", "Stream stopped", 0, 0, 0, "none");
     Ok(())
 }
 
@@ -1545,7 +1621,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_frame, parse_http_response, replay_frame, static_color_bars, StreamConfig};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use super::{
+        active_stream_error, build_frame, parse_http_response, replay_frame, static_color_bars,
+        StreamConfig,
+    };
     use crate::protocol;
 
     fn test_config() -> StreamConfig {
@@ -1637,5 +1719,22 @@ mod tests {
             parse_http_response(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").is_err()
         );
         assert!(parse_http_response(b"HTTP/1.1 200 OK\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn active_stream_error_distinguishes_running_from_stopping() {
+        assert_eq!(active_stream_error(None), None);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        assert_eq!(
+            active_stream_error(Some(&stop)),
+            Some("a Wi-Fi stream is already running")
+        );
+
+        stop.store(true, Ordering::Relaxed);
+        assert_eq!(
+            active_stream_error(Some(&stop)),
+            Some("previous Wi-Fi stream is still stopping")
+        );
     }
 }

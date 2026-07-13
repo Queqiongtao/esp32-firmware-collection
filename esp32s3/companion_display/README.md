@@ -94,6 +94,7 @@ Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 
 - `source_ip`：UDP 来源地址与已绑定地址不一致。PC 必须将 UDP socket 绑定到 WebSocket 控制连接使用的本机 IPv4；重新启动流可创建新会话。
 - `bad CRC`：完整 `CDP1` 帧的 JPEG CRC 校验失败。检查发送端和固件是否使用同一协议版本，或先改用 TCP 确认编码链路。
 - `device_busy`：设备已有活动控制会话或显示管线仍被占用。先在旧客户端点击 Stop；若连接异常断开，关闭旧 WebSocket 或重启设备以释放会话。
+- 点击 Stop 后客户端会显示 `stopping` 并等待 WebSocket 发送 `stop_stream`、关闭控制连接和释放设备传输；期间不要重复 Start，等状态回到 `Stopped` 后再启动。
 - `UDP REJECTED`、`UDP DROPPED` 或 `SESSION EXPIRED`：分别表示分片被拒绝、重组超时丢帧或 5 秒未收到 UDP 数据。UDP 丢帧不重传，持续异常时改用 TCP。
 - `SESSION EXPIRED` 在 UDP 模式只表示媒体暂时没有新包；设备会保留 WebSocket 与 UDP session，静态 1 FPS 保活帧或恢复后的画面可继续使用原 session。只有 Stop 或 WebSocket 关闭会释放会话。
 - `WebSocket peer closed`：对端已显式关闭控制连接；这会释放会话。若客户端显示 `Reconnecting control channel`，它会以同一 PC IPv4 自动替换设备端遗留的旧会话，并使用新 UDP session 恢复；重连 5 次仍失败时检查 Wi-Fi、IP 与配对码。
