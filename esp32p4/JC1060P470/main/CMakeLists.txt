@@ -12,6 +12,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                             "test_usb.c"
                             "test_battery.c"
                             "test_wireless.c"
+                            "test_uvc.c"
                        INCLUDE_DIRS "."
                        PRIV_INCLUDE_DIRS "../managed_components/espressif__esp_hosted/host"
                                          "../managed_components/espressif__esp_hosted/host/api/include"
@@ -42,6 +43,9 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_lcd_jd9165
                                      esp_lcd_touch_gt911
                                      esp_tinyusb
+                                      esp_driver_jpeg
+                                      espressif__usb
+                                      espressif__usb_host_uvc
                        EMBED_FILES "canon.pcm")
 
 spiffs_create_partition_image(font ../assets/fonts FLASH_IN_PROJECT)

@@ -1,0 +1,536 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: CC0-1.0
+ */
+
+#include "test_uvc.h"
+
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+#include "esp_check.h"
+#include "esp_err.h"
+#include "esp_intr_alloc.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "test_config.h"
+#include "driver/jpeg_decode.h"
+#include "driver/jpeg_types.h"
+#include "usb/usb_host.h"
+#include "usb/uvc_host.h"
+
+static const char *TAG = "test_uvc";
+
+typedef struct {
+    uvc_host_frame_t *frame;
+} uvc_app_queue_msg_t;
+
+static QueueHandle_t s_event_queue;
+static TaskHandle_t s_usblib_task_handle;
+static TaskHandle_t s_worker_task_handle;
+static jpeg_decoder_handle_t s_jpeg_decoder;
+static uvc_host_stream_hdl_t s_stream_hdl;
+static uint8_t *s_rgb565_buf;
+static size_t s_rgb565_buf_size;
+
+static bool s_initialized;
+static bool s_stopping;
+static bool s_stream_opened;
+static bool s_stream_started;
+static bool s_device_connected;
+
+static uint32_t s_frames_received;
+static uint32_t s_frames_decoded;
+static uint32_t s_decode_errors;
+static uint32_t s_last_frame_bytes;
+static uint32_t s_last_decode_us;
+static uint32_t s_last_frame_w;
+static uint32_t s_last_frame_h;
+static esp_err_t s_last_error = ESP_OK;
+
+static void uvc_driver_event_callback(const uvc_host_driver_event_data_t *event, void *user_ctx)
+{
+    (void)user_ctx;
+
+    switch (event->type) {
+    case UVC_HOST_DRIVER_EVENT_DEVICE_CONNECTED:
+        s_device_connected = true;
+        ESP_LOGI(TAG, "UVC driver: compatible device connected, dev_addr=%u stream_index=%u frame_info_num=%u",
+                 event->device_connected.dev_addr,
+                 event->device_connected.uvc_stream_index,
+                 (unsigned)event->device_connected.frame_info_num);
+        break;
+    default:
+        ESP_LOGW(TAG, "UVC driver: unknown event %d", event->type);
+        break;
+    }
+}
+
+static void uvc_stream_event_callback(const uvc_host_stream_event_data_t *event, void *user_ctx)
+{
+    (void)user_ctx;
+
+    switch (event->type) {
+    case UVC_HOST_TRANSFER_ERROR:
+        s_last_error = event->transfer_error.error;
+        ESP_LOGE(TAG, "UVC stream transfer error: %s", esp_err_to_name(event->transfer_error.error));
+        break;
+    case UVC_HOST_DEVICE_DISCONNECTED: {
+        uvc_host_stream_hdl_t hdl = event->device_disconnected.stream_hdl;
+        ESP_LOGI(TAG, "UVC device disconnected, closing stream");
+        s_device_connected = false;
+        s_stream_started = false;
+        if (hdl != NULL) {
+            esp_err_t ret = uvc_host_stream_close(hdl);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "uvc_host_stream_close on disconnect failed: %s", esp_err_to_name(ret));
+            }
+        }
+        if (hdl == s_stream_hdl) {
+            s_stream_hdl = NULL;
+        }
+        s_stream_opened = false;
+        break;
+    }
+    case UVC_HOST_FRAME_BUFFER_OVERFLOW:
+        ESP_LOGW(TAG, "UVC frame buffer overflow (frame exceeded allocated size)");
+        break;
+    case UVC_HOST_FRAME_BUFFER_UNDERFLOW:
+        ESP_LOGW(TAG, "UVC frame buffer underflow (no free buffer available)");
+        break;
+    default:
+        ESP_LOGW(TAG, "UVC stream: unsupported event %d (possibly suspend/resume)", event->type);
+        break;
+    }
+}
+
+static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
+{
+    (void)user_ctx;
+
+    if (s_event_queue == NULL || s_stopping) {
+        return true;
+    }
+
+    uvc_host_frame_t *frame_ptr = (uvc_host_frame_t *)frame;
+    if (xQueueSend(s_event_queue, &frame_ptr, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "frame queue full, dropping frame");
+        return true;
+    }
+    return false;
+}
+
+static void uvc_ensure_rgb565_buf(uint32_t width, uint32_t height)
+{
+    size_t need = ((width + 15U) / 16U) * 16U * ((height + 15U) / 16U) * 16U * 2U;
+    if (s_rgb565_buf != NULL && s_rgb565_buf_size >= need) {
+        return;
+    }
+
+    if (s_rgb565_buf != NULL) {
+        free(s_rgb565_buf);
+        s_rgb565_buf = NULL;
+        s_rgb565_buf_size = 0;
+    }
+
+    s_rgb565_buf = heap_caps_malloc(need, TEST_UVC_RGB565_BUF_CAPS);
+    if (s_rgb565_buf != NULL) {
+        s_rgb565_buf_size = need;
+        ESP_LOGI(TAG, "allocated RGB565 decode buffer: %zu bytes (caps=0x%x) for %ux%u",
+                 s_rgb565_buf_size, (unsigned)TEST_UVC_RGB565_BUF_CAPS, (unsigned)width, (unsigned)height);
+    } else {
+        ESP_LOGE(TAG, "failed to allocate RGB565 decode buffer: %zu bytes", need);
+    }
+}
+
+static void uvc_worker_task(void *arg)
+{
+    (void)arg;
+
+    uvc_app_queue_msg_t msg;
+    while (!s_stopping) {
+        if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(200)) != pdTRUE) {
+            continue;
+        }
+
+        uvc_host_frame_t *frame = msg.frame;
+        if (frame == NULL) {
+            continue;
+        }
+
+        s_frames_received++;
+        s_last_frame_bytes = (uint32_t)frame->data_len;
+
+        if (frame->data == NULL || frame->data_len == 0) {
+            ESP_LOGW(TAG, "frame %u: empty payload", (unsigned)s_frames_received);
+            uvc_host_frame_return(s_stream_hdl, frame);
+            continue;
+        }
+
+        if (s_jpeg_decoder == NULL) {
+            ESP_LOGE(TAG, "frame %u: jpeg decoder not available", (unsigned)s_frames_received);
+            uvc_host_frame_return(s_stream_hdl, frame);
+            continue;
+        }
+
+        jpeg_decode_picture_info_t info = {0};
+        esp_err_t ret = jpeg_decoder_get_info(frame->data, (uint32_t)frame->data_len, &info);
+        if (ret != ESP_OK) {
+            s_decode_errors++;
+            s_last_error = ret;
+            ESP_LOGW(TAG, "frame %u: jpeg_decoder_get_info failed: %s (len=%u)",
+                     (unsigned)s_frames_received, esp_err_to_name(ret), (unsigned)frame->data_len);
+            uvc_host_frame_return(s_stream_hdl, frame);
+            continue;
+        }
+
+        s_last_frame_w = info.width;
+        s_last_frame_h = info.height;
+        uvc_ensure_rgb565_buf(info.width, info.height);
+        if (s_rgb565_buf == NULL) {
+            s_decode_errors++;
+            uvc_host_frame_return(s_stream_hdl, frame);
+            continue;
+        }
+
+        const jpeg_decode_cfg_t decode_cfg = {
+            .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,
+            .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
+        };
+
+        int64_t start_us = esp_timer_get_time();
+        uint32_t out_size = 0;
+        ret = jpeg_decoder_process(s_jpeg_decoder, &decode_cfg,
+                                   frame->data, (uint32_t)frame->data_len,
+                                   s_rgb565_buf, (uint32_t)s_rgb565_buf_size, &out_size);
+        s_last_decode_us = (uint32_t)(esp_timer_get_time() - start_us);
+
+        if (ret != ESP_OK) {
+            s_decode_errors++;
+            s_last_error = ret;
+            ESP_LOGW(TAG, "frame %u: jpeg decode failed: %s (len=%u %ux%u)",
+                     (unsigned)s_frames_received, esp_err_to_name(ret),
+                     (unsigned)frame->data_len, (unsigned)info.width, (unsigned)info.height);
+        } else {
+            s_frames_decoded++;
+            ESP_LOGI(TAG, "frame %u: ok len=%u %ux%u -> RGB565 out=%u decode=%" PRIu32 "us",
+                     (unsigned)s_frames_received, (unsigned)frame->data_len,
+                     (unsigned)info.width, (unsigned)info.height,
+                     (unsigned)out_size, s_last_decode_us);
+        }
+
+        uvc_host_frame_return(s_stream_hdl, frame);
+    }
+
+    s_worker_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void uvc_usblib_task(void *arg)
+{
+    (void)arg;
+
+    while (!s_stopping) {
+        uint32_t event_flags = 0;
+        esp_err_t ret = usb_host_lib_handle_events(pdMS_TO_TICKS(100), &event_flags);
+        if (ret == ESP_ERR_NOT_FINISHED) {
+            break;
+        }
+        /* ESP_ERR_TIMEOUT 表示无事件（空闲），不是错误；过滤掉避免刷屏。
+         * 只对其它非 OK 返回告警。 */
+        if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
+            ESP_LOGW(TAG, "usb_host_lib_handle_events: %s", esp_err_to_name(ret));
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
+            usb_host_device_free_all();
+        }
+        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
+            ESP_LOGI(TAG, "USB Host: all devices freed");
+        }
+    }
+
+    s_usblib_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void uvc_cleanup_app_resources(void)
+{
+    if (s_rgb565_buf != NULL) {
+        free(s_rgb565_buf);
+        s_rgb565_buf = NULL;
+        s_rgb565_buf_size = 0;
+    }
+
+    if (s_worker_task_handle != NULL) {
+        vTaskDelete(s_worker_task_handle);
+        s_worker_task_handle = NULL;
+    }
+
+    if (s_event_queue != NULL) {
+        vQueueDelete(s_event_queue);
+        s_event_queue = NULL;
+    }
+}
+
+esp_err_t test_uvc_init(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    if (s_initialized) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Initializing USB UVC camera test module on High-Speed USB OTG / UTMI PHY (peripheral_map=0x%x)",
+             (unsigned)TEST_UVC_USB_HOST_PERIPHERAL_MAP);
+    s_stopping = false;
+
+    s_event_queue = xQueueCreate(TEST_UVC_FRAME_QUEUE_LEN, sizeof(uvc_app_queue_msg_t));
+    ESP_RETURN_ON_FALSE(s_event_queue != NULL, ESP_ERR_NO_MEM, TAG, "create UVC frame queue failed");
+
+    const usb_host_config_t host_config = {
+        .skip_phy_setup = false,
+        .root_port_unpowered = false,
+        .intr_flags = ESP_INTR_FLAG_LOWMED,
+        .peripheral_map = TEST_UVC_USB_HOST_PERIPHERAL_MAP,
+    };
+    ESP_GOTO_ON_ERROR(usb_host_install(&host_config), err_queue, TAG, "usb_host_install failed");
+
+    BaseType_t task_created = xTaskCreatePinnedToCore(uvc_usblib_task,
+                                                      "uvc_usblib",
+                                                      TEST_UVC_USB_LIB_TASK_STACK,
+                                                      NULL,
+                                                      TEST_UVC_USB_LIB_TASK_PRIORITY,
+                                                      &s_usblib_task_handle,
+                                                      TEST_UVC_USB_LIB_TASK_CORE);
+    ESP_GOTO_ON_FALSE(task_created == pdTRUE, ESP_ERR_NO_MEM, err_uninstall_host, TAG, "create USB lib task failed");
+
+    const uvc_host_driver_config_t uvc_driver_config = {
+        .driver_task_stack_size = TEST_UVC_DRIVER_TASK_STACK,
+        .driver_task_priority = TEST_UVC_DRIVER_TASK_PRIORITY,
+        .xCoreID = TEST_UVC_DRIVER_TASK_CORE,
+        .create_background_task = true,
+        .event_cb = uvc_driver_event_callback,
+        .user_ctx = NULL,
+    };
+    ESP_GOTO_ON_ERROR(uvc_host_install(&uvc_driver_config), err_del_usblib_task, TAG, "uvc_host_install failed");
+
+    const jpeg_decode_engine_cfg_t jpeg_dec_cfg = {
+        .intr_priority = 0,
+        .timeout_ms = TEST_UVC_JPEG_DECODE_TIMEOUT_MS,
+        .flags = { .allow_pd = 0 },
+    };
+    ESP_GOTO_ON_ERROR(jpeg_new_decoder_engine(&jpeg_dec_cfg, &s_jpeg_decoder),
+                      err_uninstall_uvc, TAG, "jpeg_new_decoder_engine failed");
+
+    task_created = xTaskCreatePinnedToCore(uvc_worker_task,
+                                          "uvc_worker",
+                                          TEST_UVC_WORKER_TASK_STACK,
+                                          NULL,
+                                          TEST_UVC_WORKER_TASK_PRIORITY,
+                                          &s_worker_task_handle,
+                                          TEST_UVC_WORKER_TASK_CORE);
+    ESP_GOTO_ON_FALSE(task_created == pdTRUE, ESP_ERR_NO_MEM, err_del_jpeg, TAG, "create UVC worker task failed");
+
+    s_initialized = true;
+    s_stream_opened = false;
+    s_stream_started = false;
+    s_device_connected = false;
+    s_frames_received = 0;
+    s_frames_decoded = 0;
+    s_decode_errors = 0;
+    s_last_frame_bytes = 0;
+    s_last_decode_us = 0;
+    s_last_frame_w = 0;
+    s_last_frame_h = 0;
+    s_last_error = ESP_OK;
+    ESP_LOGI(TAG, "UVC camera test module initialized, waiting for UVC device (vid=0x%x pid=0x%x %ux%u@%uFPS)",
+             (unsigned)TEST_UVC_VID, (unsigned)TEST_UVC_PID,
+             (unsigned)TEST_UVC_H_RES, (unsigned)TEST_UVC_V_RES, (unsigned)TEST_UVC_FPS);
+    return ESP_OK;
+
+err_del_jpeg:
+    jpeg_del_decoder_engine(s_jpeg_decoder);
+    s_jpeg_decoder = NULL;
+err_uninstall_uvc:
+    uvc_host_uninstall();
+err_del_usblib_task:
+    s_stopping = true;
+    usb_host_lib_unblock();
+    for (int i = 0; i < 10 && s_usblib_task_handle != NULL; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (s_usblib_task_handle != NULL) {
+        vTaskDelete(s_usblib_task_handle);
+        s_usblib_task_handle = NULL;
+    }
+err_uninstall_host:
+    usb_host_uninstall();
+err_queue:
+    uvc_cleanup_app_resources();
+    return ret;
+}
+
+esp_err_t test_uvc_run(void)
+{
+    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG,
+                        "UVC not initialized, call test_uvc_init first");
+
+    if (s_stream_opened) {
+        if (s_stream_started) {
+            return ESP_OK;
+        }
+        ESP_RETURN_ON_ERROR(uvc_host_stream_start(s_stream_hdl), TAG, "uvc_host_stream_start failed");
+        s_stream_started = true;
+        return ESP_OK;
+    }
+
+    const uvc_host_stream_config_t stream_config = {
+        .event_cb = uvc_stream_event_callback,
+        .frame_cb = uvc_frame_callback,
+        .user_ctx = NULL,
+        .usb = {
+            .dev_addr = UVC_HOST_ANY_DEV_ADDR,
+            .vid = TEST_UVC_VID,
+            .pid = TEST_UVC_PID,
+            .uvc_stream_index = TEST_UVC_UVC_STREAM_INDEX,
+        },
+        .vs_format = {
+            .h_res = TEST_UVC_H_RES,
+            .v_res = TEST_UVC_V_RES,
+            .fps = TEST_UVC_FPS,
+            .format = TEST_UVC_FORMAT,
+        },
+        .advanced = {
+            .number_of_frame_buffers = TEST_UVC_FRAME_BUF_COUNT,
+            .frame_size = TEST_UVC_FRAME_SIZE,
+            .frame_heap_caps = TEST_UVC_FRAME_HEAP_CAPS,
+            .number_of_urbs = TEST_UVC_NUMBER_OF_URBS,
+            .urb_size = TEST_UVC_URB_SIZE,
+            .user_frame_buffers = NULL,
+        },
+    };
+
+    ESP_LOGI(TAG, "Opening UVC stream %ux%u@%uFPS format=%d on High-Speed USB OTG...",
+             (unsigned)TEST_UVC_H_RES, (unsigned)TEST_UVC_V_RES, (unsigned)TEST_UVC_FPS, (int)TEST_UVC_FORMAT);
+    esp_err_t ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(TEST_UVC_STREAM_OPEN_TIMEOUT_MS), &s_stream_hdl);
+    if (ret != ESP_OK) {
+        s_last_error = ret;
+        ESP_LOGE(TAG, "uvc_host_stream_open failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    uvc_host_desc_print(s_stream_hdl);
+
+    s_stream_opened = true;
+    ESP_RETURN_ON_ERROR(uvc_host_stream_start(s_stream_hdl), TAG, "uvc_host_stream_start failed");
+    s_stream_started = true;
+    ESP_LOGI(TAG, "UVC stream started");
+    return ESP_OK;
+}
+
+esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
+{
+    ESP_RETURN_ON_FALSE(out_status != NULL, ESP_ERR_INVALID_ARG, TAG, "out_status is NULL");
+
+    *out_status = (test_uvc_status_t) {
+        .initialized = s_initialized,
+        .stream_opened = s_stream_opened,
+        .stream_started = s_stream_started,
+        .device_connected = s_device_connected,
+        .frames_received = s_frames_received,
+        .frames_decoded = s_frames_decoded,
+        .decode_errors = s_decode_errors,
+        .last_frame_bytes = s_last_frame_bytes,
+        .last_decode_us = s_last_decode_us,
+        .last_frame_w = s_last_frame_w,
+        .last_frame_h = s_last_frame_h,
+        .last_error = s_last_error,
+    };
+    return ESP_OK;
+}
+
+esp_err_t test_uvc_deinit(void)
+{
+    if (!s_initialized) {
+        return ESP_OK;
+    }
+
+    s_stopping = true;
+
+    if (s_stream_hdl != NULL) {
+        if (s_stream_started) {
+            esp_err_t ret = uvc_host_stream_stop(s_stream_hdl);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "uvc_host_stream_stop failed: %s", esp_err_to_name(ret));
+            }
+            s_stream_started = false;
+        }
+        esp_err_t ret = uvc_host_stream_close(s_stream_hdl);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "uvc_host_stream_close failed: %s", esp_err_to_name(ret));
+        }
+        s_stream_hdl = NULL;
+    }
+    s_stream_opened = false;
+    s_device_connected = false;
+
+    esp_err_t ret = uvc_host_uninstall();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "uvc_host_uninstall failed: %s", esp_err_to_name(ret));
+    }
+
+    usb_host_lib_unblock();
+    for (int i = 0; i < 10 && s_usblib_task_handle != NULL; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (s_usblib_task_handle != NULL) {
+        ESP_LOGW(TAG, "USB lib task did not exit in time, deleting it");
+        vTaskDelete(s_usblib_task_handle);
+        s_usblib_task_handle = NULL;
+    }
+
+    for (int i = 0; i < 10 && s_worker_task_handle != NULL; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (s_worker_task_handle != NULL) {
+        ESP_LOGW(TAG, "UVC worker task did not exit in time, deleting it");
+        vTaskDelete(s_worker_task_handle);
+        s_worker_task_handle = NULL;
+    }
+
+    ret = usb_host_uninstall();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "usb_host_uninstall failed: %s", esp_err_to_name(ret));
+    }
+
+    if (s_jpeg_decoder != NULL) {
+        ret = jpeg_del_decoder_engine(s_jpeg_decoder);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "jpeg_del_decoder_engine failed: %s", esp_err_to_name(ret));
+        }
+        s_jpeg_decoder = NULL;
+    }
+
+    uvc_cleanup_app_resources();
+
+    s_initialized = false;
+    s_stopping = false;
+    s_stream_opened = false;
+    s_stream_started = false;
+    s_device_connected = false;
+    s_frames_received = 0;
+    s_frames_decoded = 0;
+    s_decode_errors = 0;
+    s_last_frame_bytes = 0;
+    s_last_decode_us = 0;
+    s_last_frame_w = 0;
+    s_last_frame_h = 0;
+    s_last_error = ESP_OK;
+    ESP_LOGI(TAG, "USB UVC camera test module deinitialized");
+    return ESP_OK;
+}

@@ -40,3 +40,11 @@ CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
 CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
 CONFIG_LWIP_TCP_SACK_OUT=y
+
+# ESP32-P4 chip revision: target V1.0 (use hw_ver1 register definitions).
+# The <3.0 and >=3.0 register sets are mutually exclusive; this selects the
+# pre-v3 path and sets the minimum supported revision to 1.00.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_100=y
+CONFIG_ESP32P4_REV_MIN_FULL=100
+CONFIG_ESP_REV_MIN_FULL=100

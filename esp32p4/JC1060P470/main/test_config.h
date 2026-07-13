@@ -8,6 +8,7 @@
 
 #include "esp_adc/adc_oneshot.h"
 #include "driver/gpio.h"
+#include "esp_heap_caps.h"
 
 #define TEST_AUDIO_BYTES_PER_SAMPLE             2
 #define TEST_AUDIO_CHANNELS                     2
@@ -109,24 +110,34 @@
 #define TEST_BATTERY_EMPTY_MV                    3300
 #define TEST_BATTERY_FULL_MV                     4200
 
-/* ---------------------------- USB Device CDC-ACM --------------------------- *
- * Board wiring (JC1060P470, FIB type, two USB Type-C ports):
- *   The current board exposes two dedicated USB Device ports:
- *   - Full-Speed USB Device: routed to dedicated USB package pins 49/50 (DM/DP)
- *   - High-Speed USB Device: GPIO24/25, routed to package pins 52/53
- *   The CDC-ACM demo uses the High-Speed USB Device port. esp_tinyusb's
- *   TINYUSB_DEFAULT_CONFIG() selects the ESP32-P4 high-speed device controller
- *   automatically, and tinyusb_driver_install() configures the PHY and spawns
- *   the TinyUSB backend task. No application GPIO assignment is required. 
+/* ---------------------------- USB ports overview --------------------------- *
+ * Board wiring (JC1060P470, V1.0 chip, FIB type, two USB Type-C ports):
  *
- * NOTE: The USB Device CDC demo port and the USB Serial/JTAG download/log port
- *   may both enumerate as serial devices on the host side, but they serve
- *   different purposes. Do not confuse the CDC demo port with the download/log
- *   interface.
+ *   FULL USB (丝印) -> GPIO24(DM)/GPIO25(DP) -> USB_INT_PHY0
+ *     This is the USB Serial/JTAG (USJ) controller: a fixed-function USB device
+ *     exposing a CDC-ACM serial port (firmware download + IDF log console).
+ *     It enumerates automatically at boot; no application code is required.
+ *     The USJ controller is NOT a DWC OTG and cannot run TinyUSB custom device
+ *     stacks or USB Host. Use usb_serial_jtag_driver_install() for custom
+ *     byte-stream traffic over the fixed CDC-ACM interface.
  *
- * Demo behavior:
- *   The board enumerates as a single CDC-ACM serial device. Data received
- *   from the host is dumped in hex and then echoed back unchanged. */
+ *   HIGH USB (丝印) -> package pins 49/50 -> internal UTMI High-Speed PHY
+ *     (controller-independent dedicated pins, NOT in the GPIO matrix).
+ *     This is DWC OTG controller[0]; supports HS device (TinyUSB) and HS host
+ *     (esp-usb usb_host). controller[0] can be only one role at a time.
+ *
+ * Note: The original comments here mistakenly labeled "High-Speed USB Device:
+ *   GPIO24/25". On ESP32-P4 V1.0 (per IDF io_mux_reg.h hw_ver1) GPIO24/25 are
+ *   USB_INT_PHY0 = USJ, while the HS UTMI PHY has no GPIO number. This block
+ *   was corrected while adding the UVC host module. The old FS OTG reference
+ *   to GPIO26/27 (USB_INT_PHY1, controller[1]) is intentionally omitted: that
+ *   route conflicts with DISPLAY_PIN_NUM_LCD_RST (GPIO27) and is unsuitable
+ *   for this board.
+ *
+ * CDC-ACM demo (test_usb.c, TinyUSB):
+ *   Uses the HIGH USB port as a TinyUSB HS device. It defaults to off
+ *   (EXAMPLE_ENABLE_TEST_USB=n) because the same controller[0] is needed by
+ *   the UVC camera host module. Enable one or the other, not both. */
 
 #define TEST_USB_CDC_PORT                       TINYUSB_CDC_ACM_0
 #define TEST_USB_CDC_EVENT_QUEUE_LEN            16
@@ -158,3 +169,69 @@
 #define TEST_WIRELESS_WIFI_SCAN_TIMEOUT_MS      10000
 #define TEST_WIRELESS_WIFI_CONNECT_RETRY        3
 #define TEST_WIRELESS_BLE_SCAN_TIME_MS          5000
+
+/* ---------------------------- USB UVC camera (High-Speed Host) ------------- *
+ * Board wiring (JC1060P470, V1.0 chip, FIB type):
+ *   UVC 摄像头接到 HIGH USB 口（丝印），该口走 ESP32-P4 内部 UTMI High-Speed
+ *   PHY 的专用封装脚（49/50），对应 DWC OTG controller[0]，480Mbps。
+ *   USB Host Library 通过 usb_host_config_t.peripheral_map 选择控制器：
+ *     peripheral_map = BIT0  -> HS OTG（controller[0]，走 UTMI HS PHY，本模块）
+ *     peripheral_map = BIT1  -> FS OTG（controller[1]，内部 FS PHY=GPIO26/27）
+ *   本模块用 BIT0：480Mbps 带宽可上 1280x720，且 UTMI PHY 不进 GPIO 矩阵，
+ *   不会触碰 DISPLAY_PIN_NUM_LCD_RST(GPIO27)，避免 FS OTG 路径导致的黑屏。
+ *
+ *   controller[0] 同一时刻只能当 device 或 host。因此本模块启用时，CDC-ACM
+ *   demo（test_usb.c，TinyUSB HS device）不可同时启用。CDC 功能改由 FULL USB
+ *   口的 USJ 固化 CDC-ACM 串口承担（见上文 USB ports overview）。
+ *
+ * 阶段 A（当前）：USB Host + UVC 收流 + 硬件 JPEG 解码（RGB565），
+ *   只做日志观测（帧序号/字节/宽高/解码耗时/错误码），不写 LVGL 画布。
+ *   目标格式：1280x720@15 MJPEG（HS 带宽充足）。
+ *
+ * Cache 一致性：
+ *   - UVC 帧缓冲在 PSRAM，由 USB-DWC DMA 写入，应用 CPU 读 frame->data；
+ *     esp-usb UVC 驱动内部已处理该 DMA->CPU 方向的 cache invalidate，
+ *     应用层无需额外 esp_cache_msync。
+ *   - JPEG 硬解输入 frame->data（PSRAM，CPU 不写，硬件 DMA 读）无需 msync；
+ *     输出 RGB565 缓冲在 PSRAM 由 JPEG DMA 写入、CPU 读，无 DMA2D 缩放时
+ *     不存在 CPU 写后 DMA 读的中间断点，阶段 A 暂不涉及 msync。
+ *   - 阶段 B 引入 DMA2D 缩放上屏时，再在 CPU 写 PSRAM 后交 DMA2D 前补
+ *     esp_cache_msync(DIR_C2M)，遵循 AGENTS.md cache 一致性约束。 */
+
+#define TEST_UVC_USB_HOST_PERIPHERAL_MAP       (1U << 0)   /* HS OTG: controller[0], UTMI HS PHY, HIGH USB port */
+#define TEST_UVC_VID                            UVC_HOST_ANY_VID
+#define TEST_UVC_PID                            UVC_HOST_ANY_PID
+#define TEST_UVC_UVC_STREAM_INDEX              0
+
+#define TEST_UVC_FORMAT                         UVC_VS_FORMAT_MJPEG
+#define TEST_UVC_H_RES                          1280
+#define TEST_UVC_V_RES                          720
+#define TEST_UVC_FPS                            30
+
+#define TEST_UVC_FRAME_BUF_COUNT                3
+#define TEST_UVC_FRAME_SIZE                     0          /* 0: use dwMaxVideoFrameSize from negotiation */
+#define TEST_UVC_FRAME_HEAP_CAPS                MALLOC_CAP_SPIRAM
+#define TEST_UVC_NUMBER_OF_URBS                 3
+#define TEST_UVC_URB_SIZE                       (10 * 1024)
+
+#define TEST_UVC_FRAME_QUEUE_LEN                3
+
+#define TEST_UVC_USB_LIB_TASK_STACK             4096
+#define TEST_UVC_USB_LIB_TASK_PRIORITY          10
+#define TEST_UVC_USB_LIB_TASK_CORE              tskNO_AFFINITY
+
+#define TEST_UVC_DRIVER_TASK_STACK              4096
+#define TEST_UVC_DRIVER_TASK_PRIORITY           11
+#define TEST_UVC_DRIVER_TASK_CORE               tskNO_AFFINITY
+
+#define TEST_UVC_WORKER_TASK_STACK              8192
+#define TEST_UVC_WORKER_TASK_PRIORITY           4
+#define TEST_UVC_WORKER_TASK_CORE               tskNO_AFFINITY
+
+#define TEST_UVC_STREAM_OPEN_TIMEOUT_MS         5000
+#define TEST_UVC_FRAME_RECV_TIMEOUT_MS          5000
+
+#define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 67ms (15fps 上限), 给硬件解码容限 */
+#define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
+#define TEST_UVC_RGB565_BUF_CAPS                MALLOC_CAP_SPIRAM
+#define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */

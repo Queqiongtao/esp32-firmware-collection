@@ -102,7 +102,7 @@ menu "Example Configuration"
 
     config EXAMPLE_ENABLE_TEST_SDCARD
         bool "Enable SD card (SDMMC) test module"
-        default n
+        default y
         help
             Enable this option to initialize the SDMMC host, mount a FAT filesystem
             on the SD card, and run a read/write test at boot. Requires an SD card
@@ -110,7 +110,7 @@ menu "Example Configuration"
 
     config EXAMPLE_ENABLE_TEST_RTC
         bool "Enable RX8025T-UC RTC test module"
-        default n
+        default y
         help
             Enable this option to probe the board-mounted RX8025T-UC RTC on
             the shared touch I2C bus (I2C_NUM_1, GPIO7/8), read its time and
@@ -119,7 +119,7 @@ menu "Example Configuration"
 
     config EXAMPLE_ENABLE_TEST_AUDIO
         bool "Enable audio (I2S + ES8311) test module"
-        default n
+        default y
         help
             Enable this option to initialize the I2S peripheral and ES8311 codec,
             start the audio backend task, and expose three UI-triggered actions:
@@ -185,8 +185,37 @@ menu "Example Configuration"
             the board's High-Speed USB Device port. The board enumerates as a
             virtual serial port on the PC side, dumps received data in hex, and
             echoes it back unchanged. On ESP32-P4 the demo uses the internal
-            high-speed USB device controller, so no GPIO assignment is needed
-            in application code.
+            high-speed USB device controller (DWC OTG controller[0], UTMI PHY),
+            so no GPIO assignment is needed in application code.
+
+            This defaults to off because controller[0] is shared with the UVC
+            camera host module (EXAMPLE_ENABLE_TEST_UVC). One controller cannot
+            be device and host at the same time; enable one or the other. The
+            FULL USB port (USB Serial/JTAG, GPIO24/25) already provides a
+            CDC-ACM serial console for download and logging without this demo.
+
+    config EXAMPLE_ENABLE_TEST_UVC
+        bool "Enable USB UVC camera (High-Speed Host) test module"
+        default y
+        help
+            Enable this option to install the USB Host Library on the board's
+            High-Speed USB OTG peripheral (DWC OTG controller[0], internal UTMI
+            HS PHY, HIGH USB port / package pins 49-50), run the esp-usb UVC
+            host driver, and decode incoming MJPEG frames with the ESP32-P4
+            hardware JPEG decoder.
+
+            controller[0] is shared with the TinyUSB CDC-ACM demo
+            (EXAMPLE_ENABLE_TEST_USB). One controller cannot be device and host
+            at the same time, so this module defaults to on and the CDC demo
+            defaults to off. The FULL USB port (USB Serial/JTAG, GPIO24/25)
+            already provides a CDC-ACM serial console for download and logging.
+
+            Phase A (current): the module only logs per-frame observations
+            (frame index, byte length, decoded resolution, hardware JPEG
+            decode latency, error code). It does not yet render frames to the
+            LVGL demo UI. Target format is 1280x720 MJPEG at 15 FPS (480 Mbps
+            HS bandwidth is ample). Tune the stream format and buffering in
+            test_config.h.
 
     config EXAMPLE_ENABLE_TEST_WIRELESS
         bool "Enable WiFi/BLE test module"
