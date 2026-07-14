@@ -48,7 +48,7 @@
 * ESP32-P4 开发板，建议使用与 ESP32-P4 Function-EV-Board 接线兼容的硬件
 * 1024x600 的 JD9165 MIPI 屏或配套子板
 * USB 线，用于供电、烧录和串口日志输出
-* 当前板上有两个独立的 USB Device 口：`Full-Speed USB Device`（专用封装脚 `49/50`）和 `High-Speed USB Device`（信号 GPIO `GPIO24/25`，对应封装脚 `52/53`）
+* 当前板上有两个 USB Type-C 口，但能力不同：`FULL USB`（丝印，信号 GPIO `GPIO24/25`）是 USB Serial/JTAG（USJ）固定功能 CDC-ACM 串口，用于烧录和日志；`HIGH USB`（丝印，专用封装脚 `49/50`）是内部 UTMI High-Speed PHY + DWC OTG controller[0]，480Mbps，可作 HS Device（TinyUSB CDC-ACM echo）或 HS Host（usb_host + UVC），同一时刻只能选一种角色。USB 子系统方案详见 [docs/usb_solution.md](./docs/usb_solution.md)。
 
 ### Hardware Connection
 
@@ -81,7 +81,7 @@ For the on-board `ESP32-P4 + ESP32-C6` design, hosted WiFi uses `SDMMC Slot 1` o
 | MIPI DSI | 屏排线接到 `MIPI_DSI` 接口 |
 | SD 卡 (SDMMC) | D0-D3=`GPIO39-42`, CLK=`GPIO43`, CMD=`GPIO44`（SLOT_0，menuconfig 启用） |
 | RTC | RX8025T-UC 复用触摸 I2C：SDA=`GPIO7`, SCL=`GPIO8`, 地址 `0x32`，启用后每 5 秒读取一次 |
-| USB Device | `High-Speed USB Device` 口用于当前 TinyUSB CDC-ACM echo 测试（信号 GPIO `GPIO24/25`，对应封装脚 `52/53`）；`Full-Speed USB Device` 口当前未被本工程使用 |
+| USB Device | `HIGH USB` 口（专用封装脚 `49/50`，内部 UTMI HS PHY，DWC OTG controller[0]）用于当前 TinyUSB CDC-ACM echo 测试；`FULL USB` 口（`GPIO24/25`，USJ 控制器）是固定功能串口，仅用于烧录/日志，不能跑自定义 device 栈。USB 子系统方案详见 [docs/usb_solution.md](./docs/usb_solution.md) |
 | WiFi/BLE 协处理器 | `ESP32-P4 <-> ESP32-C6` 通过 SDIO 相连：D0=`GPIO14`, D1=`GPIO15`, D2=`GPIO16`, D3=`GPIO17`, CLK=`GPIO18`, CMD=`GPIO19` |
 
 当前板上 `ESP32-C6` hosted WiFi 走 `SDMMC Slot 1`，SD 卡走 `SDMMC Slot 0`。在 ESP-IDF `v6.0.x` 下，SD 卡测试路径需要复用 ESP-Hosted 已完成的 SDMMC host controller 初始化，不能再次重复初始化共享的 SDMMC host controller。
@@ -149,7 +149,7 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 * 屏子板与 ESP32-P4 开发板必须共地。
 * 当前工程默认使用内部 `LDO channel 3` 输出 `2.5V` 作为 MIPI DPHY 供电。
 * 烧录和看日志时，先连接开发板 `USB-UART`，再按正常顺序上电。
-* 当前板上两个 USB Device 口都可能在主机侧表现为 USB 设备；本工程的 CDC echo 测试请连接 `High-Speed USB Device` 口（信号 GPIO `GPIO24/25`，对应封装脚 `52/53`），不要把它和烧录/日志口混用。
+* 当前板上两个 USB Type-C 口都可能被主机侧识别为串口设备，但能力不同：`FULL USB`（`GPIO24/25`，USJ 控制器）只用于烧录/日志；`HIGH USB`（封装脚 `49/50`，UTMI HS PHY + DWC OTG controller[0]）用于应用层 CDC echo 或 USB Host（UVC），二者同一时刻只能选一种角色。CDC echo 测试请连接 `HIGH USB` 口，不要与烧录/日志口混用。
 * 当前板上 `GPIO14~19` 已固定连接到 `ESP32-C6`，当前 hosted WiFi 已使用这组 SDIO 连接，不要复用这些 IO。
 
 ## Project Notes / 工程说明

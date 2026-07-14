@@ -26,13 +26,27 @@
 每类外设独立成模块，遵循 `test_<外设>.c/.h` 命名约定，单一职责：
 
 - SD 卡：`main/test_sdcard.c/.h`
-- USB：`main/test_usb.c/.h`
+- USB：`main/test_usb.c/.h`（CDC Device）、`main/test_uvc.c/.h`（UVC Host + 硬件 JPEG 解码）、`main/test_usb_role.c/.h`（规划，运行时角色管理框架）
 - 摄像头：`main/test_camera.c/.h`
 - 传感器：`main/test_sensor.c/.h`
 - WiFi/蓝牙：`main/test_wireless.c/.h`（需协处理器芯片，如 ESP32-C6）
 - 音频 I2S：`main/test_audio.c/.h`
 
 外设公共参数（引脚、I2C 总线等）集中在 `main/test_config.h`，与 `display_config.h` 风格一致。主入口通过 Kconfig 选项控制各模块启用/禁用。
+
+### USB 子系统约束
+
+USB 子系统方案详见 `docs/usb_solution.md`。本工程有两个 USB Type-C 口，能力不同：
+
+- `FULL USB`（丝印，GPIO24/25）= USB Serial/JTAG（USJ）固定功能 CDC-ACM，只用于烧录和日志，**不是 DWC OTG**，不能跑 TinyUSB 自定义 device 栈或 USB Host。
+- `HIGH USB`（丝印，封装脚 49/50）= 内部 UTMI HS PHY + DWC OTG controller[0]，480Mbps，可作 HS Device（TinyUSB CDC）或 HS Host（usb_host + UVC），**同一时刻只能选一种角色**。
+
+约束：
+
+- `test_usb`（CDC Device）与 `test_uvc`（UVC Host）共享 controller[0]，Kconfig `EXAMPLE_ENABLE_TEST_USB` / `EXAMPLE_ENABLE_TEST_UVC` 必须互斥（规划加双向 `depends on !...` 或 main.c 编译期 `_Static_assert`）。当前两个开关无互斥约束，可同时设 `y` 导致冲突，属已知待修。
+- 运行时角色切换（规划中）：通过 `test_usb_role` 模块在 role worker task 内串行执行 deinit 当前 → init 目标，不并发 install 两个 stack。可行性依据为 IDF `v6.0.1` `usb_phy_otg_set_mode` / `usb_new_phy` / `usb_del_phy` 静态分析，uninstall 是否完整释放 DWC OTG 需一次上板验证。
+- UVC 格式协商（规划）：不硬编码 FPS/分辨率，先在 `UVC_HOST_DRIVER_EVENT_DEVICE_CONNECTED` 回调里读设备 frame_info 列表，按偏好（MJPEG + 偏好分辨率 + 最高 fps）匹配并降级。当前 `test_config.h` 硬编码 `TEST_UVC_H_RES/V_RES/FPS` 是临时实现，待设备能力枚举接入后改为偏好值。
+- USB 模块对外接口仍收敛为 `init/run/deinit/get_status` capability 风格，UI 通过 `test_usb_role_switch` 触发切换，不直接操作底层 USB 句柄。
 
 ## AI 修改规则
 
