@@ -21,6 +21,7 @@
 #include "test_battery.h"
 #include "test_rtc.h"
 #include "test_usb.h"
+#include "test_usb_role.h"
 #include "test_wireless.h"
 
 static const char *TAG = "demo_ui";
@@ -67,6 +68,7 @@ static lv_obj_t *s_usb_status_label;
 static lv_obj_t *s_usb_line_label;
 static lv_obj_t *s_usb_stats_label;
 static lv_obj_t *s_usb_hint_label;
+static lv_obj_t *s_usb_switch_btn;
 
 static lv_obj_t *s_audio_status_label;
 static lv_obj_t *s_audio_size_label;
@@ -450,6 +452,19 @@ static void demo_touch_area_event_cb(lv_event_t *e)
     }
 }
 
+static void usb_switch_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    test_usb_role_t current = test_usb_role_current();
+    if (current == TEST_USB_ROLE_CDC_DEVICE) {
+        test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);
+    } else if (current == TEST_USB_ROLE_UVC_HOST) {
+        test_usb_role_switch(TEST_USB_ROLE_CDC_DEVICE);
+    } else {
+        test_usb_role_switch(TEST_USB_ROLE_CDC_DEVICE);
+    }
+}
+
 static void audio_music_btn_cb(lv_event_t *e)
 {
     (void)e;
@@ -717,27 +732,78 @@ static void demo_update_usb_card(void)
         return;
     }
 
-    test_usb_status_t status = {0};
-    esp_err_t ret = test_usb_get_status(&status);
-    if (ret != ESP_OK || !status.initialized) {
+    test_usb_role_status_t status = {0};
+    esp_err_t ret = test_usb_role_get_status(&status);
+    if (ret != ESP_OK) {
         demo_label_set_text_if_changed(s_usb_status_label, "状态: 未初始化");
         demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
         demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
+        demo_label_set_text_if_changed(s_usb_hint_label, "--");
         return;
     }
 
-    if (status.last_error != ESP_OK) {
-        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
+    /* Status line: current role + switch progress */
+    if (status.switch_in_progress) {
+        demo_label_set_text_if_changed(s_usb_status_label, "状态: 切换中...");
+    } else if (status.last_switch_error != ESP_OK && status.current_role == TEST_USB_ROLE_NONE) {
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 切换失败(0x%x)", (unsigned int)status.last_switch_error);
     } else {
-        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: %s", status.attached ? "已连接主机" : "等待枚举");
+        const char *role_text = "空闲";
+        if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
+            role_text = status.cdc_attached ? "CDC 已连接主机" : "CDC 等待枚举";
+        } else if (status.current_role == TEST_USB_ROLE_UVC_HOST) {
+            role_text = status.uvc_device_connected ? "UVC 设备已连接" : "UVC 等待设备";
+        }
+        demo_label_set_text_if_changed(s_usb_status_label, role_text);
     }
 
-    demo_label_set_text_fmt_if_changed(s_usb_line_label, "DTR=%d RTS=%d 最近收包=%uB 最近发包=%uB",
-                                       status.dtr, status.rts,
-                                       (unsigned int)status.last_rx_size, (unsigned int)status.last_tx_size);
-    demo_label_set_text_fmt_if_changed(s_usb_stats_label, "RX %" PRIu32 " 包/%" PRIu32 " B  TX %" PRIu32 " 包/%" PRIu32 " B",
-                                       status.rx_packets, status.rx_bytes, status.tx_packets, status.tx_bytes);
-    demo_label_set_text_if_changed(s_usb_hint_label, "连接 HS USB Device 口，用串口工具发送数据验证 CDC 回显");
+    /* Second line: role-specific details */
+    if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
+        test_usb_status_t cdc = {0};
+        if (test_usb_get_status(&cdc) == ESP_OK && cdc.initialized) {
+            demo_label_set_text_fmt_if_changed(s_usb_line_label, "DTR=%d RTS=%d 收=%uB 发=%uB",
+                                               cdc.dtr, cdc.rts,
+                                               (unsigned int)cdc.last_rx_size, (unsigned int)cdc.last_tx_size);
+            demo_label_set_text_fmt_if_changed(s_usb_stats_label, "RX %" PRIu32 " 包/%" PRIu32 " B  TX %" PRIu32 " 包/%" PRIu32 " B",
+                                               cdc.rx_packets, cdc.rx_bytes, cdc.tx_packets, cdc.tx_bytes);
+        } else {
+            demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
+            demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
+        }
+        demo_label_set_text_if_changed(s_usb_hint_label, "连接 HIGH USB 口，用串口工具发送数据验证 CDC 回显");
+    } else if (status.current_role == TEST_USB_ROLE_UVC_HOST) {
+        if (status.uvc_format_negotiated) {
+            demo_label_set_text_fmt_if_changed(s_usb_line_label, "协商: %ux%u@%.1fFPS",
+                                               (unsigned)status.uvc_negotiated_h_res,
+                                               (unsigned)status.uvc_negotiated_v_res,
+                                               status.uvc_negotiated_fps);
+        } else {
+            demo_label_set_text_if_changed(s_usb_line_label, "协商: 等待设备描述符");
+        }
+        demo_label_set_text_fmt_if_changed(s_usb_stats_label, "已解码 %" PRIu32 " 帧  错误 %" PRIu32,
+                                           status.uvc_frames_decoded, status.uvc_decode_errors);
+        demo_label_set_text_if_changed(s_usb_hint_label, "连接 UVC 摄像头到 HIGH USB 口");
+    } else {
+        demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
+        demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
+        demo_label_set_text_if_changed(s_usb_hint_label, "点击下方按钮切换 USB 角色");
+    }
+
+    /* Update switch button label based on current role */
+    if (s_usb_switch_btn != NULL) {
+        lv_obj_t *btn_label = lv_obj_get_child(s_usb_switch_btn, 0);
+        if (btn_label != NULL) {
+            const char *btn_text = "切换到 CDC";
+            if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
+                btn_text = "切换到 UVC";
+            }
+            demo_label_set_text_if_changed(btn_label, btn_text);
+        }
+        lv_obj_clear_state(s_usb_switch_btn, LV_STATE_DISABLED);
+        if (status.switch_in_progress) {
+            lv_obj_add_state(s_usb_switch_btn, LV_STATE_DISABLED);
+        }
+    }
 }
 
 static void demo_update_audio_card(void)
@@ -1370,6 +1436,26 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     demo_config_label(s_usb_stats_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_usb_hint_label, DISPLAY_FONT_ROLE_SMALL);
     lv_obj_set_style_text_color(s_usb_hint_label, lv_color_hex(0x5E4C38), 0);
+
+    lv_obj_t *usb_btn_row = lv_obj_create(usb_card);
+    lv_obj_set_width(usb_btn_row, lv_pct(100));
+    lv_obj_set_height(usb_btn_row, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(usb_btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(usb_btn_row, 0, 0);
+    lv_obj_set_style_pad_all(usb_btn_row, 0, 0);
+    lv_obj_set_style_pad_column(usb_btn_row, 10, 0);
+    lv_obj_set_layout(usb_btn_row, LV_LAYOUT_FLEX);
+    lv_obj_set_flex_flow(usb_btn_row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_clear_flag(usb_btn_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_usb_switch_btn = lv_button_create(usb_btn_row);
+    lv_obj_set_size(s_usb_switch_btn, 160, 48);
+    lv_obj_add_event_cb(s_usb_switch_btn, usb_switch_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *usb_switch_label = lv_label_create(s_usb_switch_btn);
+    lv_label_set_text(usb_switch_label, "切换到 UVC");
+    demo_set_text_role(usb_switch_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(usb_switch_label);
+
     demo_build_progress(progress_cb, "usb");
 
     lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 238);

@@ -37,6 +37,14 @@ static uvc_host_stream_hdl_t s_stream_hdl;
 static uint8_t *s_rgb565_buf;
 static size_t s_rgb565_buf_size;
 
+/* Device capability enumeration result, filled in the DEVICE_CONNECTED
+ * callback and consumed by test_uvc_run() when opening the stream. */
+static uvc_host_stream_format_t s_negotiated_format;
+static bool s_format_negotiated;
+
+/* Scratch buffer for uvc_host_get_frame_list(). Sized in test_config.h. */
+static uvc_host_frame_info_t s_frame_info_list[TEST_UVC_FRAME_INFO_MAX];
+
 static bool s_initialized;
 static bool s_stopping;
 static bool s_stream_opened;
@@ -52,6 +60,129 @@ static uint32_t s_last_frame_w;
 static uint32_t s_last_frame_h;
 static esp_err_t s_last_error = ESP_OK;
 
+/* Convert a UVC frame interval (100ns units) to frames-per-second. */
+static float uvc_interval_to_fps(uint32_t interval_100ns)
+{
+    if (interval_100ns == 0) {
+        return 0.0f;
+    }
+    return 10000000.0f / (float)interval_100ns;
+}
+
+/* Pick the highest-fps (smallest interval) entry from a uvc_host_frame_info_t.
+ * For continuous ranges (interval_type == 0) use interval_min; for discrete
+ * intervals use the minimum of interval[0..interval_type-1]. */
+static uint32_t uvc_pick_best_interval(const uvc_host_frame_info_t *info)
+{
+    if (info->interval_type == 0) {
+        return info->interval_min;
+    }
+    uint32_t best = info->interval[0];
+    for (uint8_t i = 1; i < info->interval_type && i < CONFIG_UVC_INTERVAL_ARRAY_SIZE; ++i) {
+        if (info->interval[i] < best) {
+            best = info->interval[i];
+        }
+    }
+    return best;
+}
+
+/* Enumerate the device's frame descriptors and pick the best MJPEG format.
+ * Preference: MJPEG format -> preferred resolution -> highest fps.
+ * Fallback: if preferred resolution is unavailable, the largest MJPEG
+ * resolution supported by the device; if no MJPEG at all, the first entry. */
+static void uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index)
+{
+    s_format_negotiated = false;
+
+    size_t list_size = TEST_UVC_FRAME_INFO_MAX;
+    esp_err_t ret = uvc_host_get_frame_list(dev_addr, uvc_stream_index,
+                                            &s_frame_info_list, &list_size);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "uvc_host_get_frame_list failed: %s (dev_addr=%u stream=%u)",
+                 esp_err_to_name(ret), (unsigned)dev_addr, (unsigned)uvc_stream_index);
+        return;
+    }
+
+    if (list_size == 0) {
+        ESP_LOGW(TAG, "device reported 0 frame descriptors");
+        return;
+    }
+
+    if (list_size > TEST_UVC_FRAME_INFO_MAX) {
+        ESP_LOGW(TAG, "device reported %zu frame descriptors, only %d enumerated",
+                 list_size, TEST_UVC_FRAME_INFO_MAX);
+        list_size = TEST_UVC_FRAME_INFO_MAX;
+    }
+
+    ESP_LOGI(TAG, "enumerated %zu frame descriptors:", list_size);
+    for (size_t i = 0; i < list_size; ++i) {
+        const uvc_host_frame_info_t *f = &s_frame_info_list[i];
+        ESP_LOGI(TAG, "  [%zu] format=%d %ux%u interval_type=%u",
+                 i, (int)f->format, (unsigned)f->h_res, (unsigned)f->v_res,
+                 (unsigned)f->interval_type);
+    }
+
+    /* Pass 1: MJPEG + preferred resolution + highest fps */
+    const uvc_host_frame_info_t *best_preferred = NULL;
+    uint32_t best_preferred_interval = 0;
+    /* Pass 2: MJPEG + largest resolution + highest fps (fallback) */
+    const uvc_host_frame_info_t *best_mjpeg = NULL;
+    uint32_t best_mjpeg_interval = 0;
+    uint32_t best_mjpeg_pixels = 0;
+
+    for (size_t i = 0; i < list_size; ++i) {
+        const uvc_host_frame_info_t *f = &s_frame_info_list[i];
+        if (f->format != TEST_UVC_FORMAT) {
+            continue;
+        }
+
+        uint32_t interval = uvc_pick_best_interval(f);
+        uint32_t pixels = f->h_res * f->v_res;
+
+        if (f->h_res == TEST_UVC_PREFER_H_RES && f->v_res == TEST_UVC_PREFER_V_RES) {
+            if (best_preferred == NULL || interval < best_preferred_interval) {
+                best_preferred = f;
+                best_preferred_interval = interval;
+            }
+        }
+
+        if (best_mjpeg == NULL || pixels > best_mjpeg_pixels ||
+            (pixels == best_mjpeg_pixels && interval < best_mjpeg_interval)) {
+            best_mjpeg = f;
+            best_mjpeg_interval = interval;
+            best_mjpeg_pixels = pixels;
+        }
+    }
+
+    const uvc_host_frame_info_t *chosen = best_preferred;
+    uint32_t chosen_interval = best_preferred_interval;
+    if (chosen == NULL) {
+        chosen = best_mjpeg;
+        chosen_interval = best_mjpeg_interval;
+    }
+    if (chosen == NULL && list_size > 0) {
+        /* No MJPEG at all: use the first entry as last-resort fallback. */
+        chosen = &s_frame_info_list[0];
+        chosen_interval = uvc_pick_best_interval(chosen);
+    }
+
+    if (chosen == NULL) {
+        ESP_LOGE(TAG, "no usable frame descriptor after negotiation");
+        return;
+    }
+
+    s_negotiated_format.h_res = chosen->h_res;
+    s_negotiated_format.v_res = chosen->v_res;
+    s_negotiated_format.fps = uvc_interval_to_fps(chosen_interval);
+    s_negotiated_format.format = chosen->format;
+    s_format_negotiated = true;
+
+    ESP_LOGI(TAG, "negotiated format: %ux%u@%.1ffps format=%d%s",
+             (unsigned)s_negotiated_format.h_res, (unsigned)s_negotiated_format.v_res,
+             s_negotiated_format.fps, (int)s_negotiated_format.format,
+             (chosen == best_preferred) ? " (preferred)" : " (fallback)");
+}
+
 static void uvc_driver_event_callback(const uvc_host_driver_event_data_t *event, void *user_ctx)
 {
     (void)user_ctx;
@@ -63,6 +194,8 @@ static void uvc_driver_event_callback(const uvc_host_driver_event_data_t *event,
                  event->device_connected.dev_addr,
                  event->device_connected.uvc_stream_index,
                  (unsigned)event->device_connected.frame_info_num);
+        uvc_negotiate_format(event->device_connected.dev_addr,
+                             event->device_connected.uvc_stream_index);
         break;
     default:
         ESP_LOGW(TAG, "UVC driver: unknown event %d", event->type);
@@ -83,6 +216,7 @@ static void uvc_stream_event_callback(const uvc_host_stream_event_data_t *event,
         uvc_host_stream_hdl_t hdl = event->device_disconnected.stream_hdl;
         ESP_LOGI(TAG, "UVC device disconnected, closing stream");
         s_device_connected = false;
+        s_format_negotiated = false;
         s_stream_started = false;
         if (hdl != NULL) {
             esp_err_t ret = uvc_host_stream_close(hdl);
@@ -340,6 +474,7 @@ esp_err_t test_uvc_init(void)
     s_stream_opened = false;
     s_stream_started = false;
     s_device_connected = false;
+    s_format_negotiated = false;
     s_frames_received = 0;
     s_frames_decoded = 0;
     s_decode_errors = 0;
@@ -348,9 +483,9 @@ esp_err_t test_uvc_init(void)
     s_last_frame_w = 0;
     s_last_frame_h = 0;
     s_last_error = ESP_OK;
-    ESP_LOGI(TAG, "UVC camera test module initialized, waiting for UVC device (vid=0x%x pid=0x%x %ux%u@%uFPS)",
+    ESP_LOGI(TAG, "UVC camera test module initialized, waiting for UVC device (vid=0x%x pid=0x%x prefer %ux%u MJPEG)",
              (unsigned)TEST_UVC_VID, (unsigned)TEST_UVC_PID,
-             (unsigned)TEST_UVC_H_RES, (unsigned)TEST_UVC_V_RES, (unsigned)TEST_UVC_FPS);
+             (unsigned)TEST_UVC_PREFER_H_RES, (unsigned)TEST_UVC_PREFER_V_RES);
     return ESP_OK;
 
 err_del_jpeg:
@@ -399,12 +534,13 @@ esp_err_t test_uvc_run(void)
             .pid = TEST_UVC_PID,
             .uvc_stream_index = TEST_UVC_UVC_STREAM_INDEX,
         },
-        .vs_format = {
-            .h_res = TEST_UVC_H_RES,
-            .v_res = TEST_UVC_V_RES,
-            .fps = TEST_UVC_FPS,
-            .format = TEST_UVC_FORMAT,
-        },
+        .vs_format = s_format_negotiated ? s_negotiated_format
+                                          : (uvc_host_stream_format_t) {
+                                                .h_res = TEST_UVC_PREFER_H_RES,
+                                                .v_res = TEST_UVC_PREFER_V_RES,
+                                                .fps = 0,
+                                                .format = TEST_UVC_FORMAT,
+                                            },
         .advanced = {
             .number_of_frame_buffers = TEST_UVC_FRAME_BUF_COUNT,
             .frame_size = TEST_UVC_FRAME_SIZE,
@@ -415,8 +551,11 @@ esp_err_t test_uvc_run(void)
         },
     };
 
-    ESP_LOGI(TAG, "Opening UVC stream %ux%u@%uFPS format=%d on High-Speed USB OTG...",
-             (unsigned)TEST_UVC_H_RES, (unsigned)TEST_UVC_V_RES, (unsigned)TEST_UVC_FPS, (int)TEST_UVC_FORMAT);
+    ESP_LOGI(TAG, "Opening UVC stream %ux%u@%.1fFPS format=%d on High-Speed USB OTG...",
+             (unsigned)stream_config.vs_format.h_res,
+             (unsigned)stream_config.vs_format.v_res,
+             stream_config.vs_format.fps,
+             (int)stream_config.vs_format.format);
     esp_err_t ret = uvc_host_stream_open(&stream_config, pdMS_TO_TICKS(TEST_UVC_STREAM_OPEN_TIMEOUT_MS), &s_stream_hdl);
     if (ret != ESP_OK) {
         s_last_error = ret;
@@ -442,6 +581,10 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .stream_opened = s_stream_opened,
         .stream_started = s_stream_started,
         .device_connected = s_device_connected,
+        .format_negotiated = s_format_negotiated,
+        .negotiated_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0,
+        .negotiated_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0,
+        .negotiated_fps = s_format_negotiated ? s_negotiated_format.fps : 0.0f,
         .frames_received = s_frames_received,
         .frames_decoded = s_frames_decoded,
         .decode_errors = s_decode_errors,
@@ -523,6 +666,7 @@ esp_err_t test_uvc_deinit(void)
     s_stream_opened = false;
     s_stream_started = false;
     s_device_connected = false;
+    s_format_negotiated = false;
     s_frames_received = 0;
     s_frames_decoded = 0;
     s_decode_errors = 0;

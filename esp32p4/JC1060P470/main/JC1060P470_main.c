@@ -22,6 +22,7 @@
 #include "test_battery.h"
 #include "test_usb.h"
 #include "test_uvc.h"
+#include "test_usb_role.h"
 #include "test_wireless.h"
 
 #include <inttypes.h>
@@ -161,23 +162,11 @@ static void app_system_init_task(void *arg)
     }
 #endif
 
-#if CONFIG_EXAMPLE_ENABLE_TEST_USB
-    ESP_LOGI(TAG, "Initialize USB Device CDC-ACM test module");
-    esp_err_t usb_ret = test_usb_init();
-    if (usb_ret == ESP_OK) {
-        test_usb_run();
-    } else {
-        ESP_LOGE(TAG, "USB test module init failed: %s", esp_err_to_name(usb_ret));
-    }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_UVC
-    ESP_LOGI(TAG, "Initialize USB UVC camera (Full-Speed Host) test module");
-    esp_err_t uvc_ret = test_uvc_init();
-    if (uvc_ret == ESP_OK) {
-        test_uvc_run();
-    } else {
-        ESP_LOGE(TAG, "UVC camera test module init failed: %s", esp_err_to_name(uvc_ret));
+#if CONFIG_EXAMPLE_ENABLE_TEST_USB || CONFIG_EXAMPLE_ENABLE_TEST_UVC
+    ESP_LOGI(TAG, "Initialize USB role management module");
+    esp_err_t usb_role_ret = test_usb_role_init();
+    if (usb_role_ret != ESP_OK) {
+        ESP_LOGE(TAG, "USB role module init failed: %s", esp_err_to_name(usb_role_ret));
     }
 #endif
 

@@ -186,7 +186,9 @@
  *
  * 阶段 A（当前）：USB Host + UVC 收流 + 硬件 JPEG 解码（RGB565），
  *   只做日志观测（帧序号/字节/宽高/解码耗时/错误码），不写 LVGL 画布。
- *   目标格式：1280x720@15 MJPEG（HS 带宽充足）。
+ *   流格式（分辨率/FPS）在设备连接时从描述符枚举后动态协商，优先
+ *   匹配 TEST_UVC_PREFER_H_RES × TEST_UVC_PREFER_V_RES 的 MJPEG +
+ *   最高 fps，不匹配时降级到设备实际支持的最大 MJPEG 格式。
  *
  * Cache 一致性：
  *   - UVC 帧缓冲在 PSRAM，由 USB-DWC DMA 写入，应用 CPU 读 frame->data；
@@ -204,9 +206,18 @@
 #define TEST_UVC_UVC_STREAM_INDEX              0
 
 #define TEST_UVC_FORMAT                         UVC_VS_FORMAT_MJPEG
-#define TEST_UVC_H_RES                          1280
-#define TEST_UVC_V_RES                          720
-#define TEST_UVC_FPS                            30
+
+/* Preferred resolution for stream negotiation. Not enforced: if the device
+ * does not support this exact resolution, the module falls back to the
+ * device's actual maximum supported MJPEG resolution. */
+#define TEST_UVC_PREFER_H_RES                   1280
+#define TEST_UVC_PREFER_V_RES                   720
+
+/* Maximum number of frame descriptors the module will enumerate from a single
+ * UVC device via uvc_host_get_frame_list(). Must be >= the device's
+ * frame_info_num for the selected stream. 8 is ample for typical USB cameras
+ * (usually 1-3 resolutions x 1-3 fps each). */
+#define TEST_UVC_FRAME_INFO_MAX                 8
 
 #define TEST_UVC_FRAME_BUF_COUNT                3
 #define TEST_UVC_FRAME_SIZE                     0          /* 0: use dwMaxVideoFrameSize from negotiation */
@@ -220,8 +231,8 @@
 #define TEST_UVC_USB_LIB_TASK_PRIORITY          10
 #define TEST_UVC_USB_LIB_TASK_CORE              tskNO_AFFINITY
 
-#define TEST_UVC_DRIVER_TASK_STACK              4096
-#define TEST_UVC_DRIVER_TASK_PRIORITY           11
+#define TEST_UVC_DRIVER_TASK_STACK               4096
+#define TEST_UVC_DRIVER_TASK_PRIORITY            11
 #define TEST_UVC_DRIVER_TASK_CORE               tskNO_AFFINITY
 
 #define TEST_UVC_WORKER_TASK_STACK              8192
@@ -231,7 +242,7 @@
 #define TEST_UVC_STREAM_OPEN_TIMEOUT_MS         5000
 #define TEST_UVC_FRAME_RECV_TIMEOUT_MS          5000
 
-#define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 67ms (15fps 上限), 给硬件解码容限 */
+#define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
 #define TEST_UVC_RGB565_BUF_CAPS                MALLOC_CAP_SPIRAM
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */

@@ -15,6 +15,10 @@ typedef struct {
     bool stream_opened;
     bool stream_started;
     bool device_connected;
+    bool format_negotiated;
+    uint32_t negotiated_h_res;
+    uint32_t negotiated_v_res;
+    float negotiated_fps;
     uint32_t frames_received;
     uint32_t frames_decoded;
     uint32_t decode_errors;
@@ -26,7 +30,7 @@ typedef struct {
 } test_uvc_status_t;
 
 /**
- * @brief Install the USB Host Library on the board's Full-Speed USB OTG
+ * @brief Install the USB Host Library on the board's High-Speed USB OTG
  *        peripheral, install the esp-usb UVC host driver, acquire the ESP32-P4
  *        hardware JPEG decoder, and start the background USB Host event task
  *        and the frame worker task. The worker task remains idle until

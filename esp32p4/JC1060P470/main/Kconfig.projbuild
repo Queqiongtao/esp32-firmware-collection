@@ -177,45 +177,41 @@ menu "Example Configuration"
         default 6 if MIC_GAIN_36DB
         default 7 if MIC_GAIN_42DB
 
-    config EXAMPLE_ENABLE_TEST_USB
-        bool "Enable USB Device CDC-ACM (virtual serial) test module"
-        default n
+    choice EXAMPLE_USB_ROLE
+        prompt "USB startup role (controller[0])"
+        default EXAMPLE_ENABLE_TEST_USB
         help
-            Enable this option to install a TinyUSB CDC-ACM Device echo demo on
-            the board's High-Speed USB Device port. The board enumerates as a
-            virtual serial port on the PC side, dumps received data in hex, and
-            echoes it back unchanged. On ESP32-P4 the demo uses the internal
-            high-speed USB device controller (DWC OTG controller[0], UTMI PHY),
-            so no GPIO assignment is needed in application code.
+            Select the startup role for the HIGH USB port (DWC OTG
+            controller[0], internal UTMI HS PHY). One controller cannot be
+            device and host at the same time, so the two roles are mutually
+            exclusive. At runtime the USB Role framework (test_usb_role) can
+            switch controller[0] between CDC Device and UVC Host without
+            reflashing. The FULL USB port (USB Serial/JTAG, GPIO24/25) already
+            provides a CDC-ACM serial console for download and logging
+            regardless of this choice.
 
-            This defaults to off because controller[0] is shared with the UVC
-            camera host module (EXAMPLE_ENABLE_TEST_UVC). One controller cannot
-            be device and host at the same time; enable one or the other. The
-            FULL USB port (USB Serial/JTAG, GPIO24/25) already provides a
-            CDC-ACM serial console for download and logging without this demo.
+    config EXAMPLE_ENABLE_TEST_USB
+        bool "USB Device CDC-ACM echo"
+        help
+            Install a TinyUSB CDC-ACM Device echo demo on the HIGH USB port.
+            The board enumerates as a virtual serial port on the PC side,
+            dumps received data in hex, and echoes it back unchanged.
 
     config EXAMPLE_ENABLE_TEST_UVC
-        bool "Enable USB UVC camera (High-Speed Host) test module"
-        default y
+        bool "USB UVC camera host"
         help
-            Enable this option to install the USB Host Library on the board's
-            High-Speed USB OTG peripheral (DWC OTG controller[0], internal UTMI
-            HS PHY, HIGH USB port / package pins 49-50), run the esp-usb UVC
-            host driver, and decode incoming MJPEG frames with the ESP32-P4
-            hardware JPEG decoder.
-
-            controller[0] is shared with the TinyUSB CDC-ACM demo
-            (EXAMPLE_ENABLE_TEST_USB). One controller cannot be device and host
-            at the same time, so this module defaults to on and the CDC demo
-            defaults to off. The FULL USB port (USB Serial/JTAG, GPIO24/25)
-            already provides a CDC-ACM serial console for download and logging.
+            Install the USB Host Library on the HIGH USB port, run the
+            esp-usb UVC host driver, and decode incoming MJPEG frames with
+            the ESP32-P4 hardware JPEG decoder.
 
             Phase A (current): the module only logs per-frame observations
             (frame index, byte length, decoded resolution, hardware JPEG
-            decode latency, error code). It does not yet render frames to the
-            LVGL demo UI. Target format is 1280x720 MJPEG at 15 FPS (480 Mbps
-            HS bandwidth is ample). Tune the stream format and buffering in
-            test_config.h.
+            decode latency, error code). It does not yet render frames to
+            the LVGL demo UI. The stream format (resolution, FPS) is
+            negotiated from the device descriptors at connection time using
+            the preferred values defined in test_config.h, with fallback to
+            the device's actual capabilities.
+    endchoice
 
     config EXAMPLE_ENABLE_TEST_WIRELESS
         bool "Enable WiFi/BLE test module"
