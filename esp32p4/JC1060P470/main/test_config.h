@@ -239,10 +239,14 @@
 #define TEST_UVC_WORKER_TASK_PRIORITY           4
 #define TEST_UVC_WORKER_TASK_CORE               tskNO_AFFINITY
 
-#define TEST_UVC_STREAM_OPEN_TIMEOUT_MS         5000
+#define TEST_UVC_ENUM_MAX_ATTEMPTS              3
+#define TEST_UVC_ENUM_TIMEOUT_MS                2000
+#define TEST_UVC_ROOT_PORT_CYCLE_DELAY_MS       500
+#define TEST_UVC_DEVICE_READY_DELAY_MS          1000
+#define TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS       3
+#define TEST_UVC_STREAM_OPEN_RETRY_DELAY_MS     500
 #define TEST_UVC_FRAME_RECV_TIMEOUT_MS          5000
 
 #define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
-#define TEST_UVC_RGB565_BUF_CAPS                MALLOC_CAP_SPIRAM
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */

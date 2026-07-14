@@ -204,9 +204,9 @@ menu "Example Configuration"
             esp-usb UVC host driver, and decode incoming MJPEG frames with
             the ESP32-P4 hardware JPEG decoder.
 
-            Phase A (current): the module only logs per-frame observations
-            (frame index, byte length, decoded resolution, hardware JPEG
-            decode latency, error code). It does not yet render frames to
+            Phase A (current): the module logs per-second stream summaries
+            (received, decoded, error counts and latest hardware JPEG decode
+            latency), while failures are logged immediately. It does not yet render frames to
             the LVGL demo UI. The stream format (resolution, FPS) is
             negotiated from the device descriptors at connection time using
             the preferred values defined in test_config.h, with fallback to

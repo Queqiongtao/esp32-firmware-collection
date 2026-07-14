@@ -42,10 +42,10 @@ esp_err_t test_uvc_init(void);
 
 /**
  * @brief Open and start a UVC stream from any attached UVC camera. This is a
- *        blocking call that negotiates the stream format for up to
- *        TEST_UVC_STREAM_OPEN_TIMEOUT_MS. On success the frame callback starts
+ *        blocking call that waits for a UVC device, performs bounded root-port
+ *        recovery and negotiates the stream format. On success the frame callback starts
  *        enqueueing frames for the worker task, which decodes them with the
- *        hardware JPEG decoder and logs per-frame observations.
+ *        hardware JPEG decoder and logs periodic stream summaries.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
