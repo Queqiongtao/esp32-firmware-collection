@@ -28,6 +28,20 @@ python3 assets/fonts/build_subset.py --source /path/to/SourceHanSansSC-Regular.o
 不要提交完整官方源字体；仓库只保留生成后的 UI 子集字体。若重新生成或更换源字体，
 同步保留/更新对应许可证说明，避免把子集文件误标为官方完整原版。
 
+静态 UI 字库：
+
+- 普通 UI 使用 `main/lvgl_demo_font_patch.c` 的 16 px 静态字库，不依赖 FreeType。
+- FreeType 仅用于 Demo 中的字体缩放测试样本。
+- 修改 UI 文案后，使用当前字符集和思源黑体源文件重新生成静态字库：
+
+```bash
+npx lv_font_conv --size 16 --bpp 4 --format lvgl --no-compress --lv-include lvgl.h \
+  --lv-font-name lvgl_demo_font_patch_16 \
+  --font managed_components/lvgl__lvgl/scripts/built_in_font/SourceHanSansSC-Normal.otf \
+  --symbols "$(tr -d '\n' < assets/fonts/ui_font_charset.txt)" \
+  --output main/lvgl_demo_font_patch.c
+```
+
 构建与回退：
 
 - 构建时通过 `spiffs_create_partition_image(font ../assets/fonts FLASH_IN_PROJECT)` 打包进 `font` 分区

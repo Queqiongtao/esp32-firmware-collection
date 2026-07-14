@@ -89,7 +89,7 @@ static void app_font_init_task(void *arg)
     ESP_LOGI(TAG, "Background FreeType init done: %s elapsed=%" PRId64 "ms",
              esp_err_to_name(font_ret), (esp_timer_get_time() - start_us) / 1000);
     if (font_ret != ESP_OK) {
-        ESP_LOGW(TAG, "FreeType diagnostics failed; UI keeps using static patch font: %s", esp_err_to_name(font_ret));
+        ESP_LOGW(TAG, "FreeType diagnostics failed; only the font test is unavailable: %s", esp_err_to_name(font_ret));
     }
     vTaskDelete(NULL);
 }
@@ -261,7 +261,7 @@ void app_main(void)
     ESP_ERROR_CHECK(display_board_set_backlight(100));
     ESP_ERROR_CHECK(display_lvgl_init(&panel, &lvgl_port));
 
-    ESP_LOGI(TAG, "Display LVGL integrated demo UI (static patch font first)");
+    ESP_LOGI(TAG, "Display LVGL integrated demo UI (static patch font)");
     app_create_demo_ui(lvgl_port.display);
     app_start_background_font_init();
 

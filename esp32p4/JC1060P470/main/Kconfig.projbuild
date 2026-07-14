@@ -178,17 +178,15 @@ menu "Example Configuration"
         default 7 if MIC_GAIN_42DB
 
     choice EXAMPLE_USB_ROLE
-        prompt "USB startup role (controller[0])"
+        prompt "Enable USB controller[0] test capability"
         default EXAMPLE_ENABLE_TEST_USB
         help
-            Select the startup role for the HIGH USB port (DWC OTG
+            Select the enabled test capability for the HIGH USB port (DWC OTG
             controller[0], internal UTMI HS PHY). One controller cannot be
-            device and host at the same time, so the two roles are mutually
-            exclusive. At runtime the USB Role framework (test_usb_role) can
-            switch controller[0] between CDC Device and UVC Host without
-            reflashing. The FULL USB port (USB Serial/JTAG, GPIO24/25) already
-            provides a CDC-ACM serial console for download and logging
-            regardless of this choice.
+            device and host at the same time, so the two capabilities are
+            mutually exclusive. The USB role framework starts idle and the UI
+            switches controller[0] on demand. The FULL USB port (USB
+            Serial/JTAG, GPIO24/25) always provides the serial console.
 
     config EXAMPLE_ENABLE_TEST_USB
         bool "USB Device CDC-ACM echo"
@@ -204,13 +202,10 @@ menu "Example Configuration"
             esp-usb UVC host driver, and decode incoming MJPEG frames with
             the ESP32-P4 hardware JPEG decoder.
 
-            Phase A (current): the module logs per-second stream summaries
-            (received, decoded, error counts and latest hardware JPEG decode
-            latency), while failures are logged immediately. It does not yet render frames to
-            the LVGL demo UI. The stream format (resolution, FPS) is
-            negotiated from the device descriptors at connection time using
-            the preferred values defined in test_config.h, with fallback to
-            the device's actual capabilities.
+            The LVGL UVC test page initializes this module on demand, renders
+            a scaled RGB565 preview, and lists MJPEG resolutions reported by
+            the camera. The selected resolution is reopened asynchronously;
+            returning to the main page releases the UVC Host resources.
     endchoice
 
     config EXAMPLE_ENABLE_TEST_WIRELESS

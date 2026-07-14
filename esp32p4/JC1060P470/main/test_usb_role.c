@@ -30,6 +30,13 @@ static bool s_switch_in_progress;
 static esp_err_t s_last_switch_error = ESP_OK;
 static bool s_initialized;
 
+typedef struct {
+    test_usb_role_t target;
+    bool force_restart;
+    uint32_t uvc_h_res;
+    uint32_t uvc_v_res;
+} test_usb_role_command_t;
+
 static const char *uvc_role_name(test_usb_role_t role)
 {
     switch (role) {
@@ -40,22 +47,41 @@ static const char *uvc_role_name(test_usb_role_t role)
 }
 
 /* Execute the role switch synchronously in the worker task context. */
-static esp_err_t uvc_role_do_switch(test_usb_role_t target)
+static esp_err_t uvc_role_do_switch(const test_usb_role_command_t *command)
 {
+    const test_usb_role_t target = command->target;
+    const bool force_restart = command->force_restart;
     test_usb_role_t current = s_current_role;
     esp_err_t ret = ESP_OK;
 
-    if (current == target) {
+    if (current == target && !force_restart) {
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Switching USB role: %s -> %s", uvc_role_name(current), uvc_role_name(target));
+    if (current == TEST_USB_ROLE_UVC_HOST && target == TEST_USB_ROLE_UVC_HOST && force_restart) {
+        ESP_LOGI(TAG, "Changing UVC stream resolution to %ux%u", (unsigned)command->uvc_h_res,
+                 (unsigned)command->uvc_v_res);
+        ret = test_uvc_change_resolution(command->uvc_h_res, command->uvc_v_res);
+        s_last_switch_error = ret;
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "UVC stream resolution change failed: %s", esp_err_to_name(ret));
+        }
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "%s USB role: %s -> %s", force_restart ? "Restarting" : "Switching",
+             uvc_role_name(current), uvc_role_name(target));
 
     /* Phase 1: deinit current role */
     if (current == TEST_USB_ROLE_CDC_DEVICE) {
-        test_usb_deinit();
+        ret = test_usb_deinit();
     } else if (current == TEST_USB_ROLE_UVC_HOST) {
-        test_uvc_deinit();
+        ret = test_uvc_deinit();
+    }
+    if (ret != ESP_OK) {
+        s_last_switch_error = ret;
+        ESP_LOGE(TAG, "USB role %s deinit failed: %s", uvc_role_name(current), esp_err_to_name(ret));
+        return ret;
     }
     s_current_role = TEST_USB_ROLE_NONE;
 
@@ -70,7 +96,12 @@ static esp_err_t uvc_role_do_switch(test_usb_role_t target)
             test_usb_deinit();
         }
     } else if (target == TEST_USB_ROLE_UVC_HOST) {
-        ret = test_uvc_init();
+        if (force_restart) {
+            ret = test_uvc_set_preferred_resolution(command->uvc_h_res, command->uvc_v_res);
+        }
+        if (ret == ESP_OK) {
+            ret = test_uvc_init();
+        }
         if (ret == ESP_OK) {
             /* Try to open/start the stream. If no camera is connected yet,
              * uvc_host_stream_open will time out; the driver remains installed
@@ -101,13 +132,13 @@ static void uvc_role_worker_task(void *arg)
 {
     (void)arg;
 
-    test_usb_role_t msg;
+    test_usb_role_command_t msg;
     while (true) {
         if (xQueueReceive(s_queue, &msg, portMAX_DELAY) != pdTRUE) {
             continue;
         }
         s_switch_in_progress = true;
-        uvc_role_do_switch(msg);
+        uvc_role_do_switch(&msg);
         s_switch_in_progress = false;
     }
 
@@ -126,7 +157,7 @@ esp_err_t test_usb_role_init(void)
     s_switch_in_progress = false;
     s_last_switch_error = ESP_OK;
 
-    s_queue = xQueueCreate(TEST_USB_ROLE_QUEUE_LEN, sizeof(test_usb_role_t));
+    s_queue = xQueueCreate(TEST_USB_ROLE_QUEUE_LEN, sizeof(test_usb_role_command_t));
     ESP_RETURN_ON_FALSE(s_queue != NULL, ESP_ERR_NO_MEM, TAG, "create role queue failed");
 
     BaseType_t task_created = xTaskCreatePinnedToCore(uvc_role_worker_task,
@@ -140,16 +171,7 @@ esp_err_t test_usb_role_init(void)
 
     s_initialized = true;
 
-    /* Queue the startup role based on Kconfig */
-#if CONFIG_EXAMPLE_ENABLE_TEST_USB
-    ESP_LOGI(TAG, "Startup role: CDC Device");
-    test_usb_role_switch(TEST_USB_ROLE_CDC_DEVICE);
-#elif CONFIG_EXAMPLE_ENABLE_TEST_UVC
-    ESP_LOGI(TAG, "Startup role: UVC Host");
-    test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);
-#else
-    ESP_LOGI(TAG, "Startup role: None (no USB module enabled in Kconfig)");
-#endif
+    ESP_LOGI(TAG, "Startup role: None (USB roles start on demand from the UI)");
 
     return ESP_OK;
 }
@@ -159,8 +181,32 @@ esp_err_t test_usb_role_switch(test_usb_role_t target)
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "role module not initialized");
     ESP_RETURN_ON_FALSE(target <= TEST_USB_ROLE_UVC_HOST, ESP_ERR_INVALID_ARG, TAG, "invalid target role");
 
-    if (xQueueSend(s_queue, &target, 0) != pdTRUE) {
+    const test_usb_role_command_t command = {
+        .target = target,
+        .force_restart = false,
+        .uvc_h_res = 0,
+        .uvc_v_res = 0,
+    };
+    if (xQueueSend(s_queue, &command, 0) != pdTRUE) {
         ESP_LOGW(TAG, "role switch queue full, dropping request");
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+esp_err_t test_usb_role_restart_uvc(uint32_t h_res, uint32_t v_res)
+{
+    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "role module not initialized");
+    ESP_RETURN_ON_FALSE(h_res > 0 && v_res > 0, ESP_ERR_INVALID_ARG, TAG,
+                        "invalid UVC resolution");
+    const test_usb_role_command_t command = {
+        .target = TEST_USB_ROLE_UVC_HOST,
+        .force_restart = true,
+        .uvc_h_res = h_res,
+        .uvc_v_res = v_res,
+    };
+    if (xQueueSend(s_queue, &command, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "UVC restart queue full, dropping request");
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

@@ -7,8 +7,22 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+
+typedef struct {
+    uint32_t h_res;
+    uint32_t v_res;
+    float fps;
+} test_uvc_resolution_t;
+
+typedef struct {
+    bool valid;
+    uint32_t frame_id;
+    uint32_t h_res;
+    uint32_t v_res;
+} test_uvc_preview_info_t;
 
 typedef struct {
     bool initialized;
@@ -58,6 +72,29 @@ esp_err_t test_uvc_run(void);
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL.
  */
 esp_err_t test_uvc_get_status(test_uvc_status_t *out_status);
+
+/**
+ * @brief Get MJPEG resolutions reported by the current UVC device.
+ *
+ * Pass a NULL list to query the number of available entries. The input count
+ * is the destination capacity; on return it is the total available count.
+ */
+esp_err_t test_uvc_get_resolutions(test_uvc_resolution_t *out_list, size_t *inout_count);
+
+/** @brief Select the resolution to use on the next UVC Host restart. */
+esp_err_t test_uvc_set_preferred_resolution(uint32_t h_res, uint32_t v_res);
+
+/** @brief Change the active UVC stream resolution without reinstalling USB Host. */
+esp_err_t test_uvc_change_resolution(uint32_t h_res, uint32_t v_res);
+
+/**
+ * @brief Copy the newest scaled RGB565 preview into a caller-owned buffer.
+ *
+ * The buffer must be TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2
+ * bytes. Returns ESP_ERR_NOT_FOUND until the first decoded frame is ready.
+ */
+esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size,
+                                test_uvc_preview_info_t *out_info);
 
 /**
  * @brief Stop and close the UVC stream (if open), uninstall the UVC driver,

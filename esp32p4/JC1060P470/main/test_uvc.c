@@ -10,13 +10,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include "esp_check.h"
+#include "esp_cache.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "test_config.h"
 #include "driver/jpeg_decode.h"
@@ -27,6 +30,7 @@
 static const char *TAG = "test_uvc";
 
 #define UVC_DEVICE_CONNECTED_BIT BIT0
+#define UVC_USB_ALL_FREE_BIT     BIT1
 
 typedef struct {
     uvc_host_frame_t *frame;
@@ -40,6 +44,12 @@ static jpeg_decoder_handle_t s_jpeg_decoder;
 static uvc_host_stream_hdl_t s_stream_hdl;
 static uint8_t *s_rgb565_buf;
 static size_t s_rgb565_buf_size;
+static uint8_t *s_preview_buf;
+static SemaphoreHandle_t s_preview_lock;
+static uint32_t s_preview_frame_id;
+static uint32_t s_preview_source_w;
+static uint32_t s_preview_source_h;
+static int64_t s_preview_last_update_us;
 
 /* Device capability enumeration result, filled in the DEVICE_CONNECTED
  * callback and consumed by test_uvc_run() when opening the stream. */
@@ -48,12 +58,19 @@ static bool s_format_negotiated;
 
 /* Scratch buffer for uvc_host_get_frame_list(). Sized in test_config.h. */
 static uvc_host_frame_info_t s_frame_info_list[TEST_UVC_FRAME_INFO_MAX];
+static size_t s_frame_info_count;
+static bool s_requested_resolution_valid;
+static uint32_t s_requested_h_res = TEST_UVC_PREFER_H_RES;
+static uint32_t s_requested_v_res = TEST_UVC_PREFER_V_RES;
 
 static bool s_initialized;
 static bool s_stopping;
 static bool s_stream_opened;
 static bool s_stream_started;
 static bool s_device_connected;
+static bool s_accept_frames;
+static portMUX_TYPE s_frame_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_frames_held_by_app;
 
 static uint32_t s_frames_received;
 static uint32_t s_frames_decoded;
@@ -67,6 +84,17 @@ static int64_t s_stats_window_start_us;
 static uint32_t s_stats_window_received;
 static uint32_t s_stats_window_decoded;
 static uint32_t s_stats_window_errors;
+
+static void uvc_log_memory(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "%s memory: dma_internal_free=%zu dma_internal_biggest=%zu internal_free=%zu spiram_free=%zu",
+             stage,
+             heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
 
 static void uvc_log_stats_if_due(void)
 {
@@ -126,6 +154,7 @@ static uint32_t uvc_pick_best_interval(const uvc_host_frame_info_t *info)
 static void uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index)
 {
     s_format_negotiated = false;
+    s_frame_info_count = 0;
 
     size_t list_size = TEST_UVC_FRAME_INFO_MAX;
     esp_err_t ret = uvc_host_get_frame_list(dev_addr, uvc_stream_index,
@@ -146,6 +175,7 @@ static void uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index)
                  list_size, TEST_UVC_FRAME_INFO_MAX);
         list_size = TEST_UVC_FRAME_INFO_MAX;
     }
+    s_frame_info_count = list_size;
 
     ESP_LOGI(TAG, "enumerated %zu frame descriptors:", list_size);
     for (size_t i = 0; i < list_size; ++i) {
@@ -172,7 +202,9 @@ static void uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index)
         uint32_t interval = uvc_pick_best_interval(f);
         uint32_t pixels = f->h_res * f->v_res;
 
-        if (f->h_res == TEST_UVC_PREFER_H_RES && f->v_res == TEST_UVC_PREFER_V_RES) {
+        uint32_t preferred_h_res = s_requested_resolution_valid ? s_requested_h_res : TEST_UVC_PREFER_H_RES;
+        uint32_t preferred_v_res = s_requested_resolution_valid ? s_requested_v_res : TEST_UVC_PREFER_V_RES;
+        if (f->h_res == preferred_h_res && f->v_res == preferred_v_res) {
             if (best_preferred == NULL || interval < best_preferred_interval) {
                 best_preferred = f;
                 best_preferred_interval = interval;
@@ -216,6 +248,51 @@ static void uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index)
              (chosen == best_preferred) ? " (preferred)" : " (fallback)");
 }
 
+static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size)
+{
+    if (s_preview_buf == NULL || s_preview_lock == NULL || src_w == 0 || src_h == 0) {
+        return;
+    }
+
+    const size_t source_stride = out_size / (src_h * 2U);
+    if (source_stride < src_w) {
+        ESP_LOGW(TAG, "decoded RGB565 stride invalid: width=%u stride=%zu out=%u",
+                 (unsigned)src_w, source_stride, (unsigned)out_size);
+        return;
+    }
+
+    uint32_t dst_w = TEST_UVC_PREVIEW_H_RES;
+    uint32_t dst_h = (uint32_t)(((uint64_t)src_h * dst_w) / src_w);
+    if (dst_h > TEST_UVC_PREVIEW_V_RES) {
+        dst_h = TEST_UVC_PREVIEW_V_RES;
+        dst_w = (uint32_t)(((uint64_t)src_w * dst_h) / src_h);
+    }
+    const uint32_t dst_x = (TEST_UVC_PREVIEW_H_RES - dst_w) / 2U;
+    const uint32_t dst_y = (TEST_UVC_PREVIEW_V_RES - dst_h) / 2U;
+
+    if (xSemaphoreTake(s_preview_lock, 0) != pdTRUE) {
+        return;
+    }
+
+    memset(s_preview_buf, 0, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U);
+    const uint16_t *src = (const uint16_t *)s_rgb565_buf;
+    uint16_t *dst = (uint16_t *)s_preview_buf;
+    for (uint32_t y = 0; y < dst_h; ++y) {
+        const uint32_t src_y = (uint32_t)(((uint64_t)y * src_h) / dst_h);
+        uint16_t *dst_row = dst + ((dst_y + y) * TEST_UVC_PREVIEW_H_RES) + dst_x;
+        const uint16_t *src_row = src + (src_y * source_stride);
+        for (uint32_t x = 0; x < dst_w; ++x) {
+            dst_row[x] = src_row[((uint64_t)x * src_w) / dst_w];
+        }
+    }
+    esp_cache_msync(s_preview_buf, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U,
+                    ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    s_preview_source_w = src_w;
+    s_preview_source_h = src_h;
+    s_preview_frame_id++;
+    xSemaphoreGive(s_preview_lock);
+}
+
 static void uvc_driver_event_callback(const uvc_host_driver_event_data_t *event, void *user_ctx)
 {
     (void)user_ctx;
@@ -251,6 +328,7 @@ static void uvc_stream_event_callback(const uvc_host_stream_event_data_t *event,
         ESP_LOGI(TAG, "UVC device disconnected, closing stream");
         s_device_connected = false;
         s_format_negotiated = false;
+        s_frame_info_count = 0;
         s_stream_started = false;
         xEventGroupClearBits(s_device_event_group, UVC_DEVICE_CONNECTED_BIT);
         if (hdl != NULL) {
@@ -281,16 +359,37 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
 {
     (void)user_ctx;
 
-    if (s_event_queue == NULL || s_stopping) {
+    if (s_event_queue == NULL || s_stopping || !s_accept_frames) {
         return true;
     }
 
     uvc_host_frame_t *frame_ptr = (uvc_host_frame_t *)frame;
+    portENTER_CRITICAL(&s_frame_lock);
+    s_frames_held_by_app++;
+    portEXIT_CRITICAL(&s_frame_lock);
     if (xQueueSend(s_event_queue, &frame_ptr, 0) != pdTRUE) {
+        portENTER_CRITICAL(&s_frame_lock);
+        s_frames_held_by_app--;
+        portEXIT_CRITICAL(&s_frame_lock);
         ESP_LOGW(TAG, "frame queue full, dropping frame");
         return true;
     }
     return false;
+}
+
+static void uvc_return_frame(uvc_host_frame_t *frame)
+{
+    if (frame != NULL && s_stream_hdl != NULL) {
+        esp_err_t ret = uvc_host_frame_return(s_stream_hdl, frame);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "uvc_host_frame_return failed: %s", esp_err_to_name(ret));
+        }
+    }
+    portENTER_CRITICAL(&s_frame_lock);
+    if (s_frames_held_by_app > 0) {
+        s_frames_held_by_app--;
+    }
+    portEXIT_CRITICAL(&s_frame_lock);
 }
 
 static void uvc_ensure_rgb565_buf(uint32_t width, uint32_t height)
@@ -323,8 +422,11 @@ static void uvc_worker_task(void *arg)
     (void)arg;
 
     uvc_app_queue_msg_t msg;
-    while (!s_stopping) {
+    while (true) {
         if (xQueueReceive(s_event_queue, &msg, pdMS_TO_TICKS(200)) != pdTRUE) {
+            if (s_stopping) {
+                break;
+            }
             continue;
         }
 
@@ -338,14 +440,14 @@ static void uvc_worker_task(void *arg)
 
         if (frame->data == NULL || frame->data_len == 0) {
             ESP_LOGW(TAG, "frame %u: empty payload", (unsigned)s_frames_received);
-            uvc_host_frame_return(s_stream_hdl, frame);
+            uvc_return_frame(frame);
             uvc_log_stats_if_due();
             continue;
         }
 
         if (s_jpeg_decoder == NULL) {
             ESP_LOGE(TAG, "frame %u: jpeg decoder not available", (unsigned)s_frames_received);
-            uvc_host_frame_return(s_stream_hdl, frame);
+            uvc_return_frame(frame);
             uvc_log_stats_if_due();
             continue;
         }
@@ -357,7 +459,7 @@ static void uvc_worker_task(void *arg)
             s_last_error = ret;
             ESP_LOGW(TAG, "frame %u: jpeg_decoder_get_info failed: %s (len=%u)",
                      (unsigned)s_frames_received, esp_err_to_name(ret), (unsigned)frame->data_len);
-            uvc_host_frame_return(s_stream_hdl, frame);
+            uvc_return_frame(frame);
             uvc_log_stats_if_due();
             continue;
         }
@@ -367,14 +469,14 @@ static void uvc_worker_task(void *arg)
         uvc_ensure_rgb565_buf(info.width, info.height);
         if (s_rgb565_buf == NULL) {
             s_decode_errors++;
-            uvc_host_frame_return(s_stream_hdl, frame);
+            uvc_return_frame(frame);
             uvc_log_stats_if_due();
             continue;
         }
 
         const jpeg_decode_cfg_t decode_cfg = {
             .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
-            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,
+            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
             .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
         };
 
@@ -395,12 +497,42 @@ static void uvc_worker_task(void *arg)
             s_frames_decoded++;
         }
 
-        uvc_host_frame_return(s_stream_hdl, frame);
+        uvc_return_frame(frame);
+        if (ret == ESP_OK) {
+            int64_t now_us = esp_timer_get_time();
+            if (now_us - s_preview_last_update_us >= TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS * 1000LL) {
+                s_preview_last_update_us = now_us;
+                uvc_update_preview(info.width, info.height, out_size);
+            }
+        }
         uvc_log_stats_if_due();
     }
 
     s_worker_task_handle = NULL;
     vTaskDelete(NULL);
+}
+
+static void uvc_drain_queued_frames(void)
+{
+    uvc_app_queue_msg_t msg;
+    while (s_event_queue != NULL && xQueueReceive(s_event_queue, &msg, 0) == pdTRUE) {
+        uvc_return_frame(msg.frame);
+    }
+}
+
+static esp_err_t uvc_wait_for_app_frames(void)
+{
+    for (uint32_t i = 0; i < 50; ++i) {
+        uvc_drain_queued_frames();
+        portENTER_CRITICAL(&s_frame_lock);
+        uint32_t held = s_frames_held_by_app;
+        portEXIT_CRITICAL(&s_frame_lock);
+        if (held == 0) {
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 static void uvc_usblib_task(void *arg)
@@ -423,6 +555,7 @@ static void uvc_usblib_task(void *arg)
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
             ESP_LOGI(TAG, "USB Host: all devices freed");
+            xEventGroupSetBits(s_device_event_group, UVC_USB_ALL_FREE_BIT);
         }
     }
 
@@ -436,6 +569,15 @@ static void uvc_cleanup_app_resources(void)
         free(s_rgb565_buf);
         s_rgb565_buf = NULL;
         s_rgb565_buf_size = 0;
+    }
+
+    if (s_preview_buf != NULL) {
+        heap_caps_free(s_preview_buf);
+        s_preview_buf = NULL;
+    }
+    if (s_preview_lock != NULL) {
+        vSemaphoreDelete(s_preview_lock);
+        s_preview_lock = NULL;
     }
 
     if (s_worker_task_handle != NULL) {
@@ -472,6 +614,23 @@ esp_err_t test_uvc_init(void)
     s_device_event_group = xEventGroupCreate();
     ESP_GOTO_ON_FALSE(s_device_event_group != NULL, ESP_ERR_NO_MEM, err_queue,
                       TAG, "create UVC device event group failed");
+
+    s_preview_lock = xSemaphoreCreateMutex();
+    ESP_GOTO_ON_FALSE(s_preview_lock != NULL, ESP_ERR_NO_MEM, err_queue,
+                      TAG, "create UVC preview lock failed");
+    s_preview_buf = heap_caps_calloc(TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES,
+                                     sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_GOTO_ON_FALSE(s_preview_buf != NULL, ESP_ERR_NO_MEM, err_queue,
+                      TAG, "allocate UVC preview buffer failed");
+    s_preview_frame_id = 0;
+    s_preview_source_w = 0;
+    s_preview_source_h = 0;
+    s_preview_last_update_us = 0;
+    s_frame_info_count = 0;
+    s_accept_frames = false;
+    portENTER_CRITICAL(&s_frame_lock);
+    s_frames_held_by_app = 0;
+    portEXIT_CRITICAL(&s_frame_lock);
 
     s_stream_opened = false;
     s_stream_started = false;
@@ -522,8 +681,10 @@ esp_err_t test_uvc_init(void)
         .timeout_ms = TEST_UVC_JPEG_DECODE_TIMEOUT_MS,
         .flags = { .allow_pd = 0 },
     };
+    uvc_log_memory("before JPEG decoder");
     ESP_GOTO_ON_ERROR(jpeg_new_decoder_engine(&jpeg_dec_cfg, &s_jpeg_decoder),
                       err_uninstall_uvc, TAG, "jpeg_new_decoder_engine failed");
+    uvc_log_memory("after JPEG decoder");
 
     task_created = xTaskCreatePinnedToCore(uvc_worker_task,
                                           "uvc_worker",
@@ -573,6 +734,7 @@ esp_err_t test_uvc_run(void)
         }
         ESP_RETURN_ON_ERROR(uvc_host_stream_start(s_stream_hdl), TAG, "uvc_host_stream_start failed");
         s_stream_started = true;
+        s_accept_frames = true;
         return ESP_OK;
     }
 
@@ -666,6 +828,7 @@ esp_err_t test_uvc_run(void)
     s_stream_opened = true;
     ESP_RETURN_ON_ERROR(uvc_host_stream_start(s_stream_hdl), TAG, "uvc_host_stream_start failed");
     s_stream_started = true;
+    s_accept_frames = true;
     ESP_LOGI(TAG, "UVC stream started");
     return ESP_OK;
 }
@@ -695,6 +858,137 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
     return ESP_OK;
 }
 
+esp_err_t test_uvc_get_resolutions(test_uvc_resolution_t *out_list, size_t *inout_count)
+{
+    ESP_RETURN_ON_FALSE(inout_count != NULL, ESP_ERR_INVALID_ARG, TAG, "inout_count is NULL");
+
+    size_t total = 0;
+    for (size_t i = 0; i < s_frame_info_count; ++i) {
+        const uvc_host_frame_info_t *info = &s_frame_info_list[i];
+        if (info->format != TEST_UVC_FORMAT) {
+            continue;
+        }
+        bool duplicate = false;
+        for (size_t j = 0; j < i; ++j) {
+            if (s_frame_info_list[j].format == TEST_UVC_FORMAT &&
+                s_frame_info_list[j].h_res == info->h_res &&
+                s_frame_info_list[j].v_res == info->v_res) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        if (out_list != NULL && total < *inout_count) {
+            out_list[total] = (test_uvc_resolution_t) {
+                .h_res = info->h_res,
+                .v_res = info->v_res,
+                .fps = uvc_interval_to_fps(uvc_pick_best_interval(info)),
+            };
+        }
+        total++;
+    }
+    if (out_list != NULL && *inout_count < total) {
+        *inout_count = total;
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *inout_count = total;
+    return total == 0 ? ESP_ERR_NOT_FOUND : ESP_OK;
+}
+
+esp_err_t test_uvc_set_preferred_resolution(uint32_t h_res, uint32_t v_res)
+{
+    ESP_RETURN_ON_FALSE(h_res > 0 && v_res > 0, ESP_ERR_INVALID_ARG, TAG, "invalid UVC resolution");
+    s_requested_h_res = h_res;
+    s_requested_v_res = v_res;
+    s_requested_resolution_valid = true;
+    return ESP_OK;
+}
+
+esp_err_t test_uvc_change_resolution(uint32_t h_res, uint32_t v_res)
+{
+    ESP_RETURN_ON_ERROR(test_uvc_set_preferred_resolution(h_res, v_res), TAG,
+                        "set UVC preferred resolution failed");
+    ESP_RETURN_ON_FALSE(s_initialized && s_stream_hdl != NULL && s_stream_opened,
+                        ESP_ERR_INVALID_STATE, TAG, "UVC stream is not open");
+
+    const uvc_host_frame_info_t *selected = NULL;
+    uint32_t selected_interval = 0;
+    for (size_t i = 0; i < s_frame_info_count; ++i) {
+        const uvc_host_frame_info_t *info = &s_frame_info_list[i];
+        if (info->format != TEST_UVC_FORMAT || info->h_res != h_res || info->v_res != v_res) {
+            continue;
+        }
+        uint32_t interval = uvc_pick_best_interval(info);
+        if (selected == NULL || interval < selected_interval) {
+            selected = info;
+            selected_interval = interval;
+        }
+    }
+    ESP_RETURN_ON_FALSE(selected != NULL, ESP_ERR_NOT_FOUND, TAG,
+                        "requested UVC resolution %ux%u is unavailable",
+                        (unsigned)h_res, (unsigned)v_res);
+
+    s_accept_frames = false;
+    if (s_stream_started) {
+        esp_err_t ret = uvc_host_stream_stop(s_stream_hdl);
+        if (ret != ESP_OK) {
+            s_last_error = ret;
+            return ret;
+        }
+        s_stream_started = false;
+    }
+    ESP_RETURN_ON_ERROR(uvc_wait_for_app_frames(), TAG, "UVC frames did not return before format change");
+
+    uvc_host_stream_format_t format = {
+        .h_res = selected->h_res,
+        .v_res = selected->v_res,
+        .fps = uvc_interval_to_fps(selected_interval),
+        .format = selected->format,
+    };
+    ESP_RETURN_ON_ERROR(uvc_host_stream_format_select(s_stream_hdl, &format), TAG,
+                        "select UVC stream format failed");
+    ESP_RETURN_ON_ERROR(uvc_host_stream_start(s_stream_hdl), TAG, "restart UVC stream failed");
+
+    s_negotiated_format = format;
+    s_format_negotiated = true;
+    s_stream_started = true;
+    s_accept_frames = true;
+    s_last_error = ESP_OK;
+    ESP_LOGI(TAG, "UVC stream changed to %ux%u@%.1fFPS", (unsigned)format.h_res,
+             (unsigned)format.v_res, format.fps);
+    return ESP_OK;
+}
+
+esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size, test_uvc_preview_info_t *out_info)
+{
+    const size_t preview_size = TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U;
+    ESP_RETURN_ON_FALSE(out_rgb565 != NULL && out_size >= preview_size, ESP_ERR_INVALID_SIZE,
+                        TAG, "preview destination too small");
+    if (s_preview_lock == NULL || s_preview_buf == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_preview_lock, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_preview_frame_id == 0) {
+        xSemaphoreGive(s_preview_lock);
+        return ESP_ERR_NOT_FOUND;
+    }
+    memcpy(out_rgb565, s_preview_buf, preview_size);
+    if (out_info != NULL) {
+        *out_info = (test_uvc_preview_info_t) {
+            .valid = true,
+            .frame_id = s_preview_frame_id,
+            .h_res = s_preview_source_w,
+            .v_res = s_preview_source_h,
+        };
+    }
+    xSemaphoreGive(s_preview_lock);
+    return ESP_OK;
+}
+
 esp_err_t test_uvc_deinit(void)
 {
     if (!s_initialized) {
@@ -702,18 +996,28 @@ esp_err_t test_uvc_deinit(void)
     }
 
     s_stopping = true;
+    s_accept_frames = false;
 
     if (s_stream_hdl != NULL) {
         if (s_stream_started) {
             esp_err_t ret = uvc_host_stream_stop(s_stream_hdl);
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "uvc_host_stream_stop failed: %s", esp_err_to_name(ret));
+                s_last_error = ret;
             }
             s_stream_started = false;
         }
-        esp_err_t ret = uvc_host_stream_close(s_stream_hdl);
+        esp_err_t ret = uvc_wait_for_app_frames();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "UVC frames did not return before close: %s", esp_err_to_name(ret));
+            s_last_error = ret;
+            return ret;
+        }
+        ret = uvc_host_stream_close(s_stream_hdl);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "uvc_host_stream_close failed: %s", esp_err_to_name(ret));
+            s_last_error = ret;
+            return ret;
         }
         s_stream_hdl = NULL;
     }
@@ -721,9 +1025,20 @@ esp_err_t test_uvc_deinit(void)
     s_device_connected = false;
     xEventGroupClearBits(s_device_event_group, UVC_DEVICE_CONNECTED_BIT);
 
+    xEventGroupClearBits(s_device_event_group, UVC_USB_ALL_FREE_BIT);
     esp_err_t ret = uvc_host_uninstall();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "uvc_host_uninstall failed: %s", esp_err_to_name(ret));
+        s_last_error = ret;
+        return ret;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(s_device_event_group, UVC_USB_ALL_FREE_BIT,
+                                           pdFALSE, pdFALSE, pdMS_TO_TICKS(2000));
+    if ((bits & UVC_USB_ALL_FREE_BIT) == 0) {
+        ESP_LOGW(TAG, "USB Host did not report all devices freed");
+        s_last_error = ESP_ERR_TIMEOUT;
+        return ESP_ERR_TIMEOUT;
     }
 
     usb_host_lib_unblock();
@@ -731,23 +1046,25 @@ esp_err_t test_uvc_deinit(void)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (s_usblib_task_handle != NULL) {
-        ESP_LOGW(TAG, "USB lib task did not exit in time, deleting it");
-        vTaskDelete(s_usblib_task_handle);
-        s_usblib_task_handle = NULL;
+        ESP_LOGW(TAG, "USB lib task did not exit in time");
+        s_last_error = ESP_ERR_TIMEOUT;
+        return ESP_ERR_TIMEOUT;
     }
 
     for (int i = 0; i < 10 && s_worker_task_handle != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (s_worker_task_handle != NULL) {
-        ESP_LOGW(TAG, "UVC worker task did not exit in time, deleting it");
-        vTaskDelete(s_worker_task_handle);
-        s_worker_task_handle = NULL;
+        ESP_LOGW(TAG, "UVC worker task did not exit in time");
+        s_last_error = ESP_ERR_TIMEOUT;
+        return ESP_ERR_TIMEOUT;
     }
 
     ret = usb_host_uninstall();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "usb_host_uninstall failed: %s", esp_err_to_name(ret));
+        s_last_error = ret;
+        return ret;
     }
 
     if (s_jpeg_decoder != NULL) {
@@ -762,10 +1079,12 @@ esp_err_t test_uvc_deinit(void)
 
     s_initialized = false;
     s_stopping = false;
+    s_accept_frames = false;
     s_stream_opened = false;
     s_stream_started = false;
     s_device_connected = false;
     s_format_negotiated = false;
+    s_frame_info_count = 0;
     s_frames_received = 0;
     s_frames_decoded = 0;
     s_decode_errors = 0;

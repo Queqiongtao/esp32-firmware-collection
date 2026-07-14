@@ -35,9 +35,8 @@ typedef struct {
 
 /**
  * @brief Initialize the USB role management framework. Creates the role worker
- *        task and switches to the startup role selected by Kconfig
- *        (EXAMPLE_ENABLE_TEST_USB or EXAMPLE_ENABLE_TEST_UVC). If neither is
- *        enabled, the module starts in TEST_USB_ROLE_NONE.
+ *        task in the idle state. UI actions select CDC Device or UVC Host
+ *        after startup so controller[0] is not occupied unnecessarily.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
@@ -54,6 +53,13 @@ esp_err_t test_usb_role_init(void);
  *         invalid role, ESP_ERR_NO_MEM if the queue is full.
  */
 esp_err_t test_usb_role_switch(test_usb_role_t target);
+
+/**
+ * @brief Select a UVC resolution and restart the UVC Host role asynchronously.
+ *
+ * The request is serialized with all other USB role changes.
+ */
+esp_err_t test_usb_role_restart_uvc(uint32_t h_res, uint32_t v_res);
 
 /**
  * @brief Get the currently active role.

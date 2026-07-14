@@ -217,7 +217,7 @@
  * UVC device via uvc_host_get_frame_list(). Must be >= the device's
  * frame_info_num for the selected stream. 8 is ample for typical USB cameras
  * (usually 1-3 resolutions x 1-3 fps each). */
-#define TEST_UVC_FRAME_INFO_MAX                 8
+#define TEST_UVC_FRAME_INFO_MAX                 24
 
 #define TEST_UVC_FRAME_BUF_COUNT                3
 #define TEST_UVC_FRAME_SIZE                     0          /* 0: use dwMaxVideoFrameSize from negotiation */
@@ -250,3 +250,10 @@
 #define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */
+
+/* 固定大小的 RGB565 预览帧。UVC worker 将已解码的原始画面等比缩放并居中
+ * 到此缓冲；UI 通过受控拷贝取得快照，避免直接持有 JPEG DMA 输出缓冲。 */
+#define TEST_UVC_PREVIEW_H_RES                  896
+#define TEST_UVC_PREVIEW_V_RES                  448
+#define TEST_UVC_PREVIEW_REFRESH_MS             200
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     200

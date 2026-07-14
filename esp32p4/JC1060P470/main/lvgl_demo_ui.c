@@ -14,7 +14,9 @@
 #include <string.h>
 #include "display_font.h"
 #include "display_touch.h"
+#include "esp_cache.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "lvgl_demo_font_patch.h"
 #include "test_audio.h"
@@ -22,7 +24,9 @@
 #include "test_rtc.h"
 #include "test_usb.h"
 #include "test_usb_role.h"
+#include "test_uvc.h"
 #include "test_wireless.h"
+#include "test_config.h"
 
 static const char *TAG = "demo_ui";
 
@@ -69,6 +73,7 @@ static lv_obj_t *s_usb_line_label;
 static lv_obj_t *s_usb_stats_label;
 static lv_obj_t *s_usb_hint_label;
 static lv_obj_t *s_usb_switch_btn;
+static lv_obj_t *s_uvc_enter_btn;
 
 static lv_obj_t *s_audio_status_label;
 static lv_obj_t *s_audio_size_label;
@@ -109,6 +114,21 @@ static lv_obj_t *s_wifi_dialog;
 static lv_obj_t *s_wifi_dialog_ssid_label;
 static lv_obj_t *s_wifi_password_ta;
 static lv_obj_t *s_wifi_keyboard;
+
+static lv_obj_t *s_main_screen;
+static lv_obj_t *s_uvc_screen;
+static lv_obj_t *s_uvc_status_label;
+static lv_obj_t *s_uvc_detail_label;
+static lv_obj_t *s_uvc_resolution_dropdown;
+static lv_obj_t *s_uvc_preview_image;
+static lv_timer_t *s_uvc_timer;
+static uint8_t *s_uvc_preview_image_buf;
+static lv_image_dsc_t s_uvc_preview_dsc;
+static uint32_t s_uvc_preview_frame_id;
+static size_t s_uvc_resolution_count;
+static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
+
+#define DEMO_UVC_PREVIEW_SIZE (TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U)
 
 static demo_touch_state_t s_touch_state;
 static test_wireless_ap_record_t s_wifi_ap_records[TEST_WIRELESS_SCAN_RESULT_MAX];
@@ -1321,6 +1341,219 @@ static void demo_update_font_card(void)
     demo_label_set_text_if_changed(s_font_sample_label, "缩放测试 中文");
 }
 
+static void demo_uvc_update_resolution_options(void)
+{
+    size_t count = TEST_UVC_FRAME_INFO_MAX;
+    test_uvc_resolution_t latest[TEST_UVC_FRAME_INFO_MAX] = {0};
+    esp_err_t ret = test_uvc_get_resolutions(latest, &count);
+    if (ret != ESP_OK) {
+        count = 0;
+    }
+    bool changed = count != s_uvc_resolution_count;
+    if (!changed) {
+        for (size_t i = 0; i < count; ++i) {
+            if (latest[i].h_res != s_uvc_resolutions[i].h_res ||
+                latest[i].v_res != s_uvc_resolutions[i].v_res ||
+                latest[i].fps != s_uvc_resolutions[i].fps) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) {
+        return;
+    }
+
+    memcpy(s_uvc_resolutions, latest, sizeof(s_uvc_resolutions));
+    s_uvc_resolution_count = count;
+    if (count == 0) {
+        lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
+        lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+        return;
+    }
+
+    char options[TEST_UVC_FRAME_INFO_MAX * 32] = {0};
+    size_t used = 0;
+    for (size_t i = 0; i < count; ++i) {
+        int written = snprintf(options + used, sizeof(options) - used, "%s%ux%u @ %.0f FPS",
+                               i == 0 ? "" : "\n", (unsigned)s_uvc_resolutions[i].h_res,
+                               (unsigned)s_uvc_resolutions[i].v_res, s_uvc_resolutions[i].fps);
+        if (written <= 0 || (size_t)written >= sizeof(options) - used) {
+            break;
+        }
+        used += (size_t)written;
+    }
+    lv_dropdown_set_options(s_uvc_resolution_dropdown, options);
+    lv_obj_clear_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+}
+
+static void demo_uvc_resolution_dropdown_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_VALUE_CHANGED || s_uvc_resolution_count == 0) {
+        return;
+    }
+    uint32_t selected = lv_dropdown_get_selected(s_uvc_resolution_dropdown);
+    if (selected >= s_uvc_resolution_count) {
+        return;
+    }
+    const test_uvc_resolution_t *resolution = &s_uvc_resolutions[selected];
+    esp_err_t ret = test_usb_role_restart_uvc(resolution->h_res, resolution->v_res);
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label, "切换分辨率失败: %s", esp_err_to_name(ret));
+        return;
+    }
+    lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+    demo_label_set_text_fmt_if_changed(s_uvc_status_label, "正在切换到 %ux%u...",
+                                       (unsigned)resolution->h_res, (unsigned)resolution->v_res);
+}
+
+static void demo_uvc_timer_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    if (s_uvc_screen == NULL) {
+        return;
+    }
+
+    test_usb_role_status_t role_status = {0};
+    if (test_usb_role_get_status(&role_status) != ESP_OK) {
+        demo_label_set_text_if_changed(s_uvc_status_label, "UVC 角色未初始化");
+        return;
+    }
+
+    if (role_status.switch_in_progress) {
+        demo_label_set_text_if_changed(s_uvc_status_label, "UVC 初始化/切换中...");
+    } else if (role_status.current_role != TEST_USB_ROLE_UVC_HOST) {
+        demo_label_set_text_if_changed(s_uvc_status_label, "等待 UVC Host 启动");
+    } else if (!role_status.uvc_device_connected) {
+        demo_label_set_text_if_changed(s_uvc_status_label, "等待摄像头连接");
+    } else if (!role_status.uvc_stream_started) {
+        demo_label_set_text_if_changed(s_uvc_status_label, "摄像头已连接，正在打开视频流");
+    } else {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label, "实时预览: %ux%u @ %.1f FPS",
+                                           (unsigned)role_status.uvc_negotiated_h_res,
+                                           (unsigned)role_status.uvc_negotiated_v_res,
+                                           role_status.uvc_negotiated_fps);
+    }
+    demo_label_set_text_fmt_if_changed(s_uvc_detail_label, "已解码 %" PRIu32 " 帧  错误 %" PRIu32,
+                                       role_status.uvc_frames_decoded, role_status.uvc_decode_errors);
+
+    demo_uvc_update_resolution_options();
+
+    test_uvc_preview_info_t preview = {0};
+    if (test_uvc_copy_preview(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE, &preview) == ESP_OK &&
+        preview.frame_id != s_uvc_preview_frame_id) {
+        s_uvc_preview_frame_id = preview.frame_id;
+        esp_cache_msync(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE,
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        lv_obj_invalidate(s_uvc_preview_image);
+    }
+}
+
+static void demo_uvc_return_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_uvc_timer != NULL) {
+        lv_timer_delete(s_uvc_timer);
+        s_uvc_timer = NULL;
+    }
+    test_usb_role_switch(TEST_USB_ROLE_NONE);
+    lv_screen_load(s_main_screen);
+    lv_obj_delete(s_uvc_screen);
+    s_uvc_screen = NULL;
+    s_uvc_status_label = NULL;
+    s_uvc_detail_label = NULL;
+    s_uvc_resolution_dropdown = NULL;
+    s_uvc_preview_image = NULL;
+    heap_caps_free(s_uvc_preview_image_buf);
+    s_uvc_preview_image_buf = NULL;
+    memset(&s_uvc_preview_dsc, 0, sizeof(s_uvc_preview_dsc));
+    s_uvc_preview_frame_id = 0;
+    s_uvc_resolution_count = 0;
+}
+
+static void demo_uvc_enter_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_uvc_screen != NULL) {
+        lv_screen_load(s_uvc_screen);
+        return;
+    }
+
+    s_uvc_preview_image_buf = heap_caps_calloc(1, DEMO_UVC_PREVIEW_SIZE,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_uvc_preview_image_buf == NULL) {
+        ESP_LOGE(TAG, "allocate UVC UI preview buffer failed");
+        return;
+    }
+
+    s_uvc_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_uvc_screen, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_pad_all(s_uvc_screen, 12, 0);
+    lv_obj_clear_flag(s_uvc_screen, LV_OBJ_FLAG_SCROLLABLE);
+    demo_set_text_role(s_uvc_screen, DISPLAY_FONT_ROLE_BODY);
+
+    lv_obj_t *title = lv_label_create(s_uvc_screen);
+    lv_label_set_text(title, "UVC 摄像头测试");
+    demo_config_label(title, DISPLAY_FONT_ROLE_TITLE);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
+
+    lv_obj_t *return_btn = lv_button_create(s_uvc_screen);
+    lv_obj_set_size(return_btn, 112, 42);
+    lv_obj_align(return_btn, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_add_event_cb(return_btn, demo_uvc_return_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *return_label = lv_label_create(return_btn);
+    lv_label_set_text(return_label, "返回主页");
+    demo_set_text_role(return_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(return_label);
+
+    s_uvc_status_label = lv_label_create(s_uvc_screen);
+    s_uvc_detail_label = lv_label_create(s_uvc_screen);
+    demo_config_label(s_uvc_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_uvc_detail_label, DISPLAY_FONT_ROLE_SMALL);
+    lv_obj_set_style_text_color(s_uvc_status_label, lv_color_hex(0xE8F1F5), 0);
+    lv_obj_set_style_text_color(s_uvc_detail_label, lv_color_hex(0xA9C0C9), 0);
+    lv_obj_align(s_uvc_status_label, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_align(s_uvc_detail_label, LV_ALIGN_TOP_MID, 0, 66);
+
+    s_uvc_resolution_dropdown = lv_dropdown_create(s_uvc_screen);
+    lv_obj_set_size(s_uvc_resolution_dropdown, 270, 42);
+    lv_obj_align(s_uvc_resolution_dropdown, LV_ALIGN_TOP_MID, 0, 92);
+    demo_set_text_role(s_uvc_resolution_dropdown, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_t *uvc_resolution_list = lv_dropdown_get_list(s_uvc_resolution_dropdown);
+    demo_set_text_role(uvc_resolution_list, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_set_style_text_font(uvc_resolution_list,
+                               demo_get_role_font(DISPLAY_FONT_ROLE_BODY),
+                               LV_PART_SELECTED);
+    lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
+    lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_uvc_resolution_dropdown, demo_uvc_resolution_dropdown_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_uvc_preview_dsc = (lv_image_dsc_t) {
+        .header = {
+            .cf = LV_COLOR_FORMAT_RGB565,
+            .w = TEST_UVC_PREVIEW_H_RES,
+            .h = TEST_UVC_PREVIEW_V_RES,
+            .stride = TEST_UVC_PREVIEW_H_RES * 2U,
+        },
+        .data_size = DEMO_UVC_PREVIEW_SIZE,
+        .data = s_uvc_preview_image_buf,
+    };
+    s_uvc_preview_image = lv_image_create(s_uvc_screen);
+    lv_image_set_src(s_uvc_preview_image, &s_uvc_preview_dsc);
+    lv_obj_set_size(s_uvc_preview_image, TEST_UVC_PREVIEW_H_RES, TEST_UVC_PREVIEW_V_RES);
+    lv_obj_align(s_uvc_preview_image, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    s_uvc_preview_frame_id = 0;
+    s_uvc_resolution_count = 0;
+    s_uvc_timer = lv_timer_create(demo_uvc_timer_cb, TEST_UVC_PREVIEW_REFRESH_MS, NULL);
+    lv_screen_load(s_uvc_screen);
+    esp_err_t ret = test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label, "启动 UVC 失败: %s", esp_err_to_name(ret));
+    }
+}
+
 static void demo_ui_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -1343,6 +1576,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
                           demo_get_role_font(DISPLAY_FONT_ROLE_BODY));
 
     lv_obj_t *screen = lv_display_get_screen_active(disp);
+    s_main_screen = screen;
     lv_obj_set_style_bg_color(screen, lv_color_hex(0xE6D8C2), 0);
     lv_obj_set_style_bg_grad_color(screen, lv_color_hex(0xF6EFE4), 0);
     lv_obj_set_style_bg_grad_dir(screen, LV_GRAD_DIR_VER, 0);
@@ -1372,7 +1606,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     demo_config_label(title, DISPLAY_FONT_ROLE_TITLE);
 
     lv_obj_t *subtitle = lv_label_create(header);
-    lv_label_set_text(subtitle, "显示/触摸 + RTC + USB Device CDC + 音频 + BAT + WiFi + BLE");
+    lv_label_set_text(subtitle, "显示/触摸 + RTC + USB/UVC + 音频 + BAT + WiFi + BLE");
     demo_config_label(subtitle, DISPLAY_FONT_ROLE_SMALL);
     demo_build_progress(progress_cb, "header");
 
@@ -1455,6 +1689,14 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     lv_label_set_text(usb_switch_label, "切换到 UVC");
     demo_set_text_role(usb_switch_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(usb_switch_label);
+
+    s_uvc_enter_btn = lv_button_create(usb_btn_row);
+    lv_obj_set_size(s_uvc_enter_btn, 180, 48);
+    lv_obj_add_event_cb(s_uvc_enter_btn, demo_uvc_enter_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *uvc_enter_label = lv_label_create(s_uvc_enter_btn);
+    lv_label_set_text(uvc_enter_label, "进入 UVC 测试");
+    demo_set_text_role(uvc_enter_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(uvc_enter_label);
 
     demo_build_progress(progress_cb, "usb");
 

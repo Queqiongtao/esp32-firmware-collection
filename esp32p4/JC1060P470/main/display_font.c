@@ -49,12 +49,14 @@ static const uint16_t s_role_font_sizes[DISPLAY_FONT_ROLE_COUNT] = {
 static void display_font_log_heap(const char *stage)
 {
     ESP_LOGI(TAG,
-             "%s heap: default_free=%zu default_biggest=%zu internal_free=%zu internal_biggest=%zu spiram_free=%zu spiram_biggest=%zu",
+             "%s heap: default_free=%zu default_biggest=%zu internal_free=%zu internal_biggest=%zu dma_internal_free=%zu dma_internal_biggest=%zu spiram_free=%zu spiram_biggest=%zu",
              stage,
              heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
              heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT),
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
+             heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
              heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
              heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 }
