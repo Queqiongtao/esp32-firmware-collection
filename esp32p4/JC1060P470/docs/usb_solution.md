@@ -10,11 +10,24 @@
 USB 应用层目前由两个独立测试模块构成：
 
 - `test_usb`：TinyUSB HS Device CDC-ACM echo（已实现，已上板验证）。
-- `test_uvc`：usb_host + esp-usb UVC Host + 硬件 JPEG 解码（已实现，阶段 A 仅做日志观测，未上屏）。
+- `test_uvc`：usb_host + esp-usb UVC Host + 硬件 JPEG 解码 + PPA 缩放预览（已实现）。
 
-规划中新增 `test_usb_role` 角色管理模块，让 `HIGH USB` 在运行时于 CDC Device 与 UVC Host 之间切换，并由 LVGL 按钮触发。本文档记录端口划分、资源模型、当前现状、运行时角色切换方案、UVC 格式协商方案、Kconfig 互斥策略与验证状态。
+`test_usb_role` 角色管理模块让 `HIGH USB` 在运行时于 CDC Device 与 UVC Host 之间切换，并由 LVGL 按钮触发。本文档记录端口划分、资源模型、运行时角色切换、UVC 格式协商与恢复策略。
 
-> **验证状态声明**：当前 `test_usb` 与 `test_uvc` 各自单独路径已上板验证；运行时角色切换、UVC 设备能力枚举、`test_usb_role` 模块均属规划中，本文涉及的可行性结论来自对 ESP-IDF `v6.0.1` 源码的静态分析，未做上板验证，不应表述为“可用”或“稳定”。
+> **验证状态声明**：当前改动已完成 ESP-IDF `v6.0.1` 编译验证。热复位自动恢复、PPA 预览性能和重复角色切换仍需上板验证，不应仅凭编译结果表述为“稳定”。
+
+## UVC 热复位恢复与 VBUS 边界
+
+JC1060P470 原理图中 `HIGH USB` 的 VBUS 供电路径没有连接到 ESP32-P4 GPIO 的独立 load-switch enable。`usb_host_lib_set_root_port_power(false)` 会停止 DWC root port、断开下游设备并阻止重新枚举，但不等价于切断摄像头 5V。
+
+当前软件恢复流程为：
+
+1. USB Host 以 `root_port_unpowered=true` 安装，UVC client 和事件任务就绪后再开启 root port。
+2. 成功出流后在 RTC no-init 内存记录恢复标记；正常退出 UVC 时清除，热复位中断出流时由 USB role worker 自动恢复 UVC 角色。
+3. 连续 5 秒没有视频帧时，由 USB role worker 串行触发恢复，禁止在 UVC callback 或 frame worker 内直接卸载自身。
+4. 恢复依次尝试重新打开 stream、root port 逻辑关闭/开启、完整卸载并重建 UVC Host/DWC PHY/JPEG/PPA；每级有界重试并退避。
+5. UVC 卸载期间保持 USB Host event task 运行，直到收到 `NO_CLIENTS` 且设备已释放或 `ALL_FREE`，再卸载 Host。
+6. 恢复耗尽后停止自动重试，UI 显示错误码并提示重新插拔。若摄像头固件必须真实掉电才能复位，只能增加 GPIO 控制的 USB load switch 或使用支持端口供电控制的 Hub。
 
 ## USB 端口与控制器总览
 
@@ -56,8 +69,8 @@ USB 应用层目前由两个独立测试模块构成：
 | 模块 | 文件 | 角色 | 状态 |
 |------|------|------|------|
 | CDC Device | `main/test_usb.c/.h` | TinyUSB HS Device CDC-ACM echo | 已实现，已上板验证（CDC echo 路径） |
-| UVC Host | `main/test_uvc.c/.h` | usb_host + esp-usb UVC + 硬件 JPEG 解码 | 已实现，阶段 A 仅日志观测；上板验证（收流 + 解码日志） |
-| 角色管理 | `main/test_usb_role.c/.h`（规划） | 统一协调 controller[0] 切换 | 规划中，未实现 |
+| UVC Host | `main/test_uvc.c/.h` | usb_host + UVC + JPEG + PPA 预览与分级恢复 | 已实现，待本轮上板验证 |
+| 角色管理 | `main/test_usb_role.c/.h` | 统一协调 controller[0] 切换与恢复 | 已实现，待本轮上板验证 |
 
 ### test_usb：CDC Device echo
 
@@ -214,10 +227,10 @@ _Static_assert(!(CONFIG_EXAMPLE_ENABLE_TEST_USB && CONFIG_EXAMPLE_ENABLE_TEST_UV
 |------|------|------|
 | CDC Device echo（test_usb 单路径） | 已上板验证 | CDC 枚举、RX hex dump、回显、line state 上报正常 |
 | UVC Host 收流 + JPEG 硬解（test_uvc 单路径，阶段 A） | 已上板验证 | 帧序号/字节/宽高/解码耗时/错误码日志正常，未上屏 |
-| 运行时角色切换（CDC ↔ UVC） | 规划中，未实现 | 可行性依据为 IDF v6.0.1 源码静态分析，需一次上板验证 uninstall 是否完整释放 DWC OTG |
-| UVC 设备能力枚举 + 偏好降级 | 规划中，未实现 | 字段名待 `managed_components` 下载后读 `uvc_host.h` 确认 |
-| `test_usb_role` 模块 | 规划中，未实现 | — |
-| LVGL USB Role 卡片 + 切换按钮 | 规划中，未实现 | — |
+| 运行时角色切换（CDC ↔ UVC） | 已实现，待验证 | 需上板循环验证 uninstall 是否完整释放 DWC OTG |
+| UVC 设备能力枚举 + 偏好降级 | 已实现，待验证 | 从设备 frame descriptor 选择 MJPEG 分辨率与最高 FPS |
+| UVC 热复位分级恢复 | 已实现，待验证 | 软件不能保证真实 VBUS 断电，恢复耗尽后提示重新插拔 |
+| LVGL UVC 预览 | 已实现，待验证 | PPA RGB565 缩放，CPU 回退，默认 10 FPS |
 | Kconfig 互斥强制 + 默认值调整 | 规划中，未实现 | 当前两个开关无 `depends on` 约束，可同时设 `y` 导致冲突 |
 
 ## 后续工作项

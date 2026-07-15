@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_memory_utils.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -256,6 +257,7 @@ void app_main(void)
     display_panel_t panel = {0};
     display_lvgl_t lvgl_port = {0};
 
+    ESP_LOGI(TAG, "Reset reason: %d", (int)esp_reset_reason());
     ESP_ERROR_CHECK(display_board_init());
     ESP_ERROR_CHECK(display_panel_init(&panel));
     ESP_ERROR_CHECK(display_board_set_backlight(100));

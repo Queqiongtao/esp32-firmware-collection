@@ -65,7 +65,7 @@ static void display_lvgl_perf_report_if_ready(void)
     }
 
     const uint32_t report_elapsed_ms = lv_tick_elaps(s_lvgl_perf.report_start_ms);
-    if (report_elapsed_ms < 1000) {
+    if (report_elapsed_ms < 5000) {
         return;
     }
 
@@ -177,6 +177,7 @@ static esp_err_t display_lvgl_init_adapter(const display_panel_t *panel, display
     esp_lv_adapter_config_t adapter_cfg = ESP_LV_ADAPTER_DEFAULT_CONFIG();
     adapter_cfg.task_stack_size = DISPLAY_LVGL_TASK_STACK_SIZE;
     adapter_cfg.task_priority = DISPLAY_LVGL_TASK_PRIORITY;
+    adapter_cfg.task_core_id = DISPLAY_LVGL_TASK_CORE_ID;
     adapter_cfg.tick_period_ms = DISPLAY_LVGL_TICK_PERIOD_MS;
     adapter_cfg.task_min_delay_ms = DISPLAY_LVGL_TASK_MIN_DELAY_MS;
     adapter_cfg.task_max_delay_ms = DISPLAY_LVGL_TASK_MAX_DELAY_MS;

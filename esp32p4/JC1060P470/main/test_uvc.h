@@ -24,7 +24,29 @@ typedef struct {
     uint32_t v_res;
 } test_uvc_preview_info_t;
 
+typedef enum {
+    TEST_UVC_STATE_IDLE = 0,
+    TEST_UVC_STATE_HOST_READY,
+    TEST_UVC_STATE_ENUMERATING,
+    TEST_UVC_STATE_STREAMING,
+    TEST_UVC_STATE_RECOVERING,
+    TEST_UVC_STATE_FAILED,
+} test_uvc_state_t;
+
+typedef enum {
+    TEST_UVC_RECOVERY_NONE = 0,
+    TEST_UVC_RECOVERY_STREAM,
+    TEST_UVC_RECOVERY_ROOT_PORT,
+    TEST_UVC_RECOVERY_STACK,
+} test_uvc_recovery_level_t;
+
+typedef enum {
+    TEST_UVC_PREVIEW_BACKEND_CPU = 0,
+    TEST_UVC_PREVIEW_BACKEND_PPA,
+} test_uvc_preview_backend_t;
+
 typedef struct {
+    test_uvc_state_t state;
     bool initialized;
     bool stream_opened;
     bool stream_started;
@@ -36,10 +58,20 @@ typedef struct {
     uint32_t frames_received;
     uint32_t frames_decoded;
     uint32_t decode_errors;
+    uint32_t frames_dropped;
+    uint32_t frame_queue_high_water;
     uint32_t last_frame_bytes;
     uint32_t last_decode_us;
+    uint32_t last_preview_us;
     uint32_t last_frame_w;
     uint32_t last_frame_h;
+    int64_t last_frame_time_us;
+    test_uvc_recovery_level_t recovery_level;
+    uint32_t recovery_attempts;
+    bool recovery_required;
+    bool warm_recovery_expected;
+    test_uvc_preview_backend_t preview_backend;
+    uint32_t preview_fallbacks;
     esp_err_t last_error;
 } test_uvc_status_t;
 
@@ -87,11 +119,21 @@ esp_err_t test_uvc_set_preferred_resolution(uint32_t h_res, uint32_t v_res);
 /** @brief Change the active UVC stream resolution without reinstalling USB Host. */
 esp_err_t test_uvc_change_resolution(uint32_t h_res, uint32_t v_res);
 
+/** @brief Recover a stalled UVC stream at the requested recovery level. */
+esp_err_t test_uvc_recover(test_uvc_recovery_level_t level);
+
+/** @brief Return whether a warm reset interrupted an active UVC stream. */
+bool test_uvc_should_resume_after_reset(void);
+
+/** @brief Clear the warm-reset resume marker after an intentional role exit. */
+void test_uvc_clear_resume_marker(void);
+
 /**
  * @brief Copy the newest scaled RGB565 preview into a caller-owned buffer.
  *
  * The buffer must be TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2
- * bytes. Returns ESP_ERR_NOT_FOUND until the first decoded frame is ready.
+ * bytes. If out_info->frame_id is non-zero, the copy is skipped when that is
+ * already the newest frame. Returns ESP_ERR_NOT_FOUND when no newer frame is ready.
  */
 esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size,
                                 test_uvc_preview_info_t *out_info);

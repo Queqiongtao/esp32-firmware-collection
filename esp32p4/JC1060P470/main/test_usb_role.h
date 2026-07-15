@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
+#include "test_uvc.h"
 
 typedef enum {
     TEST_USB_ROLE_NONE = 0,
@@ -28,6 +29,13 @@ typedef struct {
     float uvc_negotiated_fps;          /**< UVC Host: negotiated frames per second */
     uint32_t uvc_frames_decoded;       /**< UVC Host: total frames decoded */
     uint32_t uvc_decode_errors;        /**< UVC Host: total decode errors */
+    uint32_t uvc_frames_dropped;       /**< UVC Host: frames discarded before decode */
+    test_uvc_state_t uvc_state;        /**< UVC Host lifecycle state */
+    test_uvc_recovery_level_t uvc_recovery_level; /**< Active/last recovery level */
+    uint32_t uvc_recovery_attempts;    /**< Recovery attempts since role start */
+    bool uvc_recovery_required;        /**< Stream health monitor requested recovery */
+    bool uvc_warm_recovery_expected;   /**< A camera streamed before the latest warm reset */
+    esp_err_t uvc_last_error;          /**< Last UVC module error */
     uint32_t cdc_rx_packets;           /**< CDC Device: total RX packets */
     uint32_t cdc_tx_packets;           /**< CDC Device: total TX packets */
     esp_err_t last_switch_error;       /**< Error from the most recent switch attempt */

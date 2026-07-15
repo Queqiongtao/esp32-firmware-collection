@@ -45,6 +45,7 @@ idf_component_register(SRCS "JC1060P470_main.c"
                                      esp_lcd_touch_gt911
                                      esp_tinyusb
                                       esp_driver_jpeg
+                                      esp_driver_ppa
                                       espressif__usb
                                       espressif__usb_host_uvc
                        EMBED_FILES "canon.pcm")

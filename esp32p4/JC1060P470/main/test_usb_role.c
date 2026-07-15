@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -21,14 +22,19 @@ static const char *TAG = "test_usb_role";
 #define TEST_USB_ROLE_QUEUE_LEN         4
 #define TEST_USB_ROLE_TASK_STACK_SIZE   8192
 #define TEST_USB_ROLE_TASK_PRIORITY     3
-#define TEST_USB_ROLE_TASK_CORE_ID      tskNO_AFFINITY
+#define TEST_USB_ROLE_TASK_CORE_ID      1
 
 static QueueHandle_t s_queue;
 static TaskHandle_t s_task_handle;
 static test_usb_role_t s_current_role = TEST_USB_ROLE_NONE;
+static test_usb_role_t s_target_role = TEST_USB_ROLE_NONE;
 static bool s_switch_in_progress;
 static esp_err_t s_last_switch_error = ESP_OK;
 static bool s_initialized;
+static test_uvc_recovery_level_t s_auto_recovery_level = TEST_UVC_RECOVERY_NONE;
+static uint32_t s_auto_recovery_attempt;
+static int64_t s_next_recovery_us;
+static bool s_auto_recovery_exhausted;
 
 typedef struct {
     test_usb_role_t target;
@@ -44,6 +50,14 @@ static const char *uvc_role_name(test_usb_role_t role)
     case TEST_USB_ROLE_UVC_HOST:   return "UVC Host";
     default:                       return "None";
     }
+}
+
+static void uvc_role_reset_recovery(void)
+{
+    s_auto_recovery_level = TEST_UVC_RECOVERY_NONE;
+    s_auto_recovery_attempt = 0;
+    s_next_recovery_us = 0;
+    s_auto_recovery_exhausted = false;
 }
 
 /* Execute the role switch synchronously in the worker task context. */
@@ -76,14 +90,17 @@ static esp_err_t uvc_role_do_switch(const test_usb_role_command_t *command)
     if (current == TEST_USB_ROLE_CDC_DEVICE) {
         ret = test_usb_deinit();
     } else if (current == TEST_USB_ROLE_UVC_HOST) {
+        if (target != TEST_USB_ROLE_UVC_HOST) {
+            test_uvc_clear_resume_marker();
+        }
         ret = test_uvc_deinit();
     }
+    s_current_role = TEST_USB_ROLE_NONE;
     if (ret != ESP_OK) {
         s_last_switch_error = ret;
         ESP_LOGE(TAG, "USB role %s deinit failed: %s", uvc_role_name(current), esp_err_to_name(ret));
         return ret;
     }
-    s_current_role = TEST_USB_ROLE_NONE;
 
     /* Phase 2: init target role */
     if (target == TEST_USB_ROLE_CDC_DEVICE) {
@@ -119,6 +136,7 @@ static esp_err_t uvc_role_do_switch(const test_usb_role_command_t *command)
 
     if (ret == ESP_OK) {
         s_current_role = target;
+        uvc_role_reset_recovery();
         ESP_LOGI(TAG, "USB role switched to %s", uvc_role_name(target));
     } else {
         s_current_role = TEST_USB_ROLE_NONE;
@@ -128,18 +146,83 @@ static esp_err_t uvc_role_do_switch(const test_usb_role_command_t *command)
     return ret;
 }
 
+static void uvc_role_check_health(void)
+{
+    if (s_current_role != TEST_USB_ROLE_UVC_HOST || s_switch_in_progress) {
+        return;
+    }
+
+    test_uvc_status_t status = {0};
+    if (test_uvc_get_status(&status) != ESP_OK || !status.initialized) {
+        return;
+    }
+
+    if (status.state == TEST_UVC_STATE_HOST_READY && status.device_connected && !status.stream_started) {
+        s_switch_in_progress = true;
+        s_last_switch_error = test_uvc_run();
+        s_switch_in_progress = false;
+        if (s_last_switch_error == ESP_OK) {
+            uvc_role_reset_recovery();
+        }
+        return;
+    }
+
+    if ((!status.recovery_required && status.state != TEST_UVC_STATE_FAILED) ||
+        s_auto_recovery_exhausted ||
+        (!status.device_connected && !status.warm_recovery_expected)) {
+        return;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us < s_next_recovery_us) {
+        return;
+    }
+
+    if (s_auto_recovery_level == TEST_UVC_RECOVERY_NONE) {
+        s_auto_recovery_level = status.device_connected ? TEST_UVC_RECOVERY_STREAM
+                                                        : TEST_UVC_RECOVERY_ROOT_PORT;
+    }
+
+    s_switch_in_progress = true;
+    esp_err_t ret = test_uvc_recover(s_auto_recovery_level);
+    s_switch_in_progress = false;
+    s_last_switch_error = ret;
+    if (ret == ESP_OK) {
+        uvc_role_reset_recovery();
+        return;
+    }
+
+    s_auto_recovery_attempt++;
+    if (s_auto_recovery_attempt >= TEST_UVC_RECOVERY_MAX_ATTEMPTS) {
+        s_auto_recovery_attempt = 0;
+        if (s_auto_recovery_level < TEST_UVC_RECOVERY_STACK) {
+            s_auto_recovery_level++;
+        } else {
+            s_auto_recovery_exhausted = true;
+            ESP_LOGE(TAG, "UVC automatic recovery exhausted: %s", esp_err_to_name(ret));
+            return;
+        }
+    }
+    const uint32_t backoff_shift = s_auto_recovery_attempt > 0 ? s_auto_recovery_attempt - 1 : 0;
+    const uint32_t backoff_ms = 500U << backoff_shift;
+    s_next_recovery_us = now_us + backoff_ms * 1000LL;
+}
+
 static void uvc_role_worker_task(void *arg)
 {
     (void)arg;
 
     test_usb_role_command_t msg;
     while (true) {
-        if (xQueueReceive(s_queue, &msg, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(s_queue, &msg, pdMS_TO_TICKS(TEST_UVC_RECOVERY_POLL_MS)) != pdTRUE) {
+            uvc_role_check_health();
             continue;
         }
+        s_target_role = msg.target;
         s_switch_in_progress = true;
         uvc_role_do_switch(&msg);
         s_switch_in_progress = false;
+        s_target_role = s_current_role;
     }
 
     vTaskDelete(NULL);
@@ -154,8 +237,10 @@ esp_err_t test_usb_role_init(void)
     ESP_LOGI(TAG, "Initializing USB role management framework");
 
     s_current_role = TEST_USB_ROLE_NONE;
+    s_target_role = TEST_USB_ROLE_NONE;
     s_switch_in_progress = false;
     s_last_switch_error = ESP_OK;
+    uvc_role_reset_recovery();
 
     s_queue = xQueueCreate(TEST_USB_ROLE_QUEUE_LEN, sizeof(test_usb_role_command_t));
     ESP_RETURN_ON_FALSE(s_queue != NULL, ESP_ERR_NO_MEM, TAG, "create role queue failed");
@@ -172,6 +257,14 @@ esp_err_t test_usb_role_init(void)
     s_initialized = true;
 
     ESP_LOGI(TAG, "Startup role: None (USB roles start on demand from the UI)");
+
+    if (test_uvc_should_resume_after_reset()) {
+        ESP_LOGW(TAG, "Warm reset interrupted UVC streaming, queue automatic UVC recovery");
+        esp_err_t ret = test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "queue warm-reset UVC recovery failed: %s", esp_err_to_name(ret));
+        }
+    }
 
     return ESP_OK;
 }
@@ -224,7 +317,7 @@ esp_err_t test_usb_role_get_status(test_usb_role_status_t *out_status)
 
     test_usb_role_status_t status = {
         .current_role = s_current_role,
-        .target_role = s_current_role,
+        .target_role = s_target_role,
         .switch_in_progress = s_switch_in_progress,
         .last_switch_error = s_last_switch_error,
     };
@@ -248,6 +341,13 @@ esp_err_t test_usb_role_get_status(test_usb_role_status_t *out_status)
         status.uvc_negotiated_fps = uvc_status.negotiated_fps;
         status.uvc_frames_decoded = uvc_status.frames_decoded;
         status.uvc_decode_errors = uvc_status.decode_errors;
+        status.uvc_frames_dropped = uvc_status.frames_dropped;
+        status.uvc_state = uvc_status.state;
+        status.uvc_recovery_level = uvc_status.recovery_level;
+        status.uvc_recovery_attempts = uvc_status.recovery_attempts;
+        status.uvc_recovery_required = uvc_status.recovery_required;
+        status.uvc_warm_recovery_expected = uvc_status.warm_recovery_expected;
+        status.uvc_last_error = uvc_status.last_error;
     }
 
     *out_status = status;

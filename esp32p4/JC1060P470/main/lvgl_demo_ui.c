@@ -286,7 +286,7 @@ static void demo_ui_report_updates_if_ready(void)
         return;
     }
 
-    if (lv_tick_elaps(s_ui_update_report_start_ms) < 1000) {
+    if (lv_tick_elaps(s_ui_update_report_start_ms) < 5000) {
         return;
     }
 
@@ -1305,6 +1305,9 @@ static void demo_update_font_touch_zoom(void)
 static void demo_font_touch_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    if (lv_screen_active() != s_main_screen) {
+        return;
+    }
     demo_update_font_touch_zoom();
 }
 
@@ -1420,10 +1423,19 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
         return;
     }
 
-    if (role_status.switch_in_progress) {
+    if (role_status.uvc_state == TEST_UVC_STATE_RECOVERING) {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label, "UVC 恢复中，级别 %d...",
+                                           (int)role_status.uvc_recovery_level);
+    } else if (role_status.switch_in_progress) {
         demo_label_set_text_if_changed(s_uvc_status_label, "UVC 初始化/切换中...");
     } else if (role_status.current_role != TEST_USB_ROLE_UVC_HOST) {
         demo_label_set_text_if_changed(s_uvc_status_label, "等待 UVC Host 启动");
+    } else if (role_status.uvc_state == TEST_UVC_STATE_FAILED) {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label,
+                                           role_status.uvc_warm_recovery_expected ?
+                                           "UVC 恢复失败(0x%x)，请重新插拔摄像头" :
+                                           "未找到摄像头(0x%x)，请连接 HIGH USB",
+                                           (unsigned)role_status.uvc_last_error);
     } else if (!role_status.uvc_device_connected) {
         demo_label_set_text_if_changed(s_uvc_status_label, "等待摄像头连接");
     } else if (!role_status.uvc_stream_started) {
@@ -1434,12 +1446,18 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
                                            (unsigned)role_status.uvc_negotiated_v_res,
                                            role_status.uvc_negotiated_fps);
     }
-    demo_label_set_text_fmt_if_changed(s_uvc_detail_label, "已解码 %" PRIu32 " 帧  错误 %" PRIu32,
-                                       role_status.uvc_frames_decoded, role_status.uvc_decode_errors);
+    demo_label_set_text_fmt_if_changed(s_uvc_detail_label,
+                                       "解码 %" PRIu32 "  丢帧 %" PRIu32 "  错误 %" PRIu32 "  恢复 %" PRIu32,
+                                       role_status.uvc_frames_decoded,
+                                       role_status.uvc_frames_dropped,
+                                       role_status.uvc_decode_errors,
+                                       role_status.uvc_recovery_attempts);
 
     demo_uvc_update_resolution_options();
 
-    test_uvc_preview_info_t preview = {0};
+    test_uvc_preview_info_t preview = {
+        .frame_id = s_uvc_preview_frame_id,
+    };
     if (test_uvc_copy_preview(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE, &preview) == ESP_OK &&
         preview.frame_id != s_uvc_preview_frame_id) {
         s_uvc_preview_frame_id = preview.frame_id;
@@ -1557,6 +1575,9 @@ static void demo_uvc_enter_btn_cb(lv_event_t *e)
 static void demo_ui_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
+    if (lv_screen_active() != s_main_screen) {
+        return;
+    }
     demo_update_touch_card();
     demo_update_rtc_card();
     demo_update_usb_card();

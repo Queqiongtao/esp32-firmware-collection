@@ -179,6 +179,9 @@
  *     peripheral_map = BIT1  -> FS OTG（controller[1]，内部 FS PHY=GPIO26/27）
  *   本模块用 BIT0：480Mbps 带宽可上 1280x720，且 UTMI PHY 不进 GPIO 矩阵，
  *   不会触碰 DISPLAY_PIN_NUM_LCD_RST(GPIO27)，避免 FS OTG 路径导致的黑屏。
+ *   原理图未提供由 ESP32-P4 GPIO 控制的 HIGH USB VBUS load switch；
+ *   usb_host_lib_set_root_port_power(false) 只关闭 DWC root port，不能保证摄像头
+ *   5V 真正掉电。软件恢复耗尽后仍可能需要重新插拔摄像头。
  *
  *   controller[0] 同一时刻只能当 device 或 host。因此本模块启用时，CDC-ACM
  *   demo（test_usb.c，TinyUSB HS device）不可同时启用。CDC 功能改由 FULL USB
@@ -229,15 +232,15 @@
 
 #define TEST_UVC_USB_LIB_TASK_STACK             4096
 #define TEST_UVC_USB_LIB_TASK_PRIORITY          10
-#define TEST_UVC_USB_LIB_TASK_CORE              tskNO_AFFINITY
+#define TEST_UVC_USB_LIB_TASK_CORE              1
 
 #define TEST_UVC_DRIVER_TASK_STACK               4096
 #define TEST_UVC_DRIVER_TASK_PRIORITY            11
-#define TEST_UVC_DRIVER_TASK_CORE               tskNO_AFFINITY
+#define TEST_UVC_DRIVER_TASK_CORE               1
 
 #define TEST_UVC_WORKER_TASK_STACK              8192
 #define TEST_UVC_WORKER_TASK_PRIORITY           4
-#define TEST_UVC_WORKER_TASK_CORE               tskNO_AFFINITY
+#define TEST_UVC_WORKER_TASK_CORE               1
 
 #define TEST_UVC_ENUM_MAX_ATTEMPTS              3
 #define TEST_UVC_ENUM_TIMEOUT_MS                2000
@@ -246,6 +249,9 @@
 #define TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS       3
 #define TEST_UVC_STREAM_OPEN_RETRY_DELAY_MS     500
 #define TEST_UVC_FRAME_RECV_TIMEOUT_MS          5000
+#define TEST_UVC_STREAM_STALL_TIMEOUT_MS         5000
+#define TEST_UVC_RECOVERY_MAX_ATTEMPTS           3
+#define TEST_UVC_RECOVERY_POLL_MS                250
 
 #define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
@@ -255,5 +261,6 @@
  * 到此缓冲；UI 通过受控拷贝取得快照，避免直接持有 JPEG DMA 输出缓冲。 */
 #define TEST_UVC_PREVIEW_H_RES                  896
 #define TEST_UVC_PREVIEW_V_RES                  448
-#define TEST_UVC_PREVIEW_REFRESH_MS             200
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     200
+#define TEST_UVC_PREVIEW_REFRESH_MS             100
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     100
+#define TEST_UVC_PPA_BUFFER_ALIGNMENT           128
