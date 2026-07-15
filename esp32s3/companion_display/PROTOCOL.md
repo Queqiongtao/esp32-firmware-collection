@@ -159,7 +159,7 @@ TCP 模式在每帧 JPEG 解码完成并提交 LCD DMA 后，设备主动发送�
 | `lcd_wait_us` | 等待上一帧 LCD DMA 完成的耗时 |
 | `lcd_submit_us` | 提交当前帧 LCD DMA 的耗时 |
 | `previous_dma_us` | 上一帧 LCD DMA 从提交到完成的耗时 |
-| `replaced_frames` | 当前会话中被较新帧替换的待绘制帧数 |
+| `replaced_frames` | 设备本次启动期间累计的、被较新帧替换的待绘制帧数；建立新会话不会清零 |
 
 UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；PC 按手动 FPS 发送最新编码帧，并通过 `/api/status` 轮询设备诊断。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，在回调中直接裁剪并双线性缩放为设备尺寸，采集槽只保留最新图像；默认发送配置为 25 FPS、JPEG 质量 70。
 
@@ -175,10 +175,14 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 | --- | --- |
 | `wifi` | `setup_required`、`connecting` 或 `connected` |
 | `active_transport` | `none`、`tcp` 或 `udp` |
+| `token_set` | 设备已生成并保存六位配对码；当前实现固定为 `true` |
 | `protocol_version` | 当前控制协议版本 |
 | `video_transports` | 设备支持的视频传输方式 |
-| `dropped_frames` | 设备显示管线报告的丢帧计数 |
-| `performance` | 最近一帧的设备耗时和 `replacedFrames`；字段使用 camelCase |
+| `touch` | 触摸硬件或未来能力标记，不表示 v2 存在可用的触摸消息 |
+| `audio_capture` | 音频采集硬件或未来能力标记，不表示 v2 存在可用的音频消息 |
+| `dropped_frames` | 当前 UDP 会话中因重组超时或被新帧替换而丢弃的未完成帧数；TCP 模式不增加此计数 |
+| `performance` | 最近一帧的设备耗时；字段使用 camelCase |
+| `performance.replacedFrames` | 设备本次启动期间累计的、被较新帧替换且尚未开始绘制的帧数；建立新会话不会清零，与 `dropped_frames` 含义不同 |
 | `udp.rxPackets` | 收到且长度至少为 UDP 头的包数 |
 | `udp.acceptedFragments` | 通过校验并参与重组的分片数 |
 | `udp.rejectedPackets` | 被拒绝的 UDP 包数 |
@@ -189,6 +193,8 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 | `udp.lastReject` | 最近拒绝原因：`none`、`inactive`、`source_ip`、`header`、`session`、`fragment` 或 `length` |
 
 UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submittedFrames`。`acceptedFragments` 增长而 `completedFrames` 不增长表示分片未收齐；`completedFrames` 增长而 `submittedFrames` 不增长表示完整帧未通过 `CDP1` 校验或无法提交显示管线。`reassemblyTimeouts` 统计 250 ms 超时以及被较新帧替换的未完成重组，少量增长是 UDP 的预期行为，持续增长表示链路或发送节奏不稳定。
+
+`touch`、`audio_capture` 以及 `hello_ack.capabilities.text_input` 只描述硬件或后续协议扩展方向，不是运行时可用性或授权结果。v2 没有对应控制消息、数据格式和生命周期；客户端不得依据这些字段发送未定义消息。
 
 设备屏幕和串口同时提供状态。关键屏幕状态包括 `WS CONNECTED`、`NEGOTIATING`、`TCP VIDEO`、`UDP VIDEO`、`RECEIVING FRAME`、`BAD CRC`、`UDP REJECTED`、`UDP DROPPED`、`SESSION EXPIRED` 与 `DEVICE BUSY`。UDP 活动期间，串口每秒输出一次 `UDP stats: rx=... accepted=... rejected=... completed=... submitted=... timeout=... failed=... last=...`。
 
