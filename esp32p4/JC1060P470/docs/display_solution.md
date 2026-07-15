@@ -4,7 +4,7 @@
 
 本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合已上板验证显示正常，未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
 
-当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是一个面向板级联调的 **综合验证 Demo**。应用入口 `app_main()` 先完成 `board -> panel -> LVGL` 初始化，再按 Kconfig 选项初始化 `RTC / Audio / Battery / USB / SD / Wireless` 等测试模块，最后加载 `example_lvgl_demo_ui()` 页面。
+当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是面向板级联调的 **综合验证 Demo**。`app_main()` 先完成 `board -> panel -> LVGL` 初始化并创建 UI，再启动后台 FreeType 初始化任务和外设初始化任务。SD、RTC、Audio、Battery、USB role、Wireless 的初始化不会阻塞首屏创建；单个外设失败只记录错误，不阻断其他模块。
 
 ## 显示链路参数
 
@@ -48,8 +48,8 @@
 - **页面根容器**：`screen` 使用 `LV_LAYOUT_FLEX + LV_FLEX_FLOW_COLUMN`，开启 `LV_DIR_VER` 纵向滚动，适配单屏无法一次容纳全部内容的场景。
 - **标题区**：`header` 使用纵向 flex 布局，包含两行文案：
   - `JC1060P470 综合验证 Demo`
-  - `显示/触摸 + RTC + USB Device CDC + 音频 + BAT + WiFi + BLE`
-- **功能卡片区**：`row` 使用 `ROW_WRAP` 布局，当前包含 7 张卡片：
+  - `显示/触摸 + RTC + USB/UVC + 音频 + BAT + WiFi + BLE`
+- **功能卡片区**：`row` 使用 `ROW_WRAP` 布局，当前包含 8 张卡片：
   - `1. 显示与触摸`
   - `2. RTC`
   - `3. USB Device`
@@ -57,16 +57,19 @@
   - `5. BAT`
   - `6. WiFi`
   - `7. BLE`
+  - `8. FreeType`
+- **UVC 子页面**：从 USB Device 卡片进入，包含 RGB565 预览、协商状态、解码/丢帧/恢复计数和摄像头支持的 MJPEG 分辨率列表。
 
 ### 当前交互与布局状态
 
 - **显示与触摸卡片**：展示触摸状态、点击次数、最近坐标和提示文案，并提供一个独立触摸区用于验证 GT911 输入与 LVGL 刷新联动。
 - **RTC 卡片**：周期展示初始化状态、当前时间和同步来源。
-- **USB Device 卡片**：展示 CDC-ACM 枚举状态、DTR/RTS、最近收发包和累计统计。
+- **USB Device 卡片**：展示当前 HIGH USB 角色、CDC-ACM 枚举状态和收发统计，可切换 CDC/UVC，也可进入 UVC 测试页。USB role worker 异步执行底层 init/deinit，UI 不直接持有 USB 句柄。
 - **音频卡片**：展示音频状态、录音数据量、峰值和输入电平，并提供“播放内置音乐 / 开始录音 / 播放录音”三个操作按钮。
 - **电量卡片**：展示 `GPIO52` 分压点 ADC 电压、换算后的 BAT 电压和线性估算百分比，用于验证电池采样链路是否正常。
 - **WiFi 卡片**：展示 hosted 链路状态、STA 初始化状态、扫描到的 AP 列表，并支持在页面上触发扫描与输入密码连接。
-- **BLE 卡片**：当前仅展示 hosted 状态与“待接入”提示，不开放业务操作，避免把未完成路径误写成可用功能。
+- **BLE 卡片**：展示 hosted NimBLE、广播/连接和测试特征值状态，可启停广播；该软件路径已实现，是否完成当前版本上板验证以验证状态表为准。
+- **FreeType 卡片**：展示字体分区、FreeType 初始化诊断、动态字号样本和双指缩放结果。普通 UI 仍使用静态 16 px 补丁字体，避免后台字体失败影响主界面。
 
 最近几轮 UI 结构修复如下：
 
@@ -174,71 +177,37 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 公共参数集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。
 
-## 中文显示问题处理
+## 中文字体与 FreeType 诊断
 
-## 字体分区与 Tiny TTF 方案
+### 当前架构
 
-当前工程使用独立字体分区承载运行时子集 `TTF`，优先解决 WiFi 动态中文 SSID 缺字问题，并保留后续扩充字符集和字号的空间。
+字体路径分为“主 UI 静态字体”和“FreeType 动态诊断”两层：
 
-### 当前方案
+- 普通 UI 统一使用 `main/lvgl_demo_font_patch.c` 的 `lvgl_demo_font_patch_16`。主界面不依赖 SPIFFS 或 FreeType 初始化结果，字体分区异常时仍可显示。
+- `partitions.csv` 提供 `2M` 的 `font` SPIFFS 分区，构建时由 `spiffs_create_partition_image(font ../assets/fonts FLASH_IN_PROJECT)` 打包。
+- 运行时资源为 `assets/fonts/ui_shs_sc.otf`，挂载路径 `/spiffs/ui_shs_sc.otf`，Kconfig 文件名为 `CONFIG_EXAMPLE_FONT_FILE_NAME`。
+- LVGL 当前启用 `FreeType + FS_STDIO`；`CONFIG_LV_USE_TINY_TTF=n`、`CONFIG_LV_USE_FONT_MANAGER=n`，不再使用早期 Tiny TTF 方案。
+- `display_font_init()` 在低优先级后台任务中挂载分区、检查文件、初始化 FreeType，并创建 `16/16/18/22 px` 的 Small、Body、Card Title、Title 诊断字体。
+- FreeType 卡片可按 14~120 px、步进 2 px 请求动态样本字体；模块缓存有限数量的字号对象并回收旧对象。
 
-- `partitions.csv` 新增 `font` SPIFFS 分区，当前大小 `2M`
-- `assets/fonts/NotoSansSC-Regular.ttf` 是正式运行时资源，内容为按当前 UI 与常见无线场景裁剪后的子集 `TTF`
-- LVGL 启用 `Tiny TTF + Font Manager + FS_STDIO`
-- `main/display_font.c/.h` 负责：
-  - 挂载字体分区
-  - 检查字体文件存在
-  - 初始化 Tiny TTF / Font Manager
-  - 创建 `16px` UI 字体
-- `main/lvgl_demo_ui.c` 统一通过 `display_font_get_ui_font()` 取字体
-- `assets/fonts/build_subset.py` 负责：
-  - 扫描 `main/*.c`、`main/*.h` 里的 C 字符串字面量
-  - 固定保留全部可打印 ASCII
-  - 合并 `assets/fonts/ui_font_extra_chars.txt` 里的额外字符
-  - 生成 `ui_font_charset.txt` 并调用 `pyftsubset`
+`display_font_get_role_font()` 返回静态 UI 字体；只有显式调用 `display_font_get_freetype_role_font()` 或 `display_font_get_freetype_sample_font()` 的诊断控件使用运行时 OTF。这个边界避免把字体文件、SPIFFS 和 FreeType 的失败扩散到主 UI。
 
-### 当前验证边界
+### 字符集维护
 
-- 当前只规划并实现 `16px` 单字号
-- 当前不支持任意字号请求
-- 当前若字体分区未烧录或字体文件缺失，会回退到 `lvgl_demo_font_patch_16`
-- 若无额外说明，应理解为“需经过编译验证和上板验证”，而不是“已长期稳定”
+仓库保留的是思源黑体简中 Regular 的子集 OTF，而不是完整官方字体：
 
-当前综合 Demo 的中文主路径不再依赖 `LV_FONT_DEFAULT` fallback，而是优先走运行时子集 `TTF`；`main/lvgl_demo_font_patch.c` 保留为加载失败时的静态回退字库。
+- `assets/fonts/build_subset.py` 扫描 `main/*.c`、`main/*.h` 的 C 字符串字面量，固定加入全部可打印 ASCII，并合并 `assets/fonts/ui_font_extra_chars.txt`。
+- 合并结果写入 `assets/fonts/ui_font_charset.txt`，随后由 `pyftsubset` 生成 `ui_shs_sc.otf`。
+- 固定 UI 文案发生变化时，需要同时用该字符集重新生成静态 `lvgl_demo_font_patch_16`；仅更新 OTF 不会补齐主 UI 静态字库。
+- 动态 SSID、设备名等无法从源码扫描出的常用字符，应先加入 `ui_font_extra_chars.txt`。
 
-### 问题背景
+完整生成命令和许可证要求见 `assets/fonts/README.md`。
 
-- 工程已启用 `CONFIG_LV_FONT_SOURCE_HAN_SANS_SC_16_CJK=y` 与 `CONFIG_LV_FONT_DEFAULT_SOURCE_HAN_SANS_SC_16_CJK=y`。
-- 但当前综合 Demo 页面使用的实际汉字集合超过了内建 `Source Han Sans SC 16 CJK` 的覆盖范围，直接使用默认字体会出现缺字或乱码。
-- 早期尝试过“补丁字库 + fallback”方案，但在标题、副标题等混排场景下表现不稳定，出现过只显示部分字的现象。
+### 已处理问题与验证边界
 
-### 当前方案
-
-- 已启用 `CONFIG_LV_USE_TINY_TTF=y`、`CONFIG_LV_USE_FONT_MANAGER=y` 与 `CONFIG_LV_USE_FS_STDIO=y`
-- 子集 `TTF` 覆盖：
-  - 当前页面实际使用的中文
-  - 全部可打印 ASCII、数字和常用标点
-  - `ui_font_extra_chars.txt` 中额外保留的一小批常见无线相关中文
-- `main/lvgl_demo_ui.c` 通过 `demo_get_ui_font()` 统一返回运行时字体；若加载失败，再回退到 `lvgl_demo_font_patch_16`
-
-### 已处理的显示问题
-
-- **中文缺字/乱码**：主路径改为运行时子集 `TTF`，避免继续维护完整静态字库。
-- **中文只显示上半部分**：历史上已修正静态回退字库的垂直度量 `ofs_y` 计算，避免回退场景下字形整体下压。
-- **标题首行异常**：经排查主要由标题区两行 label 重叠引起，现已通过 `header` 纵向 flex 布局修复。
-
-### 新增文案的维护约束
-
-- 当前正式字库不是完整中文字体，而是按 `main/` 里的实际字符串和额外补集裁剪出的子集 `TTF`。
-- 因此，后续新增 UI 中文文案时，若出现乱码，优先判断是否为“新增字符未进入子集字符集”这一类缺字问题。
-- 若新增的是固定 UI 文案，重新运行 `assets/fonts/build_subset.py` 即可自动纳入。
-- 若新增的是动态文本场景常用字，例如 WiFi SSID / 设备名里的高频中文，应补到 `assets/fonts/ui_font_extra_chars.txt` 后再重生成子集。
-- `lvgl_demo_font_patch_16` 仅作为失败回退保留，不再作为日常增量维护的主路径。
-
-### 当前验证边界
-
-- 上述字体与 UI 修复已经完成 **编译验证**。
-- 本文档不把最近几轮字体/UI 调整表述为“全部上板验证通过”；若无额外说明，应理解为“问题已定位并完成静态修改，需以上板结果做最终确认”。
+- 静态补丁字库已修正历史上的字形垂直度量问题；标题区已改为纵向 flex，避免两行 label 重叠。
+- FreeType 初始化失败时，诊断卡片显示静态 fallback，不影响其他外设卡片和触摸操作。
+- 当前显示链路的 DOUBLE_DIRECT 组合有既有上板验证记录；最近的 FreeType 动态字号、字体诊断卡片和 UVC 子页面只确认到编译验证，仍需单独上板确认内存占用、触摸缩放和长时间刷新行为。
 
 ## 后续优化方向
 

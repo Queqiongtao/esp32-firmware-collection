@@ -10,29 +10,28 @@
 
 ### 显示基础（已就绪）
 
-- `main/JC1060P470_main.c`：应用入口，按顺序初始化 board、panel、LVGL 端口并加载 demo UI。
+- `main/JC1060P470_main.c`：应用入口，初始化 board、panel、LVGL，创建综合 Demo UI，并在后台启动字体和外设初始化任务。
 - `main/display_board.c`：MIPI DSI PHY 供电、背光 PWM/GPIO。
 - `main/display_panel.c`：MIPI DSI 总线、DPI 接口、JD9165 面板创建。
-- `main/display_lvgl.c`：LVGL 任务、DIRECT 渲染模式双 fb buffer 分配、flush 回调（含整 fb `esp_cache_msync`）、LVGL 输入设备（indev）注册。渲染方案选型与问题根因详见 `docs/display_solution.md`。
+- `main/display_lvgl.c`：默认通过 `esp_lvgl_adapter` 注册 MIPI display/touch，使用 `DOUBLE_DIRECT` 双 fb；自研 DIRECT 双 fb + 整 fb `esp_cache_msync` 路径作为 legacy 回退。渲染方案选型与问题根因详见 `docs/display_solution.md`。
 - `main/display_touch.c`：I2C master 总线、GT911 触摸控制器初始化。
 - `main/display_config.h`：集中定义分辨率、lane rate、DPI clock、framebuffer 数量、显示/触摸引脚、触摸缩放参数。
-- `main/lvgl_demo_ui.c`：当前 LVGL 示例界面和动画负载。
+- `main/display_font.c`：挂载字体 SPIFFS 分区，初始化 FreeType 字体诊断与动态字号缓存；普通 UI 继续使用静态补丁字库。
+- `main/lvgl_demo_ui.c`：综合验证 UI，包含显示/触摸、RTC、USB/UVC、音频、电池、WiFi、BLE 和 FreeType 测试入口。
 - `components/esp_lcd_jd9165/`：本地 JD9165 面板驱动和初始化序列。
 - `main/Kconfig.projbuild`：工程级显示选项，例如 DMA2D、背光诊断。
 - `sdkconfig.defaults`、`sdkconfig.defaults.esp32p4`：当前工程默认配置。
 
-### 外设测试模块（规划中，后续逐步实现）
+### 外设测试模块
 
 每类外设独立成模块，遵循 `test_<外设>.c/.h` 命名约定，单一职责：
 
-- SD 卡：`main/test_sdcard.c/.h`
-- USB：`main/test_usb.c/.h`（CDC Device）、`main/test_uvc.c/.h`（UVC Host + 硬件 JPEG 解码）、`main/test_usb_role.c/.h`（规划，运行时角色管理框架）
-- 摄像头：`main/test_camera.c/.h`
-- 传感器：`main/test_sensor.c/.h`
-- WiFi/蓝牙：`main/test_wireless.c/.h`（需协处理器芯片，如 ESP32-C6）
-- 音频 I2S：`main/test_audio.c/.h`
+- 已实现：SD 卡 `test_sdcard`、RTC `test_rtc`、音频 `test_audio`、电池 `test_battery`、USB CDC Device `test_usb`、USB UVC Host `test_uvc`、USB 角色管理 `test_usb_role`、WiFi/BLE `test_wireless`。
+- UVC 已包含设备能力枚举、动态分辨率切换、硬件 JPEG 解码、PPA/CPU 预览缩放和分级恢复；最新恢复与预览路径仍需上板验证。
+- WiFi/BLE 依赖板载 ESP32-C6：WiFi 使用 `esp_hosted + esp_wifi_remote`，BLE 使用 hosted NimBLE VHCI，并实现广播及一个读写/通知测试特征。
+- 尚未实现：MIPI CSI 摄像头 `test_camera`、通用传感器 `test_sensor`。
 
-外设公共参数（引脚、I2C 总线等）集中在 `main/test_config.h`，与 `display_config.h` 风格一致。主入口通过 Kconfig 选项控制各模块启用/禁用。
+外设公共参数（引脚、I2C 总线等）集中在 `main/test_config.h`，与 `display_config.h` 风格一致。主入口通过 Kconfig 控制各模块能力，具体状态见 `docs/peripheral_tests.md`。
 
 ### USB 子系统约束
 
@@ -43,9 +42,10 @@ USB 子系统方案详见 `docs/usb_solution.md`。本工程有两个 USB Type-C
 
 约束：
 
-- `test_usb`（CDC Device）与 `test_uvc`（UVC Host）共享 controller[0]，Kconfig `EXAMPLE_ENABLE_TEST_USB` / `EXAMPLE_ENABLE_TEST_UVC` 必须互斥（规划加双向 `depends on !...` 或 main.c 编译期 `_Static_assert`）。当前两个开关无互斥约束，可同时设 `y` 导致冲突，属已知待修。
-- 运行时角色切换（规划中）：通过 `test_usb_role` 模块在 role worker task 内串行执行 deinit 当前 → init 目标，不并发 install 两个 stack。可行性依据为 IDF `v6.0.1` `usb_phy_otg_set_mode` / `usb_new_phy` / `usb_del_phy` 静态分析，uninstall 是否完整释放 DWC OTG 需一次上板验证。
-- UVC 格式协商（规划）：不硬编码 FPS/分辨率，先在 `UVC_HOST_DRIVER_EVENT_DEVICE_CONNECTED` 回调里读设备 frame_info 列表，按偏好（MJPEG + 偏好分辨率 + 最高 fps）匹配并降级。当前 `test_config.h` 硬编码 `TEST_UVC_H_RES/V_RES/FPS` 是临时实现，待设备能力枚举接入后改为偏好值。
+- Kconfig 使用 `choice EXAMPLE_USB_ROLE` 在编译期互斥选择 CDC Device 或 UVC Host 能力；角色框架启动时保持 `None`，由 UI 按需占用 controller[0]。
+- 运行时角色切换由 `test_usb_role` worker task 串行执行 deinit 当前 → init 目标，不并发 install 两个 stack。重复 CDC/UVC 切换是否完整重置 DWC OTG 仍需上板循环验证。
+- UVC 在设备连接后枚举 MJPEG frame descriptor，优先匹配偏好分辨率并选择最高 FPS，不匹配时降级到设备实际能力；UI 可异步切换分辨率。
+- UVC 健康检查按 stream → root port → stack 三级恢复。板上 HIGH USB 没有 GPIO 控制的 VBUS load switch，root port power off 不等于摄像头真实断电，恢复耗尽后可能仍需重新插拔。
 - USB 模块对外接口仍收敛为 `init/run/deinit/get_status` capability 风格，UI 通过 `test_usb_role_switch` 触发切换，不直接操作底层 USB 句柄。
 
 ## AI 修改规则
@@ -130,7 +130,7 @@ USB 子系统方案详见 `docs/usb_solution.md`。本工程有两个 USB Type-C
 
 - 当前工程默认目标为 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`。
 - 当前工程芯片版本为 ESP32-P4 **V1.0**（`CONFIG_ESP32P4_REV_MIN_FULL=100`，`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`），IDF 使用 `register/hw_ver1/` 寄存器定义。
-- 当前 LVGL 渲染模式为 **DIRECT + 双 framebuffer ping-pong**，flush_cb 中做整 fb `esp_cache_msync(DIR_C2M)` 消除残影。
+- 当前默认 LVGL 渲染模式为 **esp_lvgl_adapter + DOUBLE_DIRECT 双 framebuffer**。legacy 回退路径为自研 DIRECT 双 fb，并在 flush_cb 中做整 fb `esp_cache_msync(DIR_C2M)`。
 - 当前板级控制引脚按工程实际定义为：
   - 背光：`GPIO23`
   - LCD 复位：`GPIO27`

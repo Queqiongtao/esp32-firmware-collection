@@ -18,7 +18,9 @@
 
 ---
 
-## 1. 已实现外设引脚（已上板验证）
+## 1. 已实现外设引脚
+
+本节记录当前源码已经使用的板级连接。“已实现”不等于所有软件路径都完成上板验证；具体状态在各小节和 `docs/peripheral_tests.md` 中单独说明，未注明上板记录的能力只按静态实现或编译验证理解。
 
 ### 1.1 显示、触摸与 RTC（`display_config.h` / `test_config.h`）
 
@@ -76,17 +78,19 @@
 
 - **显示与触摸卡片**：显示链路使用 JD9165 MIPI DSI 屏幕；触摸输入来自 GT911（`GPIO21/22` + `GPIO7/8` I2C）。
 - **RTC 卡片**：数据来自板载 `RX8025T-UC` RTC（复用 `GPIO7/8` I2C）。
-- **USB Device 卡片**：当前 `CDC-ACM` echo demo 使用 `HIGH USB` 口（封装脚 `49/50`，内部 UTMI HS PHY，对应 DWC OTG controller[0]）；`FULL USB` 口是 USJ 固定功能串口，不能跑自定义 device 栈。USB 端口划分与角色切换方案详见 [docs/usb_solution.md](./usb_solution.md)。
+- **USB Device 卡片**：显示 HIGH USB 当前角色和 CDC 状态，可异步进入 CDC Device、UVC Host 或 None。CDC 与 UVC 共用封装脚 `49/50` 对应的 DWC OTG controller[0]；`FULL USB` 是 USJ 固定功能串口，不能跑自定义 device/host stack。
+- **UVC 测试页**：同样使用 `HIGH USB`，角色为 HS Host；页面显示 MJPEG 协商状态、RGB565 预览、分辨率列表和恢复统计。端口划分、生命周期与验证边界见 [USB 子系统方案](./usb_solution.md)。
 - **音频卡片**：播放/录音链路使用 ES8311 + 板载模拟 MIC + 扬声器功放，对应 I2S 引脚为 `GPIO9/10/11/12/13`，功放使能为 `GPIO20`。
 - **电量卡片**：`GPIO52` 接在 BAT 分压点，分压关系为 `BAT -> 68K -> GPIO52 -> 100K -> GND`，软件通过 ADC2 通道读取分压点并换算为电池电压与估算百分比。
 - **WiFi 卡片**：已接入 hosted WiFi 扫描与连接路径，基于 `ESP32-P4 <-> ESP32-C6` SDIO 链路工作。
-- **BLE 卡片**：当前仅展示 hosted 状态，BLE 业务路径尚未接入。
+- **BLE 卡片**：通过 ESP32-C6 hosted NimBLE VHCI 展示 host 同步、广播、连接和测试 GATT 特征值，可启停广播；当前版本上板验证状态不从“代码已实现”推断。
+- **FreeType 卡片**：仅使用 SPI Flash 中的字体 SPIFFS 分区和显示/触摸资源，不新增外部 GPIO。
 
 该映射仅说明“当前页面上的功能块对应哪类硬件资源”，不替代具体 UI 文案或布局说明；页面结构和交互以 `main/lvgl_demo_ui.c` 为准。
 
-### 1.5 无线协处理器连接（板级已连接，WiFi 已接入）
+### 1.5 无线协处理器连接（WiFi/BLE 软件已接入）
 
-当前板子为 `ESP32-P4 + ESP32-C6` 组合，`ESP32-P4` 与 `ESP32-C6` 之间通过 `SDIO` 连接。当前工程已基于这组板级连接接入 hosted WiFi 测试路径；BLE hosted 仍未接入。
+当前板子为 `ESP32-P4 + ESP32-C6` 组合，`ESP32-P4` 与 `ESP32-C6` 之间通过 `SDIO` 连接。WiFi 数据面使用 `esp_hosted + esp_wifi_remote`；BLE Host 运行在 ESP32-P4，通过 ESP-Hosted VHCI 使用 ESP32-C6 的 BLE controller。
 
 | GPIO | 信号 | 说明 |
 |------|------|------|
@@ -97,8 +101,8 @@
 | 18 | SDIO CLK | `ESP32-P4 -> ESP32-C6` SDIO 时钟 |
 | 19 | SDIO CMD | `ESP32-P4 -> ESP32-C6` SDIO 命令线 |
 
-- **当前软件状态**：Hosted transport 与 WiFi STA 路径已接入当前工程并完成上板验证；启动日志中仍可能出现协处理器版本/RPC 元信息告警。
-- **当前限制**：BLE hosted 业务路径尚未接入，当前 BLE 卡片不代表 BLE 功能已完成。
+- **WiFi 状态**：Hosted transport 与 WiFi STA 扫描/连接路径已接入，并有既有上板验证记录；启动日志中仍可能出现协处理器版本/RPC 元信息告警。
+- **BLE 状态**：已实现 NimBLE host 初始化、可连接广播、连接状态和一个 128-bit UUID 的 read/write/notify 测试特征；当前文档未找到足够证据把最新 BLE 路径标记为已上板验证。
 
 ---
 

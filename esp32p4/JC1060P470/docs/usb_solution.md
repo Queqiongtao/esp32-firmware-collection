@@ -2,253 +2,145 @@
 
 ## 概述
 
-本工程 USB 子系统围绕 ESP32-P4 的两个 USB Type-C 口构建。两个口能力不同，不能互换：
+本工程有两个能力不同、不能互换的 USB Type-C 口：
 
-- `FULL USB`（丝印）= USB Serial/JTAG（USJ）固定功能 CDC-ACM，只用于烧录和 IDF 日志。
-- `HIGH USB`（丝印）= 内部 UTMI High-Speed PHY + DWC OTG controller[0]，480Mbps，可作 HS Device 或 HS Host，**同一时刻只能选一种角色**。
+- `FULL USB`（丝印）走 GPIO24/25 对应的 USB Serial/JTAG（USJ），固定提供 CDC-ACM 烧录与日志串口，不是 DWC OTG。
+- `HIGH USB`（丝印）走封装专用脚 49/50 和内部 UTMI High-Speed PHY，对应 DWC OTG controller[0]，可作为 TinyUSB HS Device 或 USB HS Host，但同一时刻只能有一个角色占用。
 
-USB 应用层目前由两个独立测试模块构成：
+应用层由三个模块组成：
 
-- `test_usb`：TinyUSB HS Device CDC-ACM echo（已实现，已上板验证）。
-- `test_uvc`：usb_host + esp-usb UVC Host + 硬件 JPEG 解码 + PPA 缩放预览（已实现）。
+| 模块 | 职责 | 当前状态 |
+|------|------|----------|
+| `test_usb` | TinyUSB HS Device CDC-ACM echo | 已实现；CDC 单路径有上板验证记录 |
+| `test_uvc` | UVC Host、MJPEG 能力协商、硬件 JPEG 解码、RGB565 预览和恢复 | 已实现；收流与 JPEG 单路径有上板记录，最新预览/恢复待验证 |
+| `test_usb_role` | 串行管理 controller[0] 角色、分辨率切换与健康恢复 | 已实现；重复角色切换和热复位恢复待验证 |
 
-`test_usb_role` 角色管理模块让 `HIGH USB` 在运行时于 CDC Device 与 UVC Host 之间切换，并由 LVGL 按钮触发。本文档记录端口划分、资源模型、运行时角色切换、UVC 格式协商与恢复策略。
+当前代码已完成 ESP-IDF v6.0.1 编译验证。除表格中明确注明的历史记录外，不把新路径表述为已经稳定上板验证。
 
-> **验证状态声明**：当前改动已完成 ESP-IDF `v6.0.1` 编译验证。热复位自动恢复、PPA 预览性能和重复角色切换仍需上板验证，不应仅凭编译结果表述为“稳定”。
+## 端口与资源模型
 
-## UVC 热复位恢复与 VBUS 边界
+| 丝印 | 板级连接 | 控制器与能力 |
+|------|----------|--------------|
+| `FULL USB` | GPIO24(DM)/GPIO25(DP) | `USB_INT_PHY0` 对应 USJ 固定设备，只用于烧录和日志 |
+| `HIGH USB` | 封装脚 49(DM)/50(DP) | UTMI HS PHY + DWC OTG controller[0]，480 Mbps，可作 HS Device 或 HS Host |
 
-JC1060P470 原理图中 `HIGH USB` 的 VBUS 供电路径没有连接到 ESP32-P4 GPIO 的独立 load-switch enable。`usb_host_lib_set_root_port_power(false)` 会停止 DWC root port、断开下游设备并阻止重新枚举，但不等价于切断摄像头 5V。
+ESP32-P4 V1.0 的 GPIO26/27 可路由到 controller[1] 的 FS OTG，但 GPIO27 已用于 LCD reset，本工程不使用该路径。HIGH USB 的 UTMI 信号不进入 GPIO matrix，不与显示、触摸或 SDMMC GPIO 冲突。
 
-当前软件恢复流程为：
+TinyUSB Device 和 USB Host 都通过 IDF USB PHY 层申请同一个 UTMI PHY：
 
-1. USB Host 以 `root_port_unpowered=true` 安装，UVC client 和事件任务就绪后再开启 root port。
-2. 成功出流后在 RTC no-init 内存记录恢复标记；正常退出 UVC 时清除，热复位中断出流时由 USB role worker 自动恢复 UVC 角色。
-3. 连续 5 秒没有视频帧时，由 USB role worker 串行触发恢复，禁止在 UVC callback 或 frame worker 内直接卸载自身。
-4. 恢复依次尝试重新打开 stream、root port 逻辑关闭/开启、完整卸载并重建 UVC Host/DWC PHY/JPEG/PPA；每级有界重试并退避。
-5. UVC 卸载期间保持 USB Host event task 运行，直到收到 `NO_CLIENTS` 且设备已释放或 `ALL_FREE`，再卸载 Host。
-6. 恢复耗尽后停止自动重试，UI 显示错误码并提示重新插拔。若摄像头固件必须真实掉电才能复位，只能增加 GPIO 控制的 USB load switch 或使用支持端口供电控制的 Hub。
+- `tinyusb_driver_install()` 以 Device 模式申请，`tinyusb_driver_uninstall()` 释放。
+- `usb_host_install()` 以 Host 模式申请，`usb_host_uninstall()` 释放。
+- PHY 占用互斥可阻止两个 stack 同时成功 install；应用层仍必须坚持先 deinit 当前角色，再 init 目标角色。
 
-## USB 端口与控制器总览
+底层 API 支持释放后重新申请，但多轮 uninstall/install 是否完整复位 DWC 中断、FIFO、endpoint 和 session 状态不能只靠静态分析证明，必须上板循环验证。
 
-集中定义于 `main/test_config.h` “USB ports overview” 注释段：
+## Kconfig 与启动行为
 
-| 丝印 | 板级连接 | 控制器 | 能力 |
-|------|----------|--------|------|
-| `FULL USB` | GPIO `24(DM)/25(DP)` | `USB_INT_PHY0` = USJ | 固定功能 CDC-ACM 串口，固件下载 / IDF log。**不是 DWC OTG**，不能跑 TinyUSB 自定义 device 栈或 USB Host。 |
-| `HIGH USB` | 封装脚 `49(DM)/50(DP)` | 内部 UTMI HS PHY → DWC OTG controller[0] | 480Mbps。可作 HS Device（TinyUSB CDC/MSC/HID）或 HS Host（usb_host + UVC/MSC/HID），同一时刻只能选一种角色。 |
+`main/Kconfig.projbuild` 使用 `choice EXAMPLE_USB_ROLE`，默认选择 `EXAMPLE_ENABLE_TEST_USB`：
 
-要点：
+- Kconfig 保证 `EXAMPLE_ENABLE_TEST_USB` 与 `EXAMPLE_ENABLE_TEST_UVC` 不会同时为 `y`。
+- 任一选项为 `y` 时，`app_system_init_task()` 创建 `test_usb_role` worker。
+- `test_usb_role_init()` 正常启动角色固定为 `TEST_USB_ROLE_NONE`，不会在启动阶段占用 HIGH USB。
+- 当前组件仍同时编译 `test_usb.c` 和 `test_uvc.c`，UI 可以在运行时串行请求 CDC、UVC 或 None。所选 Kconfig 项不是启动角色，也不会裁掉另一套模块代码。
+- 若 RTC no-init 标记表明热复位前 UVC 正在出流，role worker 会在初始化后例外地自动排队恢复 UVC。
 
-- ESP32-P4 V1.0 上 `USB_INT_PHY0`（GPIO24/25）路由到 USJ 控制器，不是 DWC OTG。`USB_INT_PHY1`（GPIO26/27）虽可路由到 DWC OTG controller[1] 做 FS OTG，但 GPIO27 与 `DISPLAY_PIN_NUM_LCD_RST` 冲突，本工程不使用该路径。
-- `HIGH USB` 的 UTMI PHY 是封装专用脚，不进 GPIO 矩阵，不会触碰显示/触摸/SDMMC 引脚。
-- USJ 与 HS OTG 在主机侧都可能枚举为串口设备，但功能不同：USJ 仅烧录/日志，HS OTG 是应用层 CDC/Host 数据口。
+因此，当前 `choice` 的主要作用是建立互斥配置和启用角色框架；实际硬件独占由 role worker 的生命周期顺序保证。
 
-## controller[0] 资源模型
+## CDC Device
 
-`HIGH USB` 的 DWC OTG controller[0] + UTMI PHY 是被 `test_usb` 与 `test_uvc` 共享的硬件资源。ESP-IDF `v6.0.1` 通过 `esp_private/usb_phy.h` 的 PHY 抽象层管理其占用与角色：
+`test_usb` 在 HIGH USB 上安装 TinyUSB Device 和一个 `TINYUSB_CDC_ACM_0` 接口：
 
-| API（`components/esp_hw_support/usb_phy/usb_phy.c`） | 行为 |
-|------|------|
-| `usb_new_phy(config, &handle)` | 申请 PHY handle。UTMI PHY 用引用计数 + 占用互斥；若已被占用返回 `ESP_ERR_INVALID_STATE`（源码第 279 行）。`config->otg_mode` 在第 325 行强制调用 `usb_phy_otg_set_mode` 设置当前角色。 |
-| `usb_phy_otg_set_mode(handle, HOST/DEVICE)` | 切换 OTG 角色信号矩阵（iddig/bvalid/vbusvalid/avalid）与 D+/D- 上下拉。**不改 PHY 占用状态**，仅切 GPIO matrix（源码第 136-191 行）。 |
-| `usb_del_phy(handle)` | 释放 PHY handle，减引用计数；ref_count 归零时禁用 USB peripheral（源码第 364-384 行）。 |
+- CDC RX 回调只投递事件，`usb_cdc_evt` worker 读取数据、输出 hex dump 并原样回显。
+- line-state 回调记录 DTR/RTS。
+- `test_usb_get_status()` 返回 attached、DTR/RTS、收发包数、字节数和最后错误。
+- `test_usb_deinit()` 依次释放 CDC、TinyUSB、worker 和 queue，可在未初始化状态安全调用。
 
-依据：
+FULL USB 的 USJ 串口始终承担烧录和 IDF 日志；CDC 测试枚举出的第二个串口来自 HIGH USB，不要混用。
 
-- TinyUSB device（`esp_tinyusb`）在 `tinyusb_driver_install` 时调用 `usb_new_phy(target=UTMI, controller=OTG, otg_mode=DEVICE)` 占用 UTMI PHY；`tinyusb_driver_uninstall` 时调 `usb_del_phy` 释放。
-- usb_host（`usb_host_install` 通过 `skip_phy_setup=false`）调用 `usb_new_phy(target=UTMI, controller=OTG, otg_mode=HOST)` 占用 UTMI PHY；`usb_host_uninstall` 时释放。
-- 由于 UTMI PHY 占用互斥（`ESP_ERR_INVALID_STATE`），两个 stack 不可能同时成功 install。这是“同一时刻只能选一种角色”的底层保障。
+## UVC Host
 
-> **静态分析结论**：运行时切换在底层 API 层是支持的——先 uninstall 一方释放 PHY handle，再 install 另一方重新申请。但 esp_tinyusb / usb_host 的 uninstall 是否完整重置 DWC OTG core（中断使能、FIFO 配置、endpoint 状态、session 状态）属于 stack 内部行为，应用层不可控，需要一次上板验证才能定性。
+### 生命周期
 
-## 当前 USB Demo 现状
+`test_uvc_init()` 安装以下资源，但不要求摄像头已经连接：
 
-### 模块清单
+1. 以 `root_port_unpowered=true` 安装 controller[0] USB Host。
+2. 创建 USB Host library event task 和 UVC driver task。
+3. 安装 UVC client，随后开启 root port。
+4. 申请 ESP32-P4 JPEG decoder、帧队列、解码缓冲和固定预览缓冲。
+5. 优先申请 PPA SRM 缩放资源；失败时保留 CPU 缩放回退。
 
-| 模块 | 文件 | 角色 | 状态 |
-|------|------|------|------|
-| CDC Device | `main/test_usb.c/.h` | TinyUSB HS Device CDC-ACM echo | 已实现，已上板验证（CDC echo 路径） |
-| UVC Host | `main/test_uvc.c/.h` | usb_host + UVC + JPEG + PPA 预览与分级恢复 | 已实现，待本轮上板验证 |
-| 角色管理 | `main/test_usb_role.c/.h` | 统一协调 controller[0] 切换与恢复 | 已实现，待本轮上板验证 |
+`test_uvc_run()` 是有界阻塞调用，等待设备、枚举能力并打开流。frame callback 只把帧投递给 worker；worker 完成 JPEG 解码、预览缩放和统计。`test_uvc_deinit()` 停止/关闭 stream，卸载 UVC client，等待 USB Host 收到 clients/devices 已释放事件，再卸载 Host 并释放 JPEG、PPA、queue、task 和 buffer。
 
-### test_usb：CDC Device echo
+### 能力枚举与分辨率切换
 
-- TinyUSB HS Device，CDC-ACM 端口 0（`TINYUSB_CDC_ACM_0`）。
-- RX 异步：CDC RX 回调把消息投递到 event queue，worker task `usb_cdc_evt` 调 `tinyusb_cdcacm_read` 读出数据，hex dump + 原样回写。
-- 上报 line state（DTR/RTS）。
-- `test_usb_get_status` 提供 capability 风格只读状态（attached/dtr/rts/rx_packets/tx_packets/rx_bytes/tx_bytes/last_error）。
-- `test_usb_deinit` 完整 uninstall（cdcacm deinit → tinyusb_driver_uninstall → 删 task/queue）。
+UVC 不再硬编码 FPS：
 
-### test_uvc：UVC Host + 硬件 JPEG 解码
+- 设备连接后读取 MJPEG frame descriptor，最多保存 `TEST_UVC_FRAME_INFO_MAX=24` 条能力。
+- 默认偏好为 `1280x720`；若设备支持该分辨率，选择对应最高 FPS。
+- 偏好不匹配时，从设备实际支持的 MJPEG 能力中选择降级项，并记录最终协商的宽、高和 FPS。
+- `test_uvc_get_resolutions()` 向 UI 暴露去重后的分辨率列表。
+- `test_usb_role_restart_uvc()` 将分辨率请求投递到 role queue；若 UVC 已运行，worker 调用 `test_uvc_change_resolution()` 停止当前流并用新能力重新打开，不在 LVGL 回调中执行阻塞操作。
 
-- usb_host 通过 `peripheral_map = BIT0` 选 controller[0]（HS OTG + UTMI PHY）。
-- esp-usb `uvc_host` driver 后台 task 处理 USB Host 事件；`uvc_frame_callback` 把帧指针投递到 frame queue，worker task `uvc_worker` 用 ESP32-P4 硬件 JPEG 解码器把 MJPEG 解码为 RGB565。
-- 阶段 A：只做日志观测（帧序号/字节/宽高/解码耗时/错误码），不写 LVGL 画布。
-- 帧缓冲与 RGB565 输出缓冲均分配在 PSRAM（`MALLOC_CAP_SPIRAM`）。
-- `test_uvc_get_status` 提供 capability 风格只读状态（initialized/stream_opened/stream_started/device_connected/frames_received/frames_decoded/decode_errors/last_frame_*/last_error）。
-- `test_uvc_deinit` 完整 uninstall（stream stop/close → uvc_host_uninstall → usb_host_lib_unblock → 等 usblib task 退出 → usb_host_uninstall → jpeg_del_decoder_engine → 删 task/queue/buf）。
+### 解码与预览
 
-### 阶段 A 的 cache 一致性约束
+- USB UVC 帧使用 PSRAM 缓冲，格式为 MJPEG；ESP32-P4 硬件 JPEG decoder 输出 RGB565。
+- 固定预览尺寸为 `896x448`，保持源画面宽高比并居中，空白区域清零。
+- 预览默认最多每 100 ms 更新一次。PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。
+- `test_uvc_copy_preview()` 将最新预览复制到调用方缓冲；调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
+- 状态中保留接收、解码、丢帧、错误、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
 
-依据 `test_config.h` “USB UVC camera” 注释段：
+USB/JPEG/PPA 驱动负责其 DMA 边界，应用层仍显式维护自己写入的 PSRAM：UVC worker 更新预览缓冲后执行 `esp_cache_msync(..., DIR_C2M)`；UI 把预览复制到 LVGL image 自有缓冲后再次写回 cache，再 invalidate 图像对象。后续新增“CPU 写 PSRAM 后交 DMA 读取”的路径也必须在所有权交接点执行同类同步，不能依赖 LVGL 隐式处理。
 
-- UVC 帧缓冲在 PSRAM，由 USB-DWC DMA 写入，应用 CPU 读 `frame->data`。esp-usb UVC 驱动内部已处理该 DMA→CPU 方向的 cache invalidate，应用层无需额外 `esp_cache_msync`。
-- JPEG 硬解输入 `frame->data`（PSRAM，CPU 不写，硬件 DMA 读）无需 msync；输出 RGB565 缓冲在 PSRAM 由 JPEG DMA 写入、CPU 读，无 DMA2D 缩放时不存在 CPU 写后 DMA 读的中间断点，阶段 A 暂不涉及 msync。
-- 阶段 B 引入 DMA2D 缩放上屏时，再在 CPU 写 PSRAM 后交 DMA2D 前补 `esp_cache_msync(DIR_C2M)`，遵循 AGENTS.md cache 一致性约束。
+## 角色管理与恢复
 
-## 运行时角色切换方案（规划中）
+### 对外接口
 
-### 目标
+`test_usb_role` 提供以下 capability：
 
-让 `HIGH USB` 在运行时于 CDC Device 与 UVC Host 之间切换，由 LVGL 按钮触发，不再依赖编译期 Kconfig 二选一固化。
+- `test_usb_role_init()`：创建 queue 和固定在 core 1 的 role worker，正常启动保持 None。
+- `test_usb_role_switch(target)`：异步切换到 None、CDC Device 或 UVC Host。
+- `test_usb_role_restart_uvc(h_res, v_res)`：异步请求 UVC 分辨率切换。
+- `test_usb_role_current()` / `test_usb_role_get_status()`：返回当前/目标角色、切换状态，以及 CDC/UVC 摘要。
 
-### 可行性依据（静态分析）
+普通角色切换严格执行：
 
-- `usb_phy_otg_set_mode` 提供角色切换 API（`esp_private/usb_phy.h`）。
-- `usb_new_phy` / `usb_del_phy` 引用计数 + 占用互斥，保证两个 stack 不同时 install。
-- 现有 `test_usb_deinit` 与 `test_uvc_deinit` 已经在各自路径中调用了对应的 uninstall（`tinyusb_driver_uninstall`、`usb_host_uninstall`、`uvc_host_uninstall`、`jpeg_del_decoder_engine`），证明 stack 的 uninstall API 存在且被设计为可释放。
-- 风险：esp_tinyusb / usb_host 的 uninstall 是否完整重置 DWC OTG core，属 stack 内部行为，无法纯静态证明，需一次上板验证。
+1. 相同目标直接成功；切到 None 只释放当前角色。
+2. deinit 当前 CDC 或 UVC，随后立即把当前角色记为 None。
+3. init/run 目标角色。
+4. 目标初始化失败时清理半初始化资源，保持 None 并记录 `last_switch_error`。
 
-### test_usb_role 框架 API（规划）
+UVC 初始化成功但暂时没有摄像头时，Host 角色可以保持就绪；健康检查发现设备后来接入且 stream 未启动时，会再次调用 `test_uvc_run()`。
 
-```c
-typedef enum {
-    TEST_USB_ROLE_NONE = 0,
-    TEST_USB_ROLE_CDC_DEVICE,   // test_usb (TinyUSB HS Device CDC)
-    TEST_USB_ROLE_UVC_HOST,     // test_uvc (USB Host UVC + JPEG)
-} test_usb_role_t;
+### 健康检查与分级恢复
 
-typedef struct {
-    test_usb_role_t current_role;
-    bool cdc_attached;
-    bool uvc_device_connected;
-    bool uvc_stream_started;
-    esp_err_t last_switch_error;
-} test_usb_role_status_t;
+role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视频帧会置位恢复请求，恢复不会从 UVC callback 或 frame worker 内直接卸载自身。
 
-esp_err_t test_usb_role_init(void);                          // 根据 Kconfig 选初始角色
-esp_err_t test_usb_role_switch(test_usb_role_t target);     // 异步：投递请求给 role worker task
-test_usb_role_t test_usb_role_current(void);
-esp_err_t test_usb_role_get_status(test_usb_role_status_t *out);
-```
+自动恢复按以下等级升级，每级最多尝试 3 次，并使用 500/1000/2000 ms 退避：
 
-### 切换流程
+1. `STREAM`：停止并重新打开 UVC stream。
+2. `ROOT_PORT`：逻辑关闭/开启 DWC root port 后重新枚举和出流。
+3. `STACK`：完整卸载并重建 UVC Host、DWC PHY、JPEG 和 PPA 资源。
 
-切换在独立 `role_worker` task 里执行，避免阻塞 LVGL 任务（deinit/init 可能耗时秒级）：
+成功出流后在 RTC no-init 内存写入标记；有意退出 UVC 时清除。热复位中断出流会保留标记，下一次启动自动请求 UVC，并在没有设备对象时从 root-port 级别开始恢复。所有等级耗尽后停止自动重试，UI 显示错误并提示重新插拔。
 
-1. `current == target` 直接返回。
-2. `current != NONE` → 调对应 `test_usb_deinit()` 或 `test_uvc_deinit()`；两者内部已实现 task 等待退出与资源释放。
-3. 调目标 `test_xxx_init() + test_xxx_run()`。
-4. 失败回滚到 `TEST_USB_ROLE_NONE` 并设 `last_switch_error`。
+### VBUS 硬件边界
 
-### UI 触发（规划）
+JC1060P470 原理图没有给 HIGH USB VBUS load switch 提供 ESP32-P4 GPIO enable。`usb_host_lib_set_root_port_power(false)` 只能停止 root port、断开逻辑会话并阻止重新枚举，不等价于摄像头 5V 真正掉电。
 
-`lvgl_demo_ui.c` 加一张 “USB Role” 卡片：
-
-- 显示当前角色（CDC / UVC / None）+ 切换状态（Idle / Switching... / OK / Failed）。
-- 一个按钮，文案根据当前角色切换（“Switch to UVC” / “Switch to CDC”）。
-- 按钮点击 → `test_usb_role_switch(target)` 异步排队。
-- 状态通过 `test_usb_role_get_status` 轮询显示，UI 不直接操作底层硬件句柄（遵守 AGENTS.md 解耦约束）。
-
-## UVC 格式协商方案（规划中）
-
-### 当前问题
-
-`test_config.h` 硬编码 `TEST_UVC_H_RES=1280`、`TEST_UVC_V_RES=720`、`TEST_UVC_FPS=30`，`test_uvc_run()` 把这三个值直接传给 `uvc_host_stream_open`。若摄像头描述符不支持该组合，`uvc_host_stream_open` 会协商失败。Kconfig UVC 选项帮助文字残留 “1280x720 MJPEG at 15 FPS”、`test_config.h` 注释残留 “15fps 上限”，与 `TEST_UVC_FPS=30` 不一致。
-
-### 协商原则
-
-- 不硬编码 FPS/分辨率，先读设备描述符，再按偏好匹配。
-- `test_config.h` 把 `TEST_UVC_H_RES/V_RES/FPS` 改为 `TEST_UVC_PREFER_H_RES/V_RES`，仅作为“优先目标”而非强制要求。
-- 在 `uvc_driver_event_callback` 的 `UVC_HOST_DRIVER_EVENT_DEVICE_CONNECTED` 回调里读取 `event->device_connected` 上报的 frame_info 列表（esp-usb UVC 驱动在该事件里已经枚举好设备能力），按优先级匹配：
-  1. 优先 MJPEG 格式；
-  2. 在 MJPEG 格式下优先匹配 `TEST_UVC_PREFER_H_RES × TEST_UVC_PREFER_V_RES`；
-  3. 若偏好分辨率不支持，降级到摄像头实际支持的最大 MJPEG 分辨率；
-  4. 在选定分辨率下取摄像头支持的最高 fps。
-- `test_uvc_run()` 用动态选定的 format 调 `uvc_host_stream_open`，日志打印实际协商结果（分辨率/fps/format）。
-
-### 待确认项
-
-- esp-usb UVC 驱动的 `device_connected` 事件 payload 字段名/类型需在实施时读 `usb_host_uvc/include/usb/uvc_host.h` 确认（当前 `managed_components/` 未下载，无法静态确认）。
-- 若驱动未提供“先看设备能力再 open”的钩子，则降级方案：`uvc_host_stream_open` 失败时打印实际支持的 format/frame 列表，提示用户改 `test_config.h` 的偏好值。
-
-## Kconfig 互斥与启动初始角色
-
-当前 `main/Kconfig.projbuild` 的两个开关：
-
-| 选项 | 默认 | 含义 |
-|------|------|------|
-| `EXAMPLE_ENABLE_TEST_USB` | `n`（规划改为 `y`） | 启用 TinyUSB CDC-ACM Device echo |
-| `EXAMPLE_ENABLE_TEST_UVC` | `y`（规划改为 `n`） | 启用 USB UVC Host + JPEG 解码 |
-
-### 互斥强制（规划）
-
-两个开关共享 controller[0]，必须互斥。规划加双向 `depends on`：
-
-```
-config EXAMPLE_ENABLE_TEST_USB
-    depends on !EXAMPLE_ENABLE_TEST_UVC
-config EXAMPLE_ENABLE_TEST_UVC
-    depends on !EXAMPLE_ENABLE_TEST_USB
-```
-
-或 main.c 加编译期断言：
-
-```c
-_Static_assert(!(CONFIG_EXAMPLE_ENABLE_TEST_USB && CONFIG_EXAMPLE_ENABLE_TEST_UVC),
-              "USB CDC and UVC share controller[0], enable one or the other");
-```
-
-### 启动初始角色（规划）
-
-引入 `test_usb_role` 后，Kconfig 选项语义改为“启动时初始角色”，运行时仍可切换：
-
-- `EXAMPLE_ENABLE_TEST_USB=y` + `EXAMPLE_ENABLE_TEST_UVC=n` → 启动进入 `TEST_USB_ROLE_CDC_DEVICE`。
-- `EXAMPLE_ENABLE_TEST_USB=n` + `EXAMPLE_ENABLE_TEST_UVC=y` → 启动进入 `TEST_USB_ROLE_UVC_HOST`。
-- main.c 不再直接调 `test_usb_init/test_uvc_init`，改调 `test_usb_role_init()`。
-- 默认值规划改为 CDC on / UVC off（USB Device 优先）。
-
-## 与 AGENTS.md 约束对应
-
-| AGENTS.md 约束 | USB 子系统落地 |
-|------|------|
-| 不重复配置同一硬件资源 | controller[0] UTMI PHY 由 esp_tinyusb / usb_host 各自 install 时申请、uninstall 时释放，应用层不绕过 stack 直接操作 PHY handle。 |
-| 模块对外接口收敛为 capability | `test_usb` / `test_uvc` / `test_usb_role` 均暴露 `init/run/deinit/get_status`，不直穿其他模块内部状态。 |
-| 硬件测试逻辑与 UI 展示逻辑解耦 | `test_usb_role_switch` 是 capability 接口，LVGL 按钮只调它，不直接操作底层 USB 句柄。 |
-| 资源生命周期先定义再写逻辑 | 切换流程严格 deinit 当前 → init 目标，task/queue/handle 生命周期由各模块 deinit 内部管理。 |
-| Cache 一致性 | 阶段 A 不涉及 CPU 写后 DMA 读的中间断点；阶段 B 上屏时由 display 模块提供 capability 接口统一调度 DMA2D + `esp_cache_msync(DIR_C2M)`，UVC 模块不直拿 framebuffer 句柄。 |
-| 不做与当前目标无关的重构 | test_usb_role 模块新增属“与目标相关的新功能”，不顺手改 test_usb/test_uvc 既有路径。 |
-| 对“已验证”表述必须克制 | 运行时切换与 UVC 设备能力枚举均标注为“规划中/静态分析”，不写成“可用/稳定”。 |
+若摄像头固件死锁且必须掉电才能恢复，现有软件三级恢复无法保证成功，只能重新插拔，或后续增加 GPIO 控制的 load switch/支持端口供电控制的 Hub。
 
 ## 验证状态
 
 | 路径 | 状态 | 说明 |
 |------|------|------|
-| CDC Device echo（test_usb 单路径） | 已上板验证 | CDC 枚举、RX hex dump、回显、line state 上报正常 |
-| UVC Host 收流 + JPEG 硬解（test_uvc 单路径，阶段 A） | 已上板验证 | 帧序号/字节/宽高/解码耗时/错误码日志正常，未上屏 |
-| 运行时角色切换（CDC ↔ UVC） | 已实现，待验证 | 需上板循环验证 uninstall 是否完整释放 DWC OTG |
-| UVC 设备能力枚举 + 偏好降级 | 已实现，待验证 | 从设备 frame descriptor 选择 MJPEG 分辨率与最高 FPS |
-| UVC 热复位分级恢复 | 已实现，待验证 | 软件不能保证真实 VBUS 断电，恢复耗尽后提示重新插拔 |
-| LVGL UVC 预览 | 已实现，待验证 | PPA RGB565 缩放，CPU 回退，默认 10 FPS |
-| Kconfig 互斥强制 + 默认值调整 | 规划中，未实现 | 当前两个开关无 `depends on` 约束，可同时设 `y` 导致冲突 |
+| FULL USB 烧录与日志 | 已使用 | USJ 固定功能，不属于应用层 TinyUSB |
+| CDC Device echo 单路径 | 已上板验证 | 枚举、RX dump、回显和 line state 有既有记录 |
+| UVC 收流 + JPEG 单路径 | 已上板验证 | MJPEG 收流和硬件解码日志有既有记录 |
+| 设备能力枚举与偏好降级 | 已实现，待本轮上板确认 | 需用不同摄像头核对 descriptor 和降级结果 |
+| UVC RGB565 预览、PPA/CPU 回退 | 已实现，编译验证通过 | 需测画面、帧率、耗时和长时间内存稳定性 |
+| CDC/None/UVC 重复切换 | 已实现，编译验证通过 | 需循环验证 DWC、PHY、task 和 buffer 是否完整释放 |
+| 分辨率运行时切换 | 已实现，编译验证通过 | 需覆盖成功、设备不支持和切换中拔出设备 |
+| stall 与三级恢复 | 已实现，编译验证通过 | 需注入停帧、拔插和恢复耗尽场景 |
+| UVC 热复位自动恢复 | 已实现，编译验证通过 | 需验证 RTC no-init 标记和无真实 VBUS 断电边界 |
 
-## 后续工作项
-
-以下方向均属独立工作项，应单独提交验证：
-
-1. **Phase 1：必改项修复**
-   - 注释修正：`test_uvc.h` 与 `JC1060P470_main.c` 中 “Full-Speed” 误标为 “High-Speed”。
-   - Kconfig 互斥强制 + 默认值调整（CDC on / UVC off）。
-   - FPS/分辨率从硬编码改为设备能力枚举（依赖 Phase 2 的 frame_info 读取）。
-
-2. **Phase 2：test_usb_role 模块**
-   - 新增 `main/test_usb_role.c/.h`，实现 role worker task 异步切换。
-   - main.c 改调 `test_usb_role_init()`。
-   - 一次上板验证：CDC ↔ UVC 切换是否稳定，uninstall 是否完整释放 DWC OTG。
-
-3. **Phase 3：LVGL USB Role 卡片**
-   - `lvgl_demo_ui.c` 加卡片与按钮，通过 `test_usb_role_switch` 触发，`test_usb_role_get_status` 轮询显示。
-
-4. **UVC 阶段 B（远期）**
-   - RGB565 经 DMA2D 缩放上 LVGL canvas，由 display 模块提供 capability 接口统一调度 DMA2D + cache msync，UVC 模块不直拿 framebuffer 句柄。
+上板验收至少应覆盖：CDC → None → UVC → None 循环、UVC 页面反复进出、所有摄像头分辨率逐项切换、流中拔插、流中热复位、停帧恢复、恢复耗尽提示，以及运行期间 FULL USB 日志不受影响。
