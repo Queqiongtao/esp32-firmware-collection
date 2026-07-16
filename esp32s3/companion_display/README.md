@@ -24,10 +24,12 @@
 桌面发送端位于 `tools/desktop_client`，依赖 Rust、Node.js 和 Tauri 2。首次在 Ubuntu/Debian 上使用时，先安装系统依赖：
 
 ```bash
-sudo apt install build-essential pkg-config curl \
+sudo apt install build-essential pkg-config curl clang libclang-dev \
   libwebkit2gtk-4.1-dev libgtk-3-dev libpipewire-0.3-dev \
   libssl-dev libayatana-appindicator3-dev librsvg2-dev
 ```
+
+`clang` 和 `libclang-dev` 供 `src-tauri/vendor` 内 PipeWire 绑定的 bindgen 在构建期生成 C 绑定使用；缺失时 `cargo` 构建会报 `Unable to find libclang`。
 
 安装 Node.js、npm 和 Rust stable 后，在 `companion_display` 工程目录执行：
 
