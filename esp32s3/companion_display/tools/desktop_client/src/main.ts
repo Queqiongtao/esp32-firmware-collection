@@ -476,12 +476,18 @@ async function initialize() {
   sanitizeToken();
   endpoint.value = normalizeEndpoint(endpoint.value);
   cropFields.hidden = !cropEnabled.checked;
-  await listen<StreamEvent>("stream-status", ({ payload }) => applyStreamStatus(payload));
-  await listen<string>("stream-preview", ({ payload }) => {
-    preview.src = `data:image/jpeg;base64,${payload}`;
-    preview.hidden = false;
-    previewEmpty.hidden = true;
-  });
+  try {
+    await listen<StreamEvent>("stream-status", ({ payload }) => applyStreamStatus(payload));
+    await listen<string>("stream-preview", ({ payload }) => {
+      preview.src = `data:image/jpeg;base64,${payload}`;
+      preview.hidden = false;
+      previewEmpty.hidden = true;
+    });
+  } catch (error) {
+    /* Keep polling and source discovery alive even if the event channel
+       is rejected (e.g. missing capability ACL). */
+    setStatus(`Event channel unavailable: ${String(error)}`, "bad");
+  }
   await refreshSources();
   window.setInterval(() => {
     invoke<StreamEvent>("get_stream_status").then(applyStreamStatus).catch(() => undefined);
