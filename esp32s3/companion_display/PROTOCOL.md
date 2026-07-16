@@ -14,7 +14,9 @@
 ws://DEVICE_IP/stream?token=PAIRING_CODE
 ```
 
-`PAIRING_CODE` 必须是设备屏幕显示的六位数字配对码。未授权连接返回 HTTP `401`；已有其他活动会话时返回 HTTP `403`。控制消息是 UTF-8 JSON WebSocket 文本帧，每个请求必须包含字符串 `type` 和字符串 `request_id`。
+配对码在设备首次启动时随机生成（`100000`–`999999`），保存于 NVS，重启后保持不变；当前固件不提供重置配对码的接口，清除 NVS 分区会同时清除配对码和 Wi-Fi 凭据。
+
+`PAIRING_CODE` 必须是设备屏幕显示的六位数字配对码。未授权连接返回 HTTP `401`；已有其他活动会话时返回 HTTP `403`。控制消息是 UTF-8 JSON WebSocket 文本帧，每个请求必须包含字符串 `type` 和字符串 `request_id`。设备忽略请求中的未定义字段，以便未来扩展；当前 PC 客户端在 `hello` 中附带的 `capabilities` 对象就属于这类被忽略的字段。
 
 ### 状态机
 
@@ -26,7 +28,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
                                                stream_stopped
 ```
 
-视频只能在收到 `stream_started` 后发送。客户端应在关闭连接前发送 `stop_stream`；WebSocket `CLOSE` 同样会释放会话和显示管线。未协商即开始、请求不属于当前会话、协议版本或传输方式不支持时，设备以 `error` 响应。
+视频只能在收到 `stream_started` 后发送。客户端应在关闭连接前发送 `stop_stream`；WebSocket `CLOSE` 同样会释放会话和显示管线。未协商即开始、`start_stream` 不属于当前会话、协议版本或传输方式不支持时，设备以 `error` 响应。`stop_stream` 是幂等的：即使没有活动会话或请求来自其他连接，设备也返回 `stream_stopped`，只释放属于该连接的会话。同一连接可以再次发送 `hello` 重新协商：设备会释放已启动的显示管线、生成新的 UDP `session_id` 与 `session_token`，客户端必须重新执行 `start_stream`。
 
 ### `hello`
 
@@ -49,7 +51,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 {"type":"hello_ack","request_id":"hello-1","protocol_version":2,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":true,"text_input":true}}
 ```
 
-`width`、`height` 是目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。`capabilities` 中的 `touch`、`text_input`、`audio_capture` 仅为未来能力预留，v2 没有对应可用消息，也不启用触摸注入或麦克风采集。
+`width`、`height` 是目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。JPEG 上限来自固件配置 `CONFIG_COMPANION_FRAME_LIMIT_KB`（默认 100 KiB，因此 `max_frame_bytes` 默认为 `102424`）；当前 PC 客户端将 JPEG 固定上限为 100 KiB，不读取该字段动态调整。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。`capabilities` 中的 `touch`、`text_input`、`audio_capture` 仅为未来能力预留，v2 没有对应可用消息，也不启用触摸注入或麦克风采集。
 
 ### `start_stream` 与 `stop_stream`
 
@@ -107,7 +109,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 8 | `sequence` | u32 | 发送端帧序号，可回绕 |
 | 12 | `width` | u16 | 目标宽度，当前为 `368` |
 | 14 | `height` | u16 | 目标高度，当前为 `448` |
-| 16 | `payload_size` | u32 | JPEG 字节数，范围为 `1..=102400` |
+| 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`（默认固件配置下为 `102400`） |
 | 20 | `crc32` | u32 | JPEG payload 的 CRC-32 |
 
 帧头之后紧跟 `payload_size` 字节 JPEG 数据。总帧大小必须严格为 `24 + payload_size`。CRC 使用与 Rust `crc32fast::hash()` 和 ESP-IDF `esp_crc32_le(0, payload, payload_size)` 相同的 CRC-32 值，只覆盖 JPEG payload，不覆盖帧头。
@@ -132,7 +134,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 32 | `payload_length` | u16 | 当前 UDP 负载长度，必须等于数据报中的实际负载且不超过 `1200` |
 | 34 | `reserved` | u16 | 保留字段，当前接收端忽略 |
 
-发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以 1 ms 间隔发送连续分片，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 将该帧发送视为失败并停止本次流，不会继续积压旧画面。设备的 UDP 接收邮箱为 24 包；它校验头、会话、索引、长度和来源地址后重组。它只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。
+发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以 1 ms 间隔发送连续分片，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。设备的 UDP 接收邮箱为 24 包；它校验头、会话、索引、长度和来源地址后重组。它只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
@@ -197,6 +199,15 @@ UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submit
 `touch`、`audio_capture` 以及 `hello_ack.capabilities.text_input` 只描述硬件或后续协议扩展方向，不是运行时可用性或授权结果。v2 没有对应控制消息、数据格式和生命周期；客户端不得依据这些字段发送未定义消息。
 
 设备屏幕和串口同时提供状态。关键屏幕状态包括 `WS CONNECTED`、`NEGOTIATING`、`TCP VIDEO`、`UDP VIDEO`、`RECEIVING FRAME`、`BAD CRC`、`UDP REJECTED`、`UDP DROPPED`、`SESSION EXPIRED` 与 `DEVICE BUSY`。UDP 活动期间，串口每秒输出一次 `UDP stats: rx=... accepted=... rejected=... completed=... submitted=... timeout=... failed=... last=...`。
+
+## Wi-Fi 配网接口
+
+HTTP 服务同时提供两个配网端点，配网和已联网状态下均可访问：
+
+- `GET /` 返回内置配网页面，用于填写目标 Wi-Fi 的 SSID 和密码。
+- `POST /api/wifi` 接收 `application/x-www-form-urlencoded` 表单。`ssid` 必填，最长 32 字节；`password` 可选，最长 64 字节。成功时设备将凭据保存到 NVS、立即尝试连接并返回纯文本提示；缺少 `ssid`、请求体为空或不小于 256 字节时返回 HTTP `400`。
+
+两个端点都不要求配对码，凭据以明文 HTTP 传输，仅应通过设备自建热点或可信局域网访问。
 
 ## 安全与兼容性
 
