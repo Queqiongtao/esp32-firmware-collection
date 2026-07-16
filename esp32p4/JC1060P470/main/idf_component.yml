@@ -1,15 +1,29 @@
 dependencies:
+  idf: "==6.0.1"
   lvgl/lvgl: "9.4.0"
   espressif/esp_lvgl_adapter: "^0.6.2"
   espressif/esp_lcd_touch_gt911: "^1.2.0~2"
-  espressif/esp_codec_dev: "^1.3.4"
-  espressif/esp_tinyusb: "^2.0.1~1"
-  espressif/usb_host_uvc: "^2.2.0"
+  espressif/esp_codec_dev:
+    version: "^1.3.4"
+    matches:
+      - if: "$CONFIG{EXAMPLE_ENABLE_TEST_AUDIO} == True"
+  espressif/esp_tinyusb:
+    version: "^2.0.1~1"
+    matches:
+      - if: "$CONFIG{EXAMPLE_ENABLE_TEST_USB} == True"
+  espressif/usb_host_uvc:
+    version: "^2.2.0"
+    matches:
+      - if: "$CONFIG{EXAMPLE_ENABLE_TEST_UVC} == True"
   espressif/esp_wifi_remote:
     version: ">=0.10,<2.0"
+    matches:
+      - if: "$CONFIG{EXAMPLE_ENABLE_TEST_WIRELESS} == True"
     rules:
       - if: "target in [esp32p4]"
   espressif/esp_hosted:
     version: "~2"
+    matches:
+      - if: "$CONFIG{EXAMPLE_ENABLE_TEST_WIRELESS} == True"
     rules:
       - if: "target in [esp32p4]"

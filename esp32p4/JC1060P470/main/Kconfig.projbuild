@@ -113,7 +113,7 @@ menu "Example Configuration"
         default y
         help
             Enable this option to probe the board-mounted RX8025T-UC RTC on
-            the shared touch I2C bus (I2C_NUM_1, GPIO7/8), read its time and
+            the board-owned shared I2C bus (I2C_NUM_1, GPIO7/8), read its time and
             status registers, sync invalid time from firmware build time, and
             start a periodic task to print decoded time every 5 seconds.
 
@@ -124,7 +124,7 @@ menu "Example Configuration"
             Enable this option to initialize the I2S peripheral and ES8311 codec,
             start the audio backend task, and expose three UI-triggered actions:
             play embedded canon.pcm, record audio into memory, and replay the
-            recorded audio. The codec shares the touch I2C bus. GPIO20 is used
+            recorded audio. The codec borrows the board-owned shared I2C bus. GPIO20 is used
             for the power amplifier enable.
 
     config EXAMPLE_ENABLE_TEST_BATTERY
@@ -179,7 +179,7 @@ menu "Example Configuration"
 
     choice EXAMPLE_USB_ROLE
         prompt "Enable USB controller[0] test capability"
-        default EXAMPLE_ENABLE_TEST_USB
+        default EXAMPLE_ENABLE_TEST_UVC
         help
             Select the enabled test capability for the HIGH USB port (DWC OTG
             controller[0], internal UTMI HS PHY). One controller cannot be

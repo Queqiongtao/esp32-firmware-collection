@@ -202,18 +202,9 @@ static esp_err_t display_lvgl_init_adapter(const display_panel_t *panel, display
 #endif
 
     ESP_RETURN_ON_ERROR(display_touch_init(), TAG, "init touch failed");
-    esp_lcd_touch_handle_t touch_handle = NULL;
-    ESP_RETURN_ON_ERROR(display_touch_get_handle(&touch_handle), TAG, "get touch handle failed");
-    esp_lv_adapter_touch_config_t touch_cfg = ESP_LV_ADAPTER_TOUCH_DEFAULT_CONFIG(display, touch_handle);
-    touch_cfg.scale.x = (float)DISPLAY_PANEL_H_RES / DISPLAY_TOUCH_NATIVE_H_RES;
-    touch_cfg.scale.y = (float)DISPLAY_PANEL_V_RES / DISPLAY_TOUCH_NATIVE_V_RES;
-#if LV_USE_GESTURE_RECOGNITION
-    touch_cfg.multi_touch.mode = ESP_LV_ADAPTER_TOUCH_MODE_MULTI_CONTROL;
-    touch_cfg.multi_touch.pointers = 2;
-#endif
-    touch_cfg.callbacks.custom_touch_read = display_touch_read_cached;
-    lv_indev_t *indev = esp_lv_adapter_register_touch(&touch_cfg);
-    ESP_RETURN_ON_FALSE(indev != NULL, ESP_ERR_NO_MEM, TAG, "register adapter touch failed");
+    lv_indev_t *indev = NULL;
+    ESP_RETURN_ON_ERROR(display_touch_register_lvgl_indev(display, &indev), TAG,
+                        "register touch indev failed");
 
     ESP_RETURN_ON_ERROR(esp_lv_adapter_start(), TAG, "start esp_lvgl_adapter failed");
 

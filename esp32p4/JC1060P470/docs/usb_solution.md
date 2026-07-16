@@ -36,15 +36,16 @@ TinyUSB Device 和 USB Host 都通过 IDF USB PHY 层申请同一个 UTMI PHY：
 
 ## Kconfig 与启动行为
 
-`main/Kconfig.projbuild` 使用 `choice EXAMPLE_USB_ROLE`，默认选择 `EXAMPLE_ENABLE_TEST_USB`：
+`main/Kconfig.projbuild` 使用 `choice EXAMPLE_USB_ROLE`，默认选择 `EXAMPLE_ENABLE_TEST_UVC`：
 
 - Kconfig 保证 `EXAMPLE_ENABLE_TEST_USB` 与 `EXAMPLE_ENABLE_TEST_UVC` 不会同时为 `y`。
+- `main/CMakeLists.txt` 只把所选 capability 的源文件加入本次构建，`main/idf_component.yml` 也只解析对应的 managed USB 依赖；因此一个固件只包含 CDC Device 或 UVC Host 其中一种 HIGH USB capability。
 - 任一选项为 `y` 时，`app_system_init_task()` 创建 `test_usb_role` worker。
 - `test_usb_role_init()` 正常启动角色固定为 `TEST_USB_ROLE_NONE`，不会在启动阶段占用 HIGH USB。
-- 当前组件仍同时编译 `test_usb.c` 和 `test_uvc.c`，UI 可以在运行时串行请求 CDC、UVC 或 None。所选 Kconfig 项不是启动角色，也不会裁掉另一套模块代码。
+- role worker 运行时只允许在当前固件已编译的 capability 与 `TEST_USB_ROLE_NONE` 之间切换；未编译的另一角色请求返回 `ESP_ERR_NOT_SUPPORTED`，不会尝试动态安装不存在的 stack。
 - 若 RTC no-init 标记表明热复位前 UVC 正在出流，role worker 会在初始化后例外地自动排队恢复 UVC。
 
-因此，当前 `choice` 的主要作用是建立互斥配置和启用角色框架；实际硬件独占由 role worker 的生命周期顺序保证。
+因此，当前 `choice` 同时决定编译能力和依赖裁剪；实际硬件独占由 role worker 的生命周期顺序保证。CDC 与 UVC 的验收必须使用两个独立构建分别进行，不能在同一个固件中做 CDC ↔ UVC 运行时切换。
 
 ## CDC Device
 
@@ -69,7 +70,14 @@ FULL USB 的 USJ 串口始终承担烧录和 IDF 日志；CDC 测试枚举出的
 4. 申请 ESP32-P4 JPEG decoder、帧队列、解码缓冲和固定预览缓冲。
 5. 优先申请 PPA SRM 缩放资源；失败时保留 CPU 缩放回退。
 
-`test_uvc_run()` 是有界阻塞调用，等待设备、枚举能力并打开流。frame callback 只把帧投递给 worker；worker 完成 JPEG 解码、预览缩放和统计。`test_uvc_deinit()` 停止/关闭 stream，卸载 UVC client，等待 USB Host 收到 clients/devices 已释放事件，再卸载 Host 并释放 JPEG、PPA、queue、task 和 buffer。
+`test_uvc_run()` 是有界阻塞调用，等待设备、枚举能力并打开流。frame callback 只把带有 `stream_hdl` 和 stream `generation` 的消息投递给 worker；worker 完成 JPEG 解码、预览缩放和统计。stream callback 只记录断连事件，不在 USB callback 中直接关闭句柄；worker 在 stream mutex 下验证 generation、停止/关闭对应 stream，并归还该代次的全部帧。旧代次事件不能修改新 stream 的状态。`test_uvc_deinit()` 先停止接收、排空并归还所有应用持有帧，确认句柄和 held-frame 计数归零后，才卸载 UVC client/Host 并释放 JPEG、PPA、queue、task 和 buffer；归还或关闭失败时保留资源并报告错误，不能继续卸载 controller。
+
+### 帧句柄与断连所有权
+
+- 新 stream 生命周期发布时才递增 generation；frame callback 只把当前 generation 和 `stream_hdl` 带入消息、增加 held-frame 计数并将 frame handle 的所有权交给应用队列。队列满时立即归还该帧并回退 held-frame 计数，不把裸指针当成无主资源。
+- worker 消费消息前同时匹配 `stream_hdl` 与 generation。过期消息只做归还，不参与解码、统计或状态迁移。
+- 断连 callback 只投递“断连 + handle + generation”事件；worker 先停止接收，再排空队列、归还所有帧，最后关闭匹配句柄。关闭新代次 stream 的请求不能被旧断连事件抢先执行。
+- `test_uvc_deinit()` 和分辨率切换都复用同一生命周期锁，只有在 `held_frames == 0` 且活动句柄已关闭后才释放 Host、JPEG/PPA 等下游资源。
 
 ### 能力枚举与分辨率切换
 
@@ -98,9 +106,11 @@ USB/JPEG/PPA 驱动负责其 DMA 边界，应用层仍显式维护自己写入�
 `test_usb_role` 提供以下 capability：
 
 - `test_usb_role_init()`：创建 queue 和固定在 core 1 的 role worker，正常启动保持 None。
-- `test_usb_role_switch(target)`：异步切换到 None、CDC Device 或 UVC Host。
+- `test_usb_role_switch(target)`：异步切换到 None 或当前构建已包含的 CDC Device/UVC Host capability；请求未编译的角色返回 `ESP_ERR_NOT_SUPPORTED`。
 - `test_usb_role_restart_uvc(h_res, v_res)`：异步请求 UVC 分辨率切换。
-- `test_usb_role_current()` / `test_usb_role_get_status()`：返回当前/目标角色、切换状态，以及 CDC/UVC 摘要。
+- `test_usb_role_current()` / `test_usb_role_get_status()`：返回当前/目标角色、切换状态，以及 CDC/UVC 摘要。`get_status()` 在模块尚未初始化或初始化失败时也返回可诊断快照；只有空指针参数返回 `ESP_ERR_INVALID_ARG`。
+
+所有公开状态快照都带 `test_module_meta_t`：`generation` 只在成功建立新模块生命周期后递增，`updated_at_us` 在每次公开状态变化时更新；错误应通过 `module.last_error` 和 capability 的最后错误字段读取，不用 UI 自行推断。
 
 普通角色切换严格执行：
 
@@ -115,7 +125,8 @@ UVC 初始化成功但暂时没有摄像头时，Host 角色可以保持就绪�
 
 role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视频帧会置位恢复请求，恢复不会从 UVC callback 或 frame worker 内直接卸载自身。
 
-自动恢复按以下等级升级，每级最多尝试 3 次，并使用 500/1000/2000 ms 退避：
+自动恢复按以下等级升级，每级最多尝试 3 次。同一级前两次失败后分别等待
+500/1000 ms；第 3 次失败升级到下一级，并在 500 ms 后开始该级尝试：
 
 1. `STREAM`：停止并重新打开 UVC stream。
 2. `ROOT_PORT`：逻辑关闭/开启 DWC root port 后重新枚举和出流。
@@ -138,9 +149,9 @@ JC1060P470 原理图没有给 HIGH USB VBUS load switch 提供 ESP32-P4 GPIO ena
 | UVC 收流 + JPEG 单路径 | 已上板验证 | MJPEG 收流和硬件解码日志有既有记录 |
 | 设备能力枚举与偏好降级 | 已实现，待本轮上板确认 | 需用不同摄像头核对 descriptor 和降级结果 |
 | UVC RGB565 预览、PPA/CPU 回退 | 已实现，编译验证通过 | 需测画面、帧率、耗时和长时间内存稳定性 |
-| CDC/None/UVC 重复切换 | 已实现，编译验证通过 | 需循环验证 DWC、PHY、task 和 buffer 是否完整释放 |
+| 当前 capability/None 重复切换 | 已实现，编译验证通过 | CDC 和 UVC 分别在各自构建中循环验证 DWC、PHY、task 和 buffer 是否完整释放 |
 | 分辨率运行时切换 | 已实现，编译验证通过 | 需覆盖成功、设备不支持和切换中拔出设备 |
 | stall 与三级恢复 | 已实现，编译验证通过 | 需注入停帧、拔插和恢复耗尽场景 |
 | UVC 热复位自动恢复 | 已实现，编译验证通过 | 需验证 RTC no-init 标记和无真实 VBUS 断电边界 |
 
-上板验收至少应覆盖：CDC → None → UVC → None 循环、UVC 页面反复进出、所有摄像头分辨率逐项切换、流中拔插、流中热复位、停帧恢复、恢复耗尽提示，以及运行期间 FULL USB 日志不受影响。
+上板验收至少应分两套固件进行：CDC 构建覆盖 CDC → None 循环、枚举、回显和重复启停；默认 UVC 构建覆盖 UVC → None 循环、页面反复进出、所有摄像头分辨率逐项切换、流中拔插、流中热复位、停帧恢复和恢复耗尽提示。两套构建都应确认运行期间 `FULL USB` 日志不受影响。本轮文档对应的新增生命周期路径仅完成静态检查和编译验证，尚未完成上述上板回归。

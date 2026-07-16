@@ -10,9 +10,12 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 typedef struct {
+    test_module_meta_t module;
     bool initialized;
+    bool controller_released;
     bool attached;
     bool dtr;
     bool rts;
@@ -22,6 +25,7 @@ typedef struct {
     uint32_t tx_bytes;
     size_t last_rx_size;
     size_t last_tx_size;
+    uint32_t rx_events_dropped;
     esp_err_t last_error;
 } test_usb_status_t;
 

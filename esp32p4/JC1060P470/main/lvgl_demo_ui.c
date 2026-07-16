@@ -73,6 +73,7 @@ static lv_obj_t *s_usb_line_label;
 static lv_obj_t *s_usb_stats_label;
 static lv_obj_t *s_usb_hint_label;
 static lv_obj_t *s_usb_switch_btn;
+static lv_obj_t *s_usb_switch_btn_label;
 static lv_obj_t *s_uvc_enter_btn;
 
 static lv_obj_t *s_audio_status_label;
@@ -131,7 +132,9 @@ static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
 #define DEMO_UVC_PREVIEW_SIZE (TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U)
 
 static demo_touch_state_t s_touch_state;
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static test_wireless_ap_record_t s_wifi_ap_records[TEST_WIRELESS_SCAN_RESULT_MAX];
+#endif
 static size_t s_wifi_ap_record_count;
 static uint32_t s_wifi_scan_generation;
 static demo_wifi_list_view_t s_wifi_list_view = DEMO_WIFI_LIST_VIEW_UNKNOWN;
@@ -268,6 +271,7 @@ static lv_obj_t *demo_wifi_list_add_text(const char *text)
     return item;
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static lv_obj_t *demo_wifi_list_add_button(const char *text)
 {
     lv_obj_t *item = lv_label_create(s_wifi_list);
@@ -277,6 +281,7 @@ static lv_obj_t *demo_wifi_list_add_button(const char *text)
     lv_obj_set_style_pad_ver(item, 4, 0);
     return item;
 }
+#endif
 
 static void demo_ui_report_updates_if_ready(void)
 {
@@ -306,6 +311,7 @@ static void demo_ui_report_updates_if_ready(void)
     s_ui_update_report_start_ms = now_ms;
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static bool demo_utf8_sequence_valid(const uint8_t *text, size_t len, size_t *advance)
 {
     uint32_t codepoint = 0;
@@ -384,14 +390,15 @@ static const char *demo_wifi_ssid_display_text(const char *ssid, char *buf, size
     }
 
     if (buf_size > 0) {
+        uint8_t bytes[4] = {0};
+        size_t byte_count = strnlen(ssid, sizeof(bytes));
+        memcpy(bytes, ssid, byte_count);
         snprintf(buf, buf_size, "<SSID HEX:%02X%02X%02X%02X>",
-                 (unsigned char)ssid[0],
-                 (unsigned char)ssid[1],
-                 (unsigned char)ssid[2],
-                 (unsigned char)ssid[3]);
+                 bytes[0], bytes[1], bytes[2], bytes[3]);
     }
     return buf;
 }
+#endif
 
 static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_t width, lv_coord_t height)
 {
@@ -414,6 +421,7 @@ static lv_obj_t *demo_create_card(lv_obj_t *parent, const char *title, lv_coord_
     return card;
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
 static const char *audio_state_to_text(test_audio_state_t state)
 {
     switch (state) {
@@ -435,7 +443,29 @@ static const char *audio_state_to_text(test_audio_state_t state)
         return "未知";
     }
 }
+#endif
 
+static const char *module_state_to_text(test_module_state_t state)
+{
+    switch (state) {
+    case TEST_MODULE_STATE_UNINITIALIZED:
+        return "未初始化";
+    case TEST_MODULE_STATE_INITIALIZING:
+        return "初始化中";
+    case TEST_MODULE_STATE_READY:
+        return "已就绪";
+    case TEST_MODULE_STATE_RUNNING:
+        return "运行中";
+    case TEST_MODULE_STATE_STOPPING:
+        return "停止中";
+    case TEST_MODULE_STATE_ERROR:
+        return "错误";
+    default:
+        return "未知";
+    }
+}
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
 static const char *audio_input_level_text(uint16_t peak, size_t nonzero_samples)
 {
     if (peak == 0 || nonzero_samples == 0) {
@@ -446,6 +476,7 @@ static const char *audio_input_level_text(uint16_t peak, size_t nonzero_samples)
     }
     return "活跃";
 }
+#endif
 
 static void demo_touch_area_event_cb(lv_event_t *e)
 {
@@ -475,43 +506,63 @@ static void demo_touch_area_event_cb(lv_event_t *e)
 static void usb_switch_btn_cb(lv_event_t *e)
 {
     (void)e;
-    test_usb_role_t current = test_usb_role_current();
-    if (current == TEST_USB_ROLE_CDC_DEVICE) {
-        test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);
-    } else if (current == TEST_USB_ROLE_UVC_HOST) {
-        test_usb_role_switch(TEST_USB_ROLE_CDC_DEVICE);
-    } else {
-        test_usb_role_switch(TEST_USB_ROLE_CDC_DEVICE);
+
+    test_usb_role_status_t status = {0};
+    if (test_usb_role_get_status(&status) != ESP_OK) {
+        return;
+    }
+
+    test_usb_role_t target = TEST_USB_ROLE_NONE;
+    if (status.current_role == TEST_USB_ROLE_NONE) {
+        if (status.uvc_available) {
+            target = TEST_USB_ROLE_UVC_HOST;
+        } else if (status.cdc_available) {
+            target = TEST_USB_ROLE_CDC_DEVICE;
+        } else {
+            return;
+        }
+    }
+
+    esp_err_t ret = test_usb_role_switch(target);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "USB role request failed: %s", esp_err_to_name(ret));
     }
 }
 
 static void audio_music_btn_cb(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
     esp_err_t ret = test_audio_start_music();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "start music failed: %s", esp_err_to_name(ret));
     }
+#endif
 }
 
 static void audio_record_btn_cb(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
     esp_err_t ret = test_audio_start_record();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "start record failed: %s", esp_err_to_name(ret));
     }
+#endif
 }
 
 static void audio_play_btn_cb(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
     esp_err_t ret = test_audio_start_playback();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "start playback failed: %s", esp_err_to_name(ret));
     }
+#endif
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static const char *wireless_transport_state_to_text(test_wireless_transport_state_t state)
 {
     switch (state) {
@@ -578,18 +629,23 @@ static const char *wireless_wifi_security_text(bool secured)
 {
     return secured ? "Lock" : "Open";
 }
+#endif
 
 static void wifi_dialog_close(void);
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static void wifi_dialog_open(const char *ssid);
 static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status);
+#endif
 
 static void wireless_wifi_scan_btn_cb(lv_event_t *e)
 {
     (void)e;
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS && CONFIG_EXAMPLE_WIRELESS_ENABLE_WIFI
     esp_err_t ret = test_wireless_request_wifi_scan();
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "wifi scan request failed: %s", esp_err_to_name(ret));
     }
+#endif
 }
 
 static void wireless_ble_adv_btn_cb(lv_event_t *e)
@@ -691,6 +747,7 @@ static void wifi_keyboard_preprocess_cb(lv_event_t *e)
     }
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static void wifi_ap_item_event_cb(lv_event_t *e)
 {
     const char *ssid = lv_event_get_user_data(e);
@@ -698,6 +755,7 @@ static void wifi_ap_item_event_cb(lv_event_t *e)
         wifi_dialog_open(ssid);
     }
 }
+#endif
 
 static void demo_update_touch_card(void)
 {
@@ -723,27 +781,56 @@ static void demo_update_rtc_card(void)
         return;
     }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_RTC
     test_rtc_status_t status = {0};
     esp_err_t ret = test_rtc_get_status(&status);
-    if (ret != ESP_OK || !status.initialized) {
-        demo_label_set_text_if_changed(s_rtc_status_label, "状态: 未初始化");
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 查询失败(0x%x)",
+                                           (unsigned int)ret);
+        demo_label_set_text_if_changed(s_rtc_time_label, "时间: --");
+        demo_label_set_text_if_changed(s_rtc_sync_label, "同步: --");
+        return;
+    }
+    if (!status.initialized) {
+        if (status.module.state == TEST_MODULE_STATE_ERROR) {
+            demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 错误(0x%x)",
+                                               (unsigned int)status.module.last_error);
+        } else {
+            demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: %s",
+                                               module_state_to_text(status.module.state));
+        }
         demo_label_set_text_if_changed(s_rtc_time_label, "时间: --");
         demo_label_set_text_if_changed(s_rtc_sync_label, "同步: --");
         return;
     }
 
-    if (status.time_valid) {
+    if (status.module.state == TEST_MODULE_STATE_ERROR) {
+        demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 错误(0x%x)",
+                                           (unsigned int)status.module.last_error);
+    } else if (status.time_valid) {
         demo_label_set_text_if_changed(s_rtc_status_label, "状态: 运行中");
+    } else if (status.module.state == TEST_MODULE_STATE_READY) {
+        demo_label_set_text_if_changed(s_rtc_status_label, "状态: 已就绪");
+    } else {
+        demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 错误(0x%x)",
+                                           (unsigned int)status.last_error);
+    }
+
+    if (status.time_valid) {
         demo_label_set_text_fmt_if_changed(s_rtc_time_label, "时间: %04u-%02u-%02u %02u:%02u:%02u",
                                            status.year, status.month, status.mday,
                                            status.hour, status.min, status.sec);
     } else {
-        demo_label_set_text_fmt_if_changed(s_rtc_status_label, "状态: 错误(0x%x)", (unsigned int)status.last_error);
         demo_label_set_text_if_changed(s_rtc_time_label, "时间: 无有效值");
     }
 
     demo_label_set_text_fmt_if_changed(s_rtc_sync_label, "同步: %s",
                                        status.synced_from_build_time ? "曾从固件构建时间写入" : "保持 RTC 原值");
+#else
+    demo_label_set_text_if_changed(s_rtc_status_label, "状态: 未启用");
+    demo_label_set_text_if_changed(s_rtc_time_label, "时间: --");
+    demo_label_set_text_if_changed(s_rtc_sync_label, "同步: --");
+#endif
 }
 
 static void demo_update_usb_card(void)
@@ -755,16 +842,31 @@ static void demo_update_usb_card(void)
     test_usb_role_status_t status = {0};
     esp_err_t ret = test_usb_role_get_status(&status);
     if (ret != ESP_OK) {
-        demo_label_set_text_if_changed(s_usb_status_label, "状态: 未初始化");
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 查询失败(0x%x)",
+                                           (unsigned int)ret);
         demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
         demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
         demo_label_set_text_if_changed(s_usb_hint_label, "--");
+        demo_obj_set_disabled(s_usb_switch_btn, true);
+        demo_obj_set_disabled(s_uvc_enter_btn, true);
         return;
     }
 
     /* Status line: current role + switch progress */
     if (status.switch_in_progress) {
         demo_label_set_text_if_changed(s_usb_status_label, "状态: 切换中...");
+    } else if (status.faulted) {
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: USB故障%d(0x%x)",
+                                           (int)status.fault,
+                                           (unsigned int)status.last_switch_error);
+    } else if (status.module.state == TEST_MODULE_STATE_ERROR) {
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 错误(0x%x)",
+                                           (unsigned int)status.module.last_error);
+    } else if (status.module.state == TEST_MODULE_STATE_UNINITIALIZED ||
+               status.module.state == TEST_MODULE_STATE_INITIALIZING ||
+               status.module.state == TEST_MODULE_STATE_STOPPING) {
+        demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: %s",
+                                           module_state_to_text(status.module.state));
     } else if (status.last_switch_error != ESP_OK && status.current_role == TEST_USB_ROLE_NONE) {
         demo_label_set_text_fmt_if_changed(s_usb_status_label, "状态: 切换失败(0x%x)", (unsigned int)status.last_switch_error);
     } else {
@@ -779,6 +881,7 @@ static void demo_update_usb_card(void)
 
     /* Second line: role-specific details */
     if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
+#if CONFIG_EXAMPLE_ENABLE_TEST_USB
         test_usb_status_t cdc = {0};
         if (test_usb_get_status(&cdc) == ESP_OK && cdc.initialized) {
             demo_label_set_text_fmt_if_changed(s_usb_line_label, "DTR=%d RTS=%d 收=%uB 发=%uB",
@@ -790,6 +893,10 @@ static void demo_update_usb_card(void)
             demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
             demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
         }
+#else
+        demo_label_set_text_if_changed(s_usb_line_label, "线路: --");
+        demo_label_set_text_if_changed(s_usb_stats_label, "收发: --");
+#endif
         demo_label_set_text_if_changed(s_usb_hint_label, "连接 HIGH USB 口，用串口工具发送数据验证 CDC 回显");
     } else if (status.current_role == TEST_USB_ROLE_UVC_HOST) {
         if (status.uvc_format_negotiated) {
@@ -809,21 +916,38 @@ static void demo_update_usb_card(void)
         demo_label_set_text_if_changed(s_usb_hint_label, "点击下方按钮切换 USB 角色");
     }
 
-    /* Update switch button label based on current role */
-    if (s_usb_switch_btn != NULL) {
-        lv_obj_t *btn_label = lv_obj_get_child(s_usb_switch_btn, 0);
-        if (btn_label != NULL) {
-            const char *btn_text = "切换到 CDC";
-            if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
-                btn_text = "切换到 UVC";
-            }
-            demo_label_set_text_if_changed(btn_label, btn_text);
+    if (s_usb_switch_btn != NULL && s_usb_switch_btn_label != NULL) {
+        bool role_available = status.cdc_available || status.uvc_available;
+        bool framework_ready = status.module.state == TEST_MODULE_STATE_READY ||
+                               status.module.state == TEST_MODULE_STATE_RUNNING ||
+                               (status.module.state == TEST_MODULE_STATE_ERROR &&
+                                status.module.generation > 0);
+        bool ownership_known = status.current_role != TEST_USB_ROLE_NONE ||
+                               status.controller_released;
+        const char *btn_text = "无可用角色";
+        if (status.current_role == TEST_USB_ROLE_CDC_DEVICE) {
+            btn_text = "停止 CDC";
+        } else if (status.current_role == TEST_USB_ROLE_UVC_HOST) {
+            btn_text = "停止 UVC";
+        } else if (status.uvc_available) {
+            btn_text = "启动 UVC";
+        } else if (status.cdc_available) {
+            btn_text = "启动 CDC";
         }
-        lv_obj_clear_state(s_usb_switch_btn, LV_STATE_DISABLED);
-        if (status.switch_in_progress) {
-            lv_obj_add_state(s_usb_switch_btn, LV_STATE_DISABLED);
-        }
+        demo_label_set_text_if_changed(s_usb_switch_btn_label, btn_text);
+        demo_obj_set_disabled(s_usb_switch_btn,
+                              status.switch_in_progress || !role_available ||
+                              !framework_ready || !ownership_known);
     }
+    bool uvc_ownership_known = status.current_role == TEST_USB_ROLE_UVC_HOST ||
+                               status.controller_released;
+    demo_obj_set_disabled(s_uvc_enter_btn,
+                          status.switch_in_progress || !status.uvc_available ||
+                          (status.module.state != TEST_MODULE_STATE_READY &&
+                           status.module.state != TEST_MODULE_STATE_RUNNING &&
+                           !(status.module.state == TEST_MODULE_STATE_ERROR &&
+                             status.module.generation > 0)) ||
+                          !uvc_ownership_known);
 }
 
 static void demo_update_audio_card(void)
@@ -832,13 +956,34 @@ static void demo_update_audio_card(void)
         return;
     }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
     test_audio_status_t status = {0};
     esp_err_t ret = test_audio_get_status(&status);
-    if (ret != ESP_OK || !status.initialized) {
-        demo_label_set_text_if_changed(s_audio_status_label, "状态: 未初始化");
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_audio_status_label, "状态: 查询失败(0x%x)",
+                                           (unsigned int)ret);
         demo_label_set_text_if_changed(s_audio_size_label, "录音数据: --");
         demo_label_set_text_if_changed(s_audio_peak_label, "峰值: --");
         demo_label_set_text_if_changed(s_audio_input_label, "输入电平: --");
+        demo_obj_set_disabled(s_audio_music_btn, true);
+        demo_obj_set_disabled(s_audio_record_btn, true);
+        demo_obj_set_disabled(s_audio_play_btn, true);
+        return;
+    }
+    if (!status.initialized) {
+        if (status.module.state == TEST_MODULE_STATE_ERROR) {
+            demo_label_set_text_fmt_if_changed(s_audio_status_label, "状态: 错误(0x%x)",
+                                               (unsigned int)status.module.last_error);
+        } else {
+            demo_label_set_text_fmt_if_changed(s_audio_status_label, "状态: %s",
+                                               module_state_to_text(status.module.state));
+        }
+        demo_label_set_text_if_changed(s_audio_size_label, "录音数据: --");
+        demo_label_set_text_if_changed(s_audio_peak_label, "峰值: --");
+        demo_label_set_text_if_changed(s_audio_input_label, "输入电平: --");
+        demo_obj_set_disabled(s_audio_music_btn, true);
+        demo_obj_set_disabled(s_audio_record_btn, true);
+        demo_obj_set_disabled(s_audio_play_btn, true);
         return;
     }
 
@@ -853,10 +998,13 @@ static void demo_update_audio_card(void)
     demo_label_set_text_fmt_if_changed(s_audio_input_label, "输入电平: %s", audio_input_level_text(status.last_record_peak,
                                                                                                  status.last_record_nonzero_count));
 
-    bool can_start_new = (status.state == TEST_AUDIO_STATE_IDLE ||
+    bool can_start_new = status.running &&
+                         (status.state == TEST_AUDIO_STATE_IDLE ||
                           status.state == TEST_AUDIO_STATE_RECORDED ||
                           status.state == TEST_AUDIO_STATE_ERROR);
-    bool can_play_record = (status.state == TEST_AUDIO_STATE_RECORDED && status.last_record_size > 0);
+    bool can_play_record = status.running &&
+                           status.state == TEST_AUDIO_STATE_RECORDED &&
+                           status.last_record_size > 0;
 
     if (can_start_new) {
         demo_obj_set_disabled(s_audio_music_btn, false);
@@ -871,6 +1019,15 @@ static void demo_update_audio_card(void)
     } else {
         demo_obj_set_disabled(s_audio_play_btn, true);
     }
+#else
+    demo_label_set_text_if_changed(s_audio_status_label, "状态: 未启用");
+    demo_label_set_text_if_changed(s_audio_size_label, "录音数据: --");
+    demo_label_set_text_if_changed(s_audio_peak_label, "峰值: --");
+    demo_label_set_text_if_changed(s_audio_input_label, "输入电平: --");
+    demo_obj_set_disabled(s_audio_music_btn, true);
+    demo_obj_set_disabled(s_audio_record_btn, true);
+    demo_obj_set_disabled(s_audio_play_btn, true);
+#endif
 }
 
 static void demo_update_battery_card(void)
@@ -880,9 +1037,25 @@ static void demo_update_battery_card(void)
     }
 
 #if CONFIG_EXAMPLE_ENABLE_TEST_BATTERY
-    const test_battery_status_t *status = test_battery_get_status();
-    if (status == NULL || !status->initialized) {
-        demo_label_set_text_if_changed(s_battery_status_label, "状态: 初始化中");
+    test_battery_status_t status = {0};
+    esp_err_t ret = test_battery_get_status(&status);
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: 查询失败(0x%x)",
+                                           (unsigned int)ret);
+        demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
+        demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
+        demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
+        demo_label_set_text_if_changed(s_battery_hint_label, "GPIO52 BAT 点");
+        return;
+    }
+    if (!status.initialized) {
+        if (status.module.state == TEST_MODULE_STATE_ERROR) {
+            demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: 错误(0x%x)",
+                                               (unsigned int)status.module.last_error);
+        } else {
+            demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s",
+                                               module_state_to_text(status.module.state));
+        }
         demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
         demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
         demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
@@ -890,25 +1063,33 @@ static void demo_update_battery_card(void)
         return;
     }
 
-    esp_err_t ret = test_battery_run();
-
-    if (!status->sample_valid) {
-        demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s(0x%x)",
-                                           ret == ESP_OK ? "采样中" : "错误",
-                                           (unsigned int)status->last_error);
+    if (!status.sample_valid) {
+        if (status.module.state == TEST_MODULE_STATE_READY) {
+            demo_label_set_text_if_changed(s_battery_status_label, "状态: 已就绪");
+        } else {
+            demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s(0x%x)",
+                                               status.module.state == TEST_MODULE_STATE_RUNNING ? "采样中" : "错误",
+                                               (unsigned int)status.last_error);
+        }
         demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
         demo_label_set_text_if_changed(s_battery_voltage_label, "BAT值: --");
         demo_label_set_text_if_changed(s_battery_percent_label, "BAT%: --");
     } else {
-        demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s", status->calibration_enabled ? "运行中(CAL)" : "运行中(RAW)");
+        if (status.module.state == TEST_MODULE_STATE_ERROR) {
+            demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: 错误(0x%x)",
+                                               (unsigned int)status.module.last_error);
+        } else {
+            demo_label_set_text_fmt_if_changed(s_battery_status_label, "状态: %s",
+                                               status.calibration_enabled ? "运行中(CAL)" : "运行中(RAW)");
+        }
         demo_label_set_text_fmt_if_changed(s_battery_adc_label, "ADC值: %d.%03d V",
-                                           status->adc_voltage_mv / 1000, status->adc_voltage_mv % 1000);
+                                           status.adc_voltage_mv / 1000, status.adc_voltage_mv % 1000);
         demo_label_set_text_fmt_if_changed(s_battery_voltage_label, "BAT值: %d.%03d V",
-                                           status->battery_voltage_mv / 1000, status->battery_voltage_mv % 1000);
-        demo_label_set_text_fmt_if_changed(s_battery_percent_label, "BAT%%: %d%%", status->battery_percent);
+                                           status.battery_voltage_mv / 1000, status.battery_voltage_mv % 1000);
+        demo_label_set_text_fmt_if_changed(s_battery_percent_label, "BAT%%: %d%%", status.battery_percent);
     }
 
-    demo_label_set_text_fmt_if_changed(s_battery_hint_label, "次数: %" PRIu32, status->sample_count);
+    demo_label_set_text_fmt_if_changed(s_battery_hint_label, "次数: %" PRIu32, status.sample_count);
 #else
     demo_label_set_text_if_changed(s_battery_status_label, "状态: 未开");
     demo_label_set_text_if_changed(s_battery_adc_label, "ADC值: --");
@@ -932,8 +1113,10 @@ static void demo_wifi_list_set_message(demo_wifi_list_view_t view, const char *m
     s_ui_list_rebuild_count++;
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
 {
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
     if (s_wifi_list == NULL || status == NULL) {
         return;
     }
@@ -993,7 +1176,11 @@ static void demo_refresh_wifi_ap_list(const test_wireless_status_t *status)
             lv_obj_add_state(item, LV_STATE_DISABLED);
         }
     }
+#else
+    (void)status;
+#endif
 }
+#endif
 
 static void wifi_dialog_close(void)
 {
@@ -1010,6 +1197,7 @@ static void wifi_dialog_close(void)
     s_selected_wifi_ssid[0] = '\0';
 }
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static void wifi_dialog_open(const char *ssid)
 {
     if (s_wifi_dialog_mask == NULL || s_wifi_dialog_ssid_label == NULL ||
@@ -1030,6 +1218,7 @@ static void wifi_dialog_open(const char *ssid)
     lv_obj_move_foreground(s_wifi_keyboard);
     lv_obj_add_state(s_wifi_password_ta, LV_STATE_FOCUSED);
 }
+#endif
 
 static void demo_set_ble_adv_button(bool enabled, bool advertising)
 {
@@ -1070,9 +1259,14 @@ static void demo_update_wireless_card(void)
 
     if (!status.initialized) {
         if (status.init_attempted) {
-            demo_label_set_text_fmt_if_changed(s_wifi_status_label, "状态: %s(0x%x)",
-                                               wireless_transport_state_to_text(status.transport_state),
-                                               (unsigned int)status.last_error);
+            if (status.module.state == TEST_MODULE_STATE_ERROR) {
+                demo_label_set_text_fmt_if_changed(s_wifi_status_label, "状态: 错误(0x%x)",
+                                                   (unsigned int)status.module.last_error);
+            } else {
+                demo_label_set_text_fmt_if_changed(s_wifi_status_label, "状态: %s(0x%x)",
+                                                   wireless_transport_state_to_text(status.transport_state),
+                                                   (unsigned int)status.last_error);
+            }
             demo_label_set_text_fmt_if_changed(s_wifi_link_label, "Link: %s FW:%s RPC:%s",
                                                status.cp_target_name[0] != '\0' ? status.cp_target_name : "--",
                                                status.cp_fw_version[0] != '\0' ? status.cp_fw_version : "--",
@@ -1082,7 +1276,12 @@ static void demo_update_wireless_card(void)
             demo_label_set_text_fmt_if_changed(s_wifi_hint_label, "Hint: %s err=0x%x",
                                                status.last_hint,
                                                (unsigned int)status.last_error);
-            demo_label_set_text_if_changed(s_ble_status_label, "状态: 待就绪");
+            if (status.module.state == TEST_MODULE_STATE_ERROR) {
+                demo_label_set_text_fmt_if_changed(s_ble_status_label, "状态: 错误(0x%x)",
+                                                   (unsigned int)status.module.last_error);
+            } else {
+                demo_label_set_text_if_changed(s_ble_status_label, "状态: 待就绪");
+            }
             demo_label_set_text_if_changed(s_ble_name_label, "Name: --");
             demo_label_set_text_if_changed(s_ble_link_label, "Link: hosted not ready");
             demo_label_set_text_if_changed(s_ble_value_label, "GATT值: --");
@@ -1138,11 +1337,10 @@ static void demo_update_wireless_card(void)
                               status.transport_confirmed &&
                               status.transport_state == TEST_WIRELESS_TRANSPORT_READY;
 
-    if (wifi_actions_ready) {
-        demo_obj_set_disabled(s_wifi_scan_btn, false);
-    } else {
-        demo_obj_set_disabled(s_wifi_scan_btn, true);
-    }
+    demo_obj_set_disabled(s_wifi_scan_btn,
+                          !wifi_actions_ready ||
+                          status.wifi_state == TEST_WIRELESS_WIFI_SCANNING ||
+                          status.wifi_state == TEST_WIRELESS_WIFI_CONNECTING);
 
     bool ble_actions_ready = status.hosted_stack_available &&
                              status.ble_feature_enabled &&
@@ -1346,6 +1544,11 @@ static void demo_update_font_card(void)
 
 static void demo_uvc_update_resolution_options(void)
 {
+    if (s_uvc_resolution_dropdown == NULL) {
+        return;
+    }
+
+#if CONFIG_EXAMPLE_ENABLE_TEST_UVC
     size_t count = TEST_UVC_FRAME_INFO_MAX;
     test_uvc_resolution_t latest[TEST_UVC_FRAME_INFO_MAX] = {0};
     esp_err_t ret = test_uvc_get_resolutions(latest, &count);
@@ -1363,31 +1566,29 @@ static void demo_uvc_update_resolution_options(void)
             }
         }
     }
-    if (!changed) {
-        return;
-    }
-
-    memcpy(s_uvc_resolutions, latest, sizeof(s_uvc_resolutions));
-    s_uvc_resolution_count = count;
-    if (count == 0) {
-        lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
-        lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
-        return;
-    }
-
-    char options[TEST_UVC_FRAME_INFO_MAX * 32] = {0};
-    size_t used = 0;
-    for (size_t i = 0; i < count; ++i) {
-        int written = snprintf(options + used, sizeof(options) - used, "%s%ux%u @ %.0f FPS",
-                               i == 0 ? "" : "\n", (unsigned)s_uvc_resolutions[i].h_res,
-                               (unsigned)s_uvc_resolutions[i].v_res, s_uvc_resolutions[i].fps);
-        if (written <= 0 || (size_t)written >= sizeof(options) - used) {
-            break;
+    if (changed) {
+        memcpy(s_uvc_resolutions, latest, sizeof(s_uvc_resolutions));
+        s_uvc_resolution_count = count;
+        if (count == 0) {
+            lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
+        } else {
+            char options[TEST_UVC_FRAME_INFO_MAX * 32] = {0};
+            size_t used = 0;
+            for (size_t i = 0; i < count; ++i) {
+                int written = snprintf(options + used, sizeof(options) - used, "%s%ux%u @ %.0f FPS",
+                                       i == 0 ? "" : "\n", (unsigned)s_uvc_resolutions[i].h_res,
+                                       (unsigned)s_uvc_resolutions[i].v_res, s_uvc_resolutions[i].fps);
+                if (written <= 0 || (size_t)written >= sizeof(options) - used) {
+                    break;
+                }
+                used += (size_t)written;
+            }
+            lv_dropdown_set_options(s_uvc_resolution_dropdown, options);
         }
-        used += (size_t)written;
     }
-    lv_dropdown_set_options(s_uvc_resolution_dropdown, options);
-    lv_obj_clear_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+#else
+    lv_dropdown_set_options(s_uvc_resolution_dropdown, "UVC 未启用");
+#endif
 }
 
 static void demo_uvc_resolution_dropdown_cb(lv_event_t *e)
@@ -1420,6 +1621,7 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
     test_usb_role_status_t role_status = {0};
     if (test_usb_role_get_status(&role_status) != ESP_OK) {
         demo_label_set_text_if_changed(s_uvc_status_label, "UVC 角色未初始化");
+        demo_obj_set_disabled(s_uvc_resolution_dropdown, true);
         return;
     }
 
@@ -1454,7 +1656,13 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
                                        role_status.uvc_recovery_attempts);
 
     demo_uvc_update_resolution_options();
-
+    bool resolution_change_ready = role_status.current_role == TEST_USB_ROLE_UVC_HOST &&
+                                   role_status.uvc_stream_started &&
+                                   !role_status.switch_in_progress &&
+                                   !role_status.faulted &&
+                                   s_uvc_resolution_count > 0;
+    demo_obj_set_disabled(s_uvc_resolution_dropdown, !resolution_change_ready);
+#if CONFIG_EXAMPLE_ENABLE_TEST_UVC
     test_uvc_preview_info_t preview = {
         .frame_id = s_uvc_preview_frame_id,
     };
@@ -1465,16 +1673,23 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         lv_obj_invalidate(s_uvc_preview_image);
     }
+#endif
 }
 
 static void demo_uvc_return_btn_cb(lv_event_t *e)
 {
     (void)e;
+    esp_err_t ret = test_usb_role_switch(TEST_USB_ROLE_NONE);
+    if (ret != ESP_OK) {
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label,
+                                           "停止 UVC 失败: %s，请重试",
+                                           esp_err_to_name(ret));
+        return;
+    }
     if (s_uvc_timer != NULL) {
         lv_timer_delete(s_uvc_timer);
         s_uvc_timer = NULL;
     }
-    test_usb_role_switch(TEST_USB_ROLE_NONE);
     lv_screen_load(s_main_screen);
     lv_obj_delete(s_uvc_screen);
     s_uvc_screen = NULL;
@@ -1492,6 +1707,12 @@ static void demo_uvc_return_btn_cb(lv_event_t *e)
 static void demo_uvc_enter_btn_cb(lv_event_t *e)
 {
     (void)e;
+    test_usb_role_capabilities_t capabilities = {0};
+    if (test_usb_role_get_capabilities(&capabilities) != ESP_OK ||
+        !capabilities.uvc_host_available) {
+        ESP_LOGW(TAG, "UVC capability is not available in this build");
+        return;
+    }
     if (s_uvc_screen != NULL) {
         lv_screen_load(s_uvc_screen);
         return;
@@ -1681,7 +1902,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     demo_config_label(s_rtc_sync_label, DISPLAY_FONT_ROLE_BODY);
     demo_build_progress(progress_cb, "rtc");
 
-    lv_obj_t *usb_card = demo_create_card(row, "3. USB Device", 488, 238);
+    lv_obj_t *usb_card = demo_create_card(row, "3. HIGH USB", 488, 238);
     s_usb_status_label = lv_label_create(usb_card);
     s_usb_line_label = lv_label_create(usb_card);
     s_usb_stats_label = lv_label_create(usb_card);
@@ -1705,20 +1926,21 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
 
     s_usb_switch_btn = lv_button_create(usb_btn_row);
     lv_obj_set_size(s_usb_switch_btn, 160, 48);
+    lv_obj_add_state(s_usb_switch_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_usb_switch_btn, usb_switch_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *usb_switch_label = lv_label_create(s_usb_switch_btn);
-    lv_label_set_text(usb_switch_label, "切换到 UVC");
-    demo_set_text_role(usb_switch_label, DISPLAY_FONT_ROLE_BODY);
-    lv_obj_center(usb_switch_label);
+    s_usb_switch_btn_label = lv_label_create(s_usb_switch_btn);
+    lv_label_set_text(s_usb_switch_btn_label, "启动 USB");
+    demo_set_text_role(s_usb_switch_btn_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(s_usb_switch_btn_label);
 
     s_uvc_enter_btn = lv_button_create(usb_btn_row);
     lv_obj_set_size(s_uvc_enter_btn, 180, 48);
+    lv_obj_add_state(s_uvc_enter_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_uvc_enter_btn, demo_uvc_enter_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *uvc_enter_label = lv_label_create(s_uvc_enter_btn);
     lv_label_set_text(uvc_enter_label, "进入 UVC 测试");
     demo_set_text_role(uvc_enter_label, DISPLAY_FONT_ROLE_BODY);
     lv_obj_center(uvc_enter_label);
-
     demo_build_progress(progress_cb, "usb");
 
     lv_obj_t *audio_card = demo_create_card(row, "4. 音频", 488, 238);
@@ -1744,6 +1966,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
 
     s_audio_music_btn = lv_button_create(audio_btn_row);
     lv_obj_set_size(s_audio_music_btn, 135, 48);
+    lv_obj_add_state(s_audio_music_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_audio_music_btn, audio_music_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *music_label = lv_label_create(s_audio_music_btn);
     lv_label_set_text(music_label, "播放内置音乐");
@@ -1752,6 +1975,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
 
     s_audio_record_btn = lv_button_create(audio_btn_row);
     lv_obj_set_size(s_audio_record_btn, 110, 48);
+    lv_obj_add_state(s_audio_record_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_audio_record_btn, audio_record_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *record_label = lv_label_create(s_audio_record_btn);
     lv_label_set_text(record_label, "开始录音");
@@ -1760,6 +1984,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
 
     s_audio_play_btn = lv_button_create(audio_btn_row);
     lv_obj_set_size(s_audio_play_btn, 110, 48);
+    lv_obj_add_state(s_audio_play_btn, LV_STATE_DISABLED);
     lv_obj_add_event_cb(s_audio_play_btn, audio_play_btn_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *play_label = lv_label_create(s_audio_play_btn);
     lv_label_set_text(play_label, "播放录音");
@@ -1914,6 +2139,7 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     lv_obj_set_width(s_wifi_password_ta, lv_pct(100));
     demo_set_text_role(s_wifi_password_ta, DISPLAY_FONT_ROLE_BODY);
     lv_textarea_set_one_line(s_wifi_password_ta, true);
+    lv_textarea_set_max_length(s_wifi_password_ta, TEST_WIRELESS_PASSWORD_MAX_LEN);
     lv_textarea_set_password_mode(s_wifi_password_ta, true);
     lv_textarea_set_password_bullet(s_wifi_password_ta, "*");
     lv_textarea_set_placeholder_text(s_wifi_password_ta, "Password");

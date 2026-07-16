@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: CC0-1.0
  */
 
+#include "app_peripherals.h"
+#include "board_i2c.h"
 #include "display_board.h"
 #include "display_font.h"
 #include "display_lvgl.h"
@@ -17,14 +19,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
-#include "test_sdcard.h"
-#include "test_rtc.h"
-#include "test_audio.h"
-#include "test_battery.h"
-#include "test_usb.h"
-#include "test_uvc.h"
-#include "test_usb_role.h"
-#include "test_wireless.h"
 
 #include <inttypes.h>
 
@@ -123,67 +117,12 @@ static void app_system_init_task(void *arg)
         ESP_LOGE(TAG, "System NVS init failed: %s", esp_err_to_name(nvs_ret));
     }
 
-#if CONFIG_EXAMPLE_ENABLE_TEST_SDCARD
-    ESP_LOGI(TAG, "Initialize SD card test module");
-    esp_err_t sd_ret = test_sdcard_init();
-    if (sd_ret == ESP_OK) {
-        test_sdcard_run();
-    } else {
-        ESP_LOGE(TAG, "SD card test module init failed: %s", esp_err_to_name(sd_ret));
+    app_peripherals_result_t peripheral_result = {0};
+    esp_err_t peripheral_ret = app_peripherals_start(nvs_ret, &peripheral_result);
+    if (peripheral_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Peripheral startup completed with %" PRIu32 " failure(s): %s",
+                 peripheral_result.failed_count, esp_err_to_name(peripheral_ret));
     }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_RTC
-    ESP_LOGI(TAG, "Initialize RX8025T-UC RTC test module");
-    esp_err_t rtc_ret = test_rtc_init();
-    if (rtc_ret == ESP_OK) {
-        test_rtc_run();
-    } else {
-        ESP_LOGE(TAG, "RTC test module init failed: %s", esp_err_to_name(rtc_ret));
-    }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_AUDIO
-    ESP_LOGI(TAG, "Initialize audio test module");
-    esp_err_t audio_ret = test_audio_init();
-    if (audio_ret == ESP_OK) {
-        test_audio_run();
-    } else {
-        ESP_LOGE(TAG, "Audio test module init failed: %s", esp_err_to_name(audio_ret));
-    }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_BATTERY
-    ESP_LOGI(TAG, "Initialize battery monitor test module");
-    esp_err_t battery_ret = test_battery_init();
-    if (battery_ret == ESP_OK) {
-        test_battery_run();
-    } else {
-        ESP_LOGE(TAG, "Battery test module init failed: %s", esp_err_to_name(battery_ret));
-    }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_USB || CONFIG_EXAMPLE_ENABLE_TEST_UVC
-    ESP_LOGI(TAG, "Initialize USB role management module");
-    esp_err_t usb_role_ret = test_usb_role_init();
-    if (usb_role_ret != ESP_OK) {
-        ESP_LOGE(TAG, "USB role module init failed: %s", esp_err_to_name(usb_role_ret));
-    }
-#endif
-
-#if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
-    if (nvs_ret == ESP_OK) {
-        ESP_LOGI(TAG, "Initialize wireless test module");
-        esp_err_t wireless_ret = test_wireless_init();
-        if (wireless_ret == ESP_OK) {
-            test_wireless_run();
-        } else {
-            ESP_LOGE(TAG, "Wireless test module init failed: %s", esp_err_to_name(wireless_ret));
-        }
-    } else {
-        ESP_LOGW(TAG, "Skip wireless test module because NVS init failed");
-    }
-#endif
 
     ESP_LOGI(TAG, "System init task done");
     vTaskDelete(NULL);
@@ -261,6 +200,7 @@ void app_main(void)
     ESP_ERROR_CHECK(display_board_init());
     ESP_ERROR_CHECK(display_panel_init(&panel));
     ESP_ERROR_CHECK(display_board_set_backlight(100));
+    ESP_ERROR_CHECK(board_i2c_init());
     ESP_ERROR_CHECK(display_lvgl_init(&panel, &lvgl_port));
 
     ESP_LOGI(TAG, "Display LVGL integrated demo UI (static patch font)");

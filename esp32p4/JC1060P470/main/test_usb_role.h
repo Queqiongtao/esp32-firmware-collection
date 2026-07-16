@@ -8,6 +8,7 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
+#include "test_common.h"
 #include "test_uvc.h"
 
 typedef enum {
@@ -16,7 +17,21 @@ typedef enum {
     TEST_USB_ROLE_UVC_HOST,     /**< USB Host UVC camera + hardware JPEG decode (test_uvc) */
 } test_usb_role_t;
 
+typedef enum {
+    TEST_USB_ROLE_FAULT_NONE = 0,
+    TEST_USB_ROLE_FAULT_DEINIT_FAILED,
+    TEST_USB_ROLE_FAULT_INIT_FAILED,
+    TEST_USB_ROLE_FAULT_ROLLBACK_FAILED,
+    TEST_USB_ROLE_FAULT_OWNERSHIP_UNKNOWN,
+} test_usb_role_fault_t;
+
 typedef struct {
+    bool cdc_device_available;
+    bool uvc_host_available;
+} test_usb_role_capabilities_t;
+
+typedef struct {
+    test_module_meta_t module;
     test_usb_role_t current_role;       /**< Currently active role (NONE if idle) */
     test_usb_role_t target_role;        /**< Role being switched to (equals current when idle) */
     bool switch_in_progress;           /**< True while a role switch is in progress */
@@ -38,6 +53,11 @@ typedef struct {
     esp_err_t uvc_last_error;          /**< Last UVC module error */
     uint32_t cdc_rx_packets;           /**< CDC Device: total RX packets */
     uint32_t cdc_tx_packets;           /**< CDC Device: total TX packets */
+    bool cdc_available;                /**< CDC Device capability is compiled in */
+    bool uvc_available;                /**< UVC Host capability is compiled in */
+    bool controller_released;          /**< controller[0] is confirmed unowned */
+    bool faulted;                      /**< A role operation failed */
+    test_usb_role_fault_t fault;       /**< Classified role/controller fault */
     esp_err_t last_switch_error;       /**< Error from the most recent switch attempt */
 } test_usb_role_status_t;
 
@@ -50,6 +70,12 @@ typedef struct {
  */
 esp_err_t test_usb_role_init(void);
 
+/** Stop the active role and the role worker, preserving resources on failure. */
+esp_err_t test_usb_role_deinit(void);
+
+/** Return compile-time capabilities for controller[0]. */
+esp_err_t test_usb_role_get_capabilities(test_usb_role_capabilities_t *out_capabilities);
+
 /**
  * @brief Asynchronously request a switch to the target role. The actual
  *        switch (deinit current -> init target) runs in the role worker task
@@ -58,7 +84,8 @@ esp_err_t test_usb_role_init(void);
  *
  * @param target  The role to switch to.
  * @return ESP_OK if the switch request was queued, ESP_ERR_INVALID_ARG for
- *         invalid role, ESP_ERR_NO_MEM if the queue is full.
+ *         invalid role, ESP_ERR_NOT_SUPPORTED when the requested capability
+ *         was not compiled, ESP_ERR_NO_MEM if the queue is full.
  */
 esp_err_t test_usb_role_switch(test_usb_role_t target);
 
@@ -81,7 +108,7 @@ test_usb_role_t test_usb_role_current(void);
  *        underlying test_usb / test_uvc module status.
  *
  * @param out_status  Output status buffer.
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL,
- *         ESP_ERR_INVALID_STATE if the module has not been initialized.
+ * @return ESP_OK on success (including an uninitialized or failed module
+ *         snapshot), ESP_ERR_INVALID_ARG if out_status is NULL.
  */
 esp_err_t test_usb_role_get_status(test_usb_role_status_t *out_status);

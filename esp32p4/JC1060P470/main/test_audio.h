@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 typedef enum {
     TEST_AUDIO_STATE_UNINITIALIZED = 0,
@@ -22,6 +23,7 @@ typedef enum {
 } test_audio_state_t;
 
 typedef struct {
+    test_module_meta_t module;
     bool initialized;
     bool running;
     test_audio_state_t state;
@@ -32,8 +34,8 @@ typedef struct {
 } test_audio_status_t;
 
 /**
- * @brief Initialize I2S peripheral, ES8311 codec (via shared I2C bus), and
- *        power amplifier. The codec shares the touch I2C bus.
+ * @brief Initialize I2S peripheral, ES8311 codec through the board-owned
+ *        shared I2C bus, and power amplifier.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
@@ -42,14 +44,15 @@ esp_err_t test_audio_init(void);
 /**
  * @brief Start the audio backend task. The worker stays idle until the UI
  *        triggers one of the supported actions: play embedded canon.pcm,
- *        record audio into memory, or replay the last recording.
+ *        lazily allocate a PSRAM recording buffer, record audio, or replay
+ *        the last recording.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
 esp_err_t test_audio_run(void);
 
 /**
- * @brief Start recording audio into the internal memory buffer.
+ * @brief Start recording audio into the lazily allocated PSRAM buffer.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */

@@ -9,9 +9,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 typedef struct {
+    test_module_meta_t module;
     bool initialized;
+    bool running;
     bool calibration_enabled;
     bool sample_valid;
     int raw_average;
@@ -31,18 +34,19 @@ typedef struct {
 esp_err_t test_battery_init(void);
 
 /**
- * @brief Refresh one battery sample if the configured update period has elapsed.
+ * @brief Start the low-priority periodic battery sampling worker.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */
 esp_err_t test_battery_run(void);
 
 /**
- * @brief Get a read-only snapshot of the battery module state.
+ * @brief Copy a consistent snapshot of the battery module state.
  *
- * @return Pointer to the module status structure.
+ * @param out_status  Output status buffer.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL.
  */
-const test_battery_status_t *test_battery_get_status(void);
+esp_err_t test_battery_get_status(test_battery_status_t *out_status);
 
 /**
  * @brief Release the ADC oneshot and calibration resources.

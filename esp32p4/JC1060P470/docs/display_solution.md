@@ -2,7 +2,9 @@
 
 ## 概述
 
-本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合已上板验证显示正常，未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
+本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合有既有上板记录，记录中未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
+
+本轮工作只收敛外设生命周期、USB capability 裁剪、状态快照和依赖配置；显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz (expect)` 不变。当前轮次只有静态检查和编译验证，没有新的显示上板验证，不能据此推断 UVC/无线等新增路径已稳定。
 
 当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是面向板级联调的 **综合验证 Demo**。`app_main()` 先完成 `board -> panel -> LVGL` 初始化并创建 UI，再启动后台 FreeType 初始化任务和外设初始化任务。SD、RTC、Audio、Battery、USB role、Wireless 的初始化不会阻塞首屏创建；单个外设失败只记录错误，不阻断其他模块。
 
@@ -52,19 +54,19 @@
 - **功能卡片区**：`row` 使用 `ROW_WRAP` 布局，当前包含 8 张卡片：
   - `1. 显示与触摸`
   - `2. RTC`
-  - `3. USB Device`
+  - `3. HIGH USB`
   - `4. 音频`
   - `5. BAT`
   - `6. WiFi`
   - `7. BLE`
   - `8. FreeType`
-- **UVC 子页面**：从 USB Device 卡片进入，包含 RGB565 预览、协商状态、解码/丢帧/恢复计数和摄像头支持的 MJPEG 分辨率列表。
+- **UVC 子页面**：从 HIGH USB 卡片进入，包含 RGB565 预览、协商状态、解码/丢帧/恢复计数和摄像头支持的 MJPEG 分辨率列表。
 
 ### 当前交互与布局状态
 
 - **显示与触摸卡片**：展示触摸状态、点击次数、最近坐标和提示文案，并提供一个独立触摸区用于验证 GT911 输入与 LVGL 刷新联动。
 - **RTC 卡片**：周期展示初始化状态、当前时间和同步来源。
-- **USB Device 卡片**：展示当前 HIGH USB 角色、CDC-ACM 枚举状态和收发统计，可切换 CDC/UVC，也可进入 UVC 测试页。USB role worker 异步执行底层 init/deinit，UI 不直接持有 USB 句柄。
+- **HIGH USB 卡片**：展示 controller[0] 当前状态及所选 capability 摘要，可启停当前编译的 CDC 或 UVC 能力。USB role worker 异步执行底层 init/deinit，UI 不直接持有 USB 句柄；另一角色若未编译则不可在运行时切换。
 - **音频卡片**：展示音频状态、录音数据量、峰值和输入电平，并提供“播放内置音乐 / 开始录音 / 播放录音”三个操作按钮。
 - **电量卡片**：展示 `GPIO52` 分压点 ADC 电压、换算后的 BAT 电压和线性估算百分比，用于验证电池采样链路是否正常。
 - **WiFi 卡片**：展示 hosted 链路状态、STA 初始化状态、扫描到的 AP 列表，并支持在页面上触发扫描与输入密码连接。
@@ -76,7 +78,7 @@
 - 页面已开启纵向滚动，解决“向下滑动不了”的问题。
 - 标题区 `header` 已改为纵向 flex 布局，避免标题与副标题重叠。
 - 第一张“显示与触摸”卡片高度已从 `230` 调整为 `304`，用于容纳 4 行状态文案、提示文案和 `110` 高触摸区，避免“触摸这里”超出卡片边界。
-- 无线区域已拆分为独立 `WiFi` / `BLE` 两张卡片，避免把未接入的 BLE 状态混入 WiFi 操作区。
+- 无线区域已拆分为独立 `WiFi` / `BLE` 两张卡片，分别承载 STA 操作与 hosted NimBLE 广播/GATT 状态。
 
 ## 渲染架构
 
@@ -173,9 +175,9 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 | 板级 | `display_board.c/.h` | MIPI DSI PHY 供电（LDO ch3 @2.5V）、背光 PWM/GPIO |
 | 面板 | `display_panel.c/.h` | MIPI DSI 总线、DPI 接口、JD9165 面板创建、DMA2D hook |
 | LVGL 适配 | `display_lvgl.c/.h` | 默认注册 `esp_lvgl_adapter` display/touch；legacy 路径保留自研 LVGL task、flush、indev |
-| 触摸 | `display_touch.c/.h` | I2C master 总线、GT911 触摸初始化、坐标缩放、touch handle 对外查询 |
+| 触摸 | `display_touch.c/.h` | 在 board-owned I2C 总线上以 400 kHz device handle 创建 GT911、读取硬件、坐标缩放和只读快照；控制器句柄不对外暴露 |
 
-公共参数集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。
+共享 I2C 的板级参数集中在 `board_config.h`，显示与触摸参数集中在 `display_config.h`，源文件不出现裸数字或裸 GPIO 号。GT911/RTC device handle 使用 400 kHz；ES8311 的 `esp_codec_dev` I2C control component 使用 100 kHz，三者仍由同一 board-owned bus 串行仲裁。
 
 ## 中文字体与 FreeType 诊断
 

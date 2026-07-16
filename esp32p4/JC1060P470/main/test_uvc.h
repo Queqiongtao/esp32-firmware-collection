@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 typedef struct {
     uint32_t h_res;
@@ -46,8 +47,10 @@ typedef enum {
 } test_uvc_preview_backend_t;
 
 typedef struct {
+    test_module_meta_t module;
     test_uvc_state_t state;
     bool initialized;
+    bool controller_released;
     bool stream_opened;
     bool stream_started;
     bool device_connected;
@@ -72,6 +75,9 @@ typedef struct {
     bool warm_recovery_expected;
     test_uvc_preview_backend_t preview_backend;
     uint32_t preview_fallbacks;
+    uint32_t transfer_errors;
+    uint32_t frame_overflows;
+    uint32_t frame_underflows;
     esp_err_t last_error;
 } test_uvc_status_t;
 

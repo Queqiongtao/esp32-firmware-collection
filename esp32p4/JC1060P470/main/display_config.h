@@ -7,7 +7,6 @@
 #pragma once
 
 #include "driver/gpio.h"
-#include "driver/i2c_master.h"
 #include "driver/ledc.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -42,10 +41,8 @@
 #define DISPLAY_LCD_LEDC_TIMER                  LEDC_TIMER_1
 #define DISPLAY_LCD_LEDC_MODE                   LEDC_LOW_SPEED_MODE
 
-#define DISPLAY_TOUCH_I2C_NUM                   I2C_NUM_1
-#define DISPLAY_TOUCH_I2C_SDA                   GPIO_NUM_7
-#define DISPLAY_TOUCH_I2C_SCL                   GPIO_NUM_8
-#define DISPLAY_TOUCH_I2C_CLK_HZ                400000
+#define DISPLAY_TOUCH_NATIVE_H_RES              800
+#define DISPLAY_TOUCH_NATIVE_V_RES              480
 
 #define DISPLAY_LVGL_DRAW_BUF_LINES             CONFIG_EXAMPLE_LVGL_DRAW_BUF_LINES
 #define DISPLAY_LVGL_TICK_PERIOD_MS             2

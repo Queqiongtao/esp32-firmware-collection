@@ -6,18 +6,15 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include "sdkconfig.h"
 #include "esp_err.h"
-#include "driver/i2c_master.h"
-#include "esp_lcd_touch.h"
 #include "lvgl.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* GT911 touch controller native coordinate range. */
-#define DISPLAY_TOUCH_NATIVE_H_RES  800
-#define DISPLAY_TOUCH_NATIVE_V_RES  480
 
 typedef struct {
     uint8_t track_id;
@@ -34,7 +31,7 @@ typedef struct {
 } display_touch_snapshot_t;
 
 /**
- * @brief Initialize I2C master bus and create GT911 touch handle.
+ * @brief Create the GT911 device on the board-owned shared I2C bus.
  *
  * The touch handle is held internally by this module; callers do not need
  * to manage its lifetime.
@@ -44,12 +41,7 @@ typedef struct {
  *      - Other errors from I2C or touch driver initialization
  */
 esp_err_t display_touch_init(void);
-esp_err_t display_touch_get_handle(esp_lcd_touch_handle_t *out_handle);
-esp_err_t display_touch_read_cached(esp_lcd_touch_handle_t tp,
-                                    esp_lcd_touch_point_data_t *points,
-                                    uint8_t *count,
-                                    uint8_t max_count,
-                                    void *user_ctx);
+esp_err_t display_touch_deinit(void);
 esp_err_t display_touch_get_snapshot(display_touch_snapshot_t *out_snapshot);
 
 /**
@@ -69,15 +61,12 @@ esp_err_t display_touch_get_snapshot(display_touch_snapshot_t *out_snapshot);
 esp_err_t display_touch_register_lvgl_indev(lv_display_t *disp, lv_indev_t **out_indev);
 
 /**
- * @brief Get the I2C master bus handle and port used by the touch module.
- *        Allows other modules (e.g. audio codec) to reuse the same I2C bus.
+ * @brief Unregister the LVGL input device before releasing touch hardware.
  *
- * @param out_handle  Returns the I2C master bus handle (must not be NULL).
- * @param out_port    Returns the I2C port number (may be NULL).
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_handle is NULL,
- *         ESP_ERR_INVALID_STATE if touch not initialized.
+ * The legacy LVGL port caller must hold the LVGL API lock while calling this
+ * function. The esp_lvgl_adapter path manages its lock internally.
  */
-esp_err_t display_touch_get_i2c_bus(i2c_master_bus_handle_t *out_handle, int *out_port);
+esp_err_t display_touch_unregister_lvgl_indev(void);
 
 #ifdef __cplusplus
 }

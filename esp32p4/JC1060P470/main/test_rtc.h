@@ -9,9 +9,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 typedef struct {
+    test_module_meta_t module;
     bool initialized;
+    bool running;
     bool time_valid;
     bool synced_from_build_time;
     esp_err_t last_error;
@@ -25,7 +28,8 @@ typedef struct {
 } test_rtc_status_t;
 
 /**
- * @brief Attach the RX8025T-UC RTC to the shared touch I2C bus and probe it.
+ * @brief Attach the RX8025T-UC RTC to the board-owned shared I2C bus and
+ *        probe it.
  *
  * @return ESP_OK on success, otherwise an error code describing the failure.
  */

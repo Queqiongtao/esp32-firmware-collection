@@ -39,8 +39,8 @@
 
 /* ---------------------------- RTC (RX8025T-UC) ---------------------------- *
  * Board wiring:
- *   RX8025T-UC RTC shares the touch I2C bus (I2C_NUM_1, GPIO7/8) via the
- *   display_touch module's bus handle getter. */
+ *   RX8025T-UC RTC borrows the board-owned shared I2C bus. The bus port,
+ *   pins, and clock are defined once in board_config.h. */
 
 #define TEST_RTC_CHIP_NAME                      "RX8025T-UC"
 #define TEST_RTC_I2C_ADDR                       0x32
@@ -53,8 +53,7 @@
  *   I2S DOUT = GPIO9 (-> ES8311), DIN = GPIO11 (<- ES8311)
  *   PA (power amplifier enable) = GPIO20
  *
- * ES8311 codec shares the touch I2C bus (I2C_NUM_1, GPIO7/8) via the
- * display_touch module's bus handle getter. */
+ * ES8311 codec borrows the board-owned shared I2C bus via board_i2c. */
 
 #define TEST_AUDIO_I2S_NUM                      0
 #define TEST_AUDIO_PIN_MCLK                     GPIO_NUM_13
@@ -187,8 +186,9 @@
  *   demo（test_usb.c，TinyUSB HS device）不可同时启用。CDC 功能改由 FULL USB
  *   口的 USJ 固化 CDC-ACM 串口承担（见上文 USB ports overview）。
  *
- * 阶段 A（当前）：USB Host + UVC 收流 + 硬件 JPEG 解码（RGB565），
- *   只做日志观测（帧序号/字节/宽高/解码耗时/错误码），不写 LVGL 画布。
+ * 当前路径：USB Host + UVC 收流 + 硬件 JPEG 解码（RGB565），再由 PPA
+ *   或 CPU 等比缩放到固定预览缓冲。UI 通过 test_uvc_copy_preview() 复制
+ *   快照，不直接持有 USB、JPEG 或 PPA 的内部缓冲。
  *   流格式（分辨率/FPS）在设备连接时从描述符枚举后动态协商，优先
  *   匹配 TEST_UVC_PREFER_H_RES × TEST_UVC_PREFER_V_RES 的 MJPEG +
  *   最高 fps，不匹配时降级到设备实际支持的最大 MJPEG 格式。
@@ -197,11 +197,10 @@
  *   - UVC 帧缓冲在 PSRAM，由 USB-DWC DMA 写入，应用 CPU 读 frame->data；
  *     esp-usb UVC 驱动内部已处理该 DMA->CPU 方向的 cache invalidate，
  *     应用层无需额外 esp_cache_msync。
- *   - JPEG 硬解输入 frame->data（PSRAM，CPU 不写，硬件 DMA 读）无需 msync；
- *     输出 RGB565 缓冲在 PSRAM 由 JPEG DMA 写入、CPU 读，无 DMA2D 缩放时
- *     不存在 CPU 写后 DMA 读的中间断点，阶段 A 暂不涉及 msync。
- *   - 阶段 B 引入 DMA2D 缩放上屏时，再在 CPU 写 PSRAM 后交 DMA2D 前补
- *     esp_cache_msync(DIR_C2M)，遵循 AGENTS.md cache 一致性约束。 */
+ *   - JPEG/PPA 驱动负责各自 DMA 边界；应用层对 CPU 清零、CPU fallback
+ *     缩放等写入的预览 PSRAM 显式执行 esp_cache_msync(DIR_C2M)。
+ *   - UI 复制到 LVGL image 自有缓冲后同样显式写回 cache，再通知 LVGL
+ *     图像失效，遵循 AGENTS.md cache 一致性约束。 */
 
 #define TEST_UVC_USB_HOST_PERIPHERAL_MAP       (1U << 0)   /* HS OTG: controller[0], UTMI HS PHY, HIGH USB port */
 #define TEST_UVC_VID                            UVC_HOST_ANY_VID
@@ -218,8 +217,8 @@
 
 /* Maximum number of frame descriptors the module will enumerate from a single
  * UVC device via uvc_host_get_frame_list(). Must be >= the device's
- * frame_info_num for the selected stream. 8 is ample for typical USB cameras
- * (usually 1-3 resolutions x 1-3 fps each). */
+ * frame_info_num for the selected stream. 24 leaves headroom for cameras that
+ * expose several resolutions and frame intervals. */
 #define TEST_UVC_FRAME_INFO_MAX                 24
 
 #define TEST_UVC_FRAME_BUF_COUNT                3

@@ -10,8 +10,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "test_common.h"
 
 #define TEST_WIRELESS_SSID_MAX_LEN              32
+#define TEST_WIRELESS_PASSWORD_MAX_LEN          63
 #define TEST_WIRELESS_IPV4_STR_LEN              16
 #define TEST_WIRELESS_HINT_MAX_LEN              48
 #define TEST_WIRELESS_SCAN_RESULT_MAX           12
@@ -54,6 +56,7 @@ typedef enum {
 } test_wireless_ble_state_t;
 
 typedef struct {
+    test_module_meta_t module;
     bool initialized;
     bool init_attempted;
     bool hosted_stack_available;
@@ -76,6 +79,7 @@ typedef struct {
     uint32_t wifi_ap_count;
     uint32_t ble_device_count;
     uint32_t wifi_scan_generation;
+    int64_t wifi_scan_updated_at_us;
     uint8_t ble_test_value;
     int wifi_rssi;
     uint32_t wifi_retry_count;
@@ -91,9 +95,21 @@ typedef struct {
     char last_hint[TEST_WIRELESS_HINT_MAX_LEN];
 } test_wireless_status_t;
 
+typedef struct {
+    uint32_t generation;
+    int64_t updated_at_us;
+    uint32_t total_count;
+    size_t record_count;
+    bool valid;
+    test_wireless_ap_record_t records[TEST_WIRELESS_SCAN_RESULT_MAX];
+} test_wireless_scan_snapshot_t;
+
 esp_err_t test_wireless_init(void);
+/* Records a prerequisite error without creating or releasing wireless resources. */
+esp_err_t test_wireless_report_dependency_failure(esp_err_t error);
 esp_err_t test_wireless_run(void);
 esp_err_t test_wireless_get_status(test_wireless_status_t *out_status);
+esp_err_t test_wireless_get_scan_snapshot(test_wireless_scan_snapshot_t *out_snapshot);
 esp_err_t test_wireless_get_scan_results(test_wireless_ap_record_t *records, size_t max_records, size_t *out_count);
 esp_err_t test_wireless_request_wifi_scan(void);
 esp_err_t test_wireless_request_wifi_connect(const char *ssid, const char *password);

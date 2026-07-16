@@ -7,11 +7,16 @@
 #include "test_rtc.h"
 
 #include <inttypes.h>
-#include "display_touch.h"
+#include "board_config.h"
+#include "board_i2c.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
+#include "freertos/portmacro.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "test_config.h"
 
@@ -31,13 +36,52 @@ static const char *TAG = "test_rtc";
 #define RX8025_YEAR_BASE                         2000
 #define RX8025_TASK_STACK_SIZE                   3072
 #define RX8025_TASK_PRIORITY                     3
+#define RX8025_WORKER_EXITED_BIT                 BIT0
+#define RX8025_WORKER_STOP_BIT                   BIT1
+#define RX8025_STOP_TIMEOUT_MS                   1000
 
 static i2c_master_dev_handle_t s_rtc_dev = NULL;
 static TaskHandle_t s_rtc_task_handle = NULL;
+static EventGroupHandle_t s_rtc_worker_events = NULL;
+static StaticEventGroup_t s_rtc_worker_event_storage;
+static portMUX_TYPE s_rtc_lock = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t s_lifecycle_mutex = NULL;
+static StaticSemaphore_t s_lifecycle_mutex_storage;
 static bool s_initialized = false;
+static bool s_running = false;
+static bool s_stopping = false;
 static bool s_time_valid = false;
 static bool s_synced_from_build_time = false;
 static esp_err_t s_last_error = ESP_OK;
+static test_module_meta_t s_module = {
+    .state = TEST_MODULE_STATE_UNINITIALIZED,
+    .last_error = ESP_OK,
+};
+static uint32_t s_generation = 0;
+
+static esp_err_t rtc_lifecycle_enter(void)
+{
+    portENTER_CRITICAL(&s_rtc_lock);
+    if (s_lifecycle_mutex == NULL) {
+        s_lifecycle_mutex = xSemaphoreCreateMutexStatic(&s_lifecycle_mutex_storage);
+    }
+    SemaphoreHandle_t mutex = s_lifecycle_mutex;
+    portEXIT_CRITICAL(&s_rtc_lock);
+
+    ESP_RETURN_ON_FALSE(mutex != NULL, ESP_ERR_NO_MEM, TAG,
+                        "create RTC lifecycle mutex failed");
+    ESP_RETURN_ON_FALSE(xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE,
+                        ESP_ERR_INVALID_STATE, TAG,
+                        "take RTC lifecycle mutex failed");
+    return ESP_OK;
+}
+
+static void rtc_lifecycle_exit(void)
+{
+    if (s_lifecycle_mutex != NULL) {
+        xSemaphoreGive(s_lifecycle_mutex);
+    }
+}
 
 typedef struct {
     uint8_t sec;
@@ -211,12 +255,44 @@ static void rtc_log_time(const char *prefix, const rtc_time_t *time)
              time->year, time->month, time->mday, time->hour, time->min, time->sec, time->wday_mask);
 }
 
+static bool rtc_is_stopping(void)
+{
+    bool stopping;
+    portENTER_CRITICAL(&s_rtc_lock);
+    stopping = s_stopping;
+    portEXIT_CRITICAL(&s_rtc_lock);
+    return stopping;
+}
+
+static void rtc_latch_error(esp_err_t error, bool invalidate_time)
+{
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
+    s_last_error = error;
+    s_module.state = TEST_MODULE_STATE_ERROR;
+    s_module.last_error = error;
+    s_module.updated_at_us = now_us;
+    if (invalidate_time) {
+        s_time_valid = false;
+    }
+    portEXIT_CRITICAL(&s_rtc_lock);
+}
+
 static void rtc_store_time(const rtc_time_t *time, bool valid)
 {
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
     if (time != NULL) {
         s_last_time = *time;
     }
     s_time_valid = valid;
+    s_last_error = ESP_OK;
+    s_module.last_error = ESP_OK;
+    s_module.updated_at_us = now_us;
+    if (s_running) {
+        s_module.state = TEST_MODULE_STATE_RUNNING;
+    }
+    portEXIT_CRITICAL(&s_rtc_lock);
 }
 
 static esp_err_t rtc_read_time_and_status(uint8_t *time_regs, uint8_t *status_regs)
@@ -249,86 +325,183 @@ static void rtc_periodic_task(void *arg)
 {
     (void)arg;
 
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(TEST_RTC_READ_INTERVAL_MS));
-
-        if (!s_initialized) {
-            continue;
+    while (!rtc_is_stopping()) {
+        (void)xEventGroupWaitBits(s_rtc_worker_events,
+                                  RX8025_WORKER_STOP_BIT,
+                                  pdTRUE,
+                                  pdFALSE,
+                                  pdMS_TO_TICKS(TEST_RTC_READ_INTERVAL_MS));
+        if (rtc_is_stopping()) {
+            break;
         }
 
         esp_err_t ret = rtc_read_and_log_time("");
         if (ret != ESP_OK) {
-            s_last_error = ret;
-            s_time_valid = false;
+            rtc_latch_error(ret, true);
             ESP_LOGE(TAG, "periodic RTC read failed: %s", esp_err_to_name(ret));
-        } else {
-            s_last_error = ESP_OK;
         }
     }
+
+    EventGroupHandle_t events;
+    portENTER_CRITICAL(&s_rtc_lock);
+    s_running = false;
+    s_rtc_task_handle = NULL;
+    events = s_rtc_worker_events;
+    portEXIT_CRITICAL(&s_rtc_lock);
+    if (events != NULL) {
+        xEventGroupSetBits(events, RX8025_WORKER_EXITED_BIT);
+    }
+    vTaskDelete(NULL);
 }
 
 static esp_err_t rtc_start_periodic_task(void)
 {
-    if (s_rtc_task_handle != NULL) {
+    portENTER_CRITICAL(&s_rtc_lock);
+    bool running = s_running;
+    bool stopping = s_stopping;
+    portEXIT_CRITICAL(&s_rtc_lock);
+    if (running) {
         return ESP_OK;
     }
+    ESP_RETURN_ON_FALSE(!stopping && s_rtc_worker_events != NULL,
+                        ESP_ERR_INVALID_STATE, TAG, "RTC worker cannot start while stopping");
 
+    xEventGroupClearBits(s_rtc_worker_events,
+                         RX8025_WORKER_EXITED_BIT | RX8025_WORKER_STOP_BIT);
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
+    s_running = true;
+    s_module.state = TEST_MODULE_STATE_RUNNING;
+    s_module.last_error = ESP_OK;
+    s_module.updated_at_us = now_us;
+    portEXIT_CRITICAL(&s_rtc_lock);
     BaseType_t ret = xTaskCreate(rtc_periodic_task,
                                  "rtc_test_task",
                                  RX8025_TASK_STACK_SIZE,
                                  NULL,
                                  RX8025_TASK_PRIORITY,
                                  &s_rtc_task_handle);
-    ESP_RETURN_ON_FALSE(ret == pdPASS, ESP_ERR_NO_MEM, TAG, "create RTC periodic task failed");
+    if (ret != pdPASS) {
+        portENTER_CRITICAL(&s_rtc_lock);
+        s_running = false;
+        s_rtc_task_handle = NULL;
+        portEXIT_CRITICAL(&s_rtc_lock);
+        rtc_latch_error(ESP_ERR_NO_MEM, false);
+        return ESP_ERR_NO_MEM;
+    }
     ESP_LOGI(TAG, "%s periodic read task started, interval=%d ms",
              TEST_RTC_CHIP_NAME, TEST_RTC_READ_INTERVAL_MS);
     return ESP_OK;
 }
 
-esp_err_t test_rtc_init(void)
+static esp_err_t test_rtc_init_locked(void)
 {
-    if (s_initialized) {
-        return ESP_OK;
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
+    bool initialized = s_initialized;
+    bool worker_exists = s_rtc_task_handle != NULL;
+    bool stopping = s_stopping;
+    test_module_state_t module_state = s_module.state;
+    if (!initialized && !worker_exists) {
+        if (!stopping && module_state != TEST_MODULE_STATE_INITIALIZING &&
+            module_state != TEST_MODULE_STATE_STOPPING) {
+            s_stopping = false;
+            s_module.state = TEST_MODULE_STATE_INITIALIZING;
+            s_module.last_error = ESP_OK;
+            s_module.updated_at_us = now_us;
+        }
     }
+    portEXIT_CRITICAL(&s_rtc_lock);
+    if (initialized) {
+        return !stopping &&
+               (module_state == TEST_MODULE_STATE_READY ||
+                module_state == TEST_MODULE_STATE_RUNNING) ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+    ESP_RETURN_ON_FALSE(!worker_exists && !stopping &&
+                        module_state != TEST_MODULE_STATE_INITIALIZING &&
+                        module_state != TEST_MODULE_STATE_STOPPING,
+                        ESP_ERR_INVALID_STATE, TAG, "RTC lifecycle is busy");
 
     i2c_master_bus_handle_t i2c_bus_handle = NULL;
-    int i2c_port = 0;
-    ESP_RETURN_ON_ERROR(display_touch_get_i2c_bus(&i2c_bus_handle, &i2c_port),
-                        TAG, "get shared I2C bus handle failed");
+    i2c_port_num_t i2c_port = I2C_NUM_0;
+    esp_err_t ret = board_i2c_get_bus(&i2c_bus_handle, &i2c_port);
+    if (ret != ESP_OK) {
+        rtc_latch_error(ret, false);
+        return ret;
+    }
 
-    esp_err_t ret = i2c_master_probe(i2c_bus_handle, TEST_RTC_I2C_ADDR, TEST_RTC_I2C_TIMEOUT_MS);
+    ret = i2c_master_probe(i2c_bus_handle, TEST_RTC_I2C_ADDR, TEST_RTC_I2C_TIMEOUT_MS);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "%s probe failed at I2C address 0x%02X: %s",
                  TEST_RTC_CHIP_NAME, TEST_RTC_I2C_ADDR, esp_err_to_name(ret));
+        rtc_latch_error(ret, false);
         return ret;
+    }
+
+    if (s_rtc_worker_events == NULL) {
+        s_rtc_worker_events = xEventGroupCreateStatic(&s_rtc_worker_event_storage);
     }
 
     const i2c_device_config_t rtc_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = TEST_RTC_I2C_ADDR,
-        .scl_speed_hz = 400000,
+        .scl_speed_hz = BOARD_SHARED_I2C_TOUCH_RTC_CLK_HZ,
     };
-    ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(i2c_bus_handle, &rtc_cfg, &s_rtc_dev),
-                        TAG, "add RTC I2C device failed");
+    ret = i2c_master_bus_add_device(i2c_bus_handle, &rtc_cfg, &s_rtc_dev);
+    if (ret != ESP_OK) {
+        rtc_latch_error(ret, false);
+        return ret;
+    }
 
+    now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
     s_initialized = true;
+    s_running = false;
+    s_stopping = false;
+    s_time_valid = false;
+    s_synced_from_build_time = false;
     s_last_error = ESP_OK;
+    s_generation++;
+    s_module = (test_module_meta_t) {
+        .state = TEST_MODULE_STATE_READY,
+        .last_error = ESP_OK,
+        .generation = s_generation,
+        .updated_at_us = now_us,
+    };
+    portEXIT_CRITICAL(&s_rtc_lock);
     ESP_LOGI(TAG, "%s initialized on shared I2C port %d address 0x%02X",
              TEST_RTC_CHIP_NAME, i2c_port, TEST_RTC_I2C_ADDR);
     return ESP_OK;
 }
 
-esp_err_t test_rtc_run(void)
+esp_err_t test_rtc_init(void)
 {
-    ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG,
+    ESP_RETURN_ON_ERROR(rtc_lifecycle_enter(), TAG,
+                        "enter RTC lifecycle failed");
+    esp_err_t ret = test_rtc_init_locked();
+    rtc_lifecycle_exit();
+    return ret;
+}
+
+static esp_err_t test_rtc_run_locked(void)
+{
+    portENTER_CRITICAL(&s_rtc_lock);
+    bool initialized = s_initialized;
+    bool running = s_running;
+    bool stopping = s_stopping;
+    portEXIT_CRITICAL(&s_rtc_lock);
+    ESP_RETURN_ON_FALSE(initialized && !stopping, ESP_ERR_INVALID_STATE, TAG,
                         "RTC not initialized, call test_rtc_init first");
+    if (running) {
+        return ESP_OK;
+    }
 
     uint8_t time_regs[RX8025_TIME_REG_COUNT] = {0};
     uint8_t status_regs[RX8025_STATUS_REG_COUNT] = {0};
 
     esp_err_t ret = rtc_read_time_and_status(time_regs, status_regs);
     if (ret != ESP_OK) {
-        s_last_error = ret;
+        rtc_latch_error(ret, true);
         return ret;
     }
 
@@ -336,33 +509,65 @@ esp_err_t test_rtc_run(void)
     ret = rtc_decode_time(time_regs, &rtc_time);
     if (ret == ESP_OK) {
         rtc_store_time(&rtc_time, true);
+        int64_t now_us = esp_timer_get_time();
+        portENTER_CRITICAL(&s_rtc_lock);
         s_synced_from_build_time = false;
-        s_last_error = ESP_OK;
+        s_module.updated_at_us = now_us;
+        portEXIT_CRITICAL(&s_rtc_lock);
         rtc_log_time("", &rtc_time);
         return rtc_start_periodic_task();
     }
 
     ESP_LOGW(TAG, "RTC time is invalid, sync from build time");
     rtc_time_t build_time = {0};
-    ESP_RETURN_ON_ERROR(rtc_get_build_time(&build_time), TAG, "get build time failed");
+    ret = rtc_get_build_time(&build_time);
+    if (ret != ESP_OK) {
+        rtc_latch_error(ret, true);
+        return ret;
+    }
     rtc_log_time("build ", &build_time);
-    ESP_RETURN_ON_ERROR(rtc_write_time(&build_time), TAG, "write RTC build time failed");
+    ret = rtc_write_time(&build_time);
+    if (ret != ESP_OK) {
+        rtc_latch_error(ret, true);
+        return ret;
+    }
 
-    ESP_RETURN_ON_ERROR(rtc_read_time_and_status(time_regs, status_regs), TAG, "read RTC after sync failed");
-    ESP_RETURN_ON_ERROR(rtc_decode_time(time_regs, &rtc_time), TAG, "RTC time still invalid after sync");
+    ret = rtc_read_time_and_status(time_regs, status_regs);
+    if (ret == ESP_OK) {
+        ret = rtc_decode_time(time_regs, &rtc_time);
+    }
+    if (ret != ESP_OK) {
+        rtc_latch_error(ret, true);
+        return ret;
+    }
     rtc_store_time(&rtc_time, true);
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
     s_synced_from_build_time = true;
-    s_last_error = ESP_OK;
+    s_module.updated_at_us = now_us;
+    portEXIT_CRITICAL(&s_rtc_lock);
     rtc_log_time("synced ", &rtc_time);
     return rtc_start_periodic_task();
+}
+
+esp_err_t test_rtc_run(void)
+{
+    ESP_RETURN_ON_ERROR(rtc_lifecycle_enter(), TAG,
+                        "enter RTC lifecycle failed");
+    esp_err_t ret = test_rtc_run_locked();
+    rtc_lifecycle_exit();
+    return ret;
 }
 
 esp_err_t test_rtc_get_status(test_rtc_status_t *out_status)
 {
     ESP_RETURN_ON_FALSE(out_status != NULL, ESP_ERR_INVALID_ARG, TAG, "out_status is NULL");
 
+    portENTER_CRITICAL(&s_rtc_lock);
     *out_status = (test_rtc_status_t) {
+        .module = s_module,
         .initialized = s_initialized,
+        .running = s_running,
         .time_valid = s_time_valid,
         .synced_from_build_time = s_synced_from_build_time,
         .last_error = s_last_error,
@@ -374,27 +579,67 @@ esp_err_t test_rtc_get_status(test_rtc_status_t *out_status)
         .sec = s_last_time.sec,
         .wday_mask = s_last_time.wday_mask,
     };
+    portEXIT_CRITICAL(&s_rtc_lock);
+    return ESP_OK;
+}
+
+static esp_err_t test_rtc_deinit_locked(void)
+{
+    int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
+    bool worker_exists = s_rtc_task_handle != NULL;
+    s_stopping = true;
+    s_module.state = TEST_MODULE_STATE_STOPPING;
+    s_module.updated_at_us = now_us;
+    portEXIT_CRITICAL(&s_rtc_lock);
+
+    if (worker_exists) {
+        xEventGroupSetBits(s_rtc_worker_events, RX8025_WORKER_STOP_BIT);
+        EventBits_t bits = xEventGroupWaitBits(s_rtc_worker_events,
+                                               RX8025_WORKER_EXITED_BIT,
+                                               pdTRUE,
+                                               pdFALSE,
+                                               pdMS_TO_TICKS(RX8025_STOP_TIMEOUT_MS));
+        if ((bits & RX8025_WORKER_EXITED_BIT) == 0) {
+            ESP_LOGE(TAG, "RTC worker did not acknowledge stop within %d ms", RX8025_STOP_TIMEOUT_MS);
+            rtc_latch_error(ESP_ERR_TIMEOUT, false);
+            return ESP_ERR_TIMEOUT;
+        }
+    }
+
+    if (s_rtc_dev != NULL) {
+        esp_err_t ret = i2c_master_bus_rm_device(s_rtc_dev);
+        if (ret != ESP_OK) {
+            rtc_latch_error(ret, false);
+            return ret;
+        }
+        s_rtc_dev = NULL;
+    }
+    now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_rtc_lock);
+    s_initialized = false;
+    s_running = false;
+    s_stopping = false;
+    s_time_valid = false;
+    s_synced_from_build_time = false;
+    s_last_error = ESP_OK;
+    s_last_time = (rtc_time_t) {0};
+    s_module = (test_module_meta_t) {
+        .state = TEST_MODULE_STATE_UNINITIALIZED,
+        .last_error = ESP_OK,
+        .generation = s_generation,
+        .updated_at_us = now_us,
+    };
+    portEXIT_CRITICAL(&s_rtc_lock);
+    ESP_LOGI(TAG, "%s deinitialized", TEST_RTC_CHIP_NAME);
     return ESP_OK;
 }
 
 esp_err_t test_rtc_deinit(void)
 {
-    if (s_rtc_task_handle != NULL) {
-        vTaskDelete(s_rtc_task_handle);
-        s_rtc_task_handle = NULL;
-    }
-
-    if (s_rtc_dev != NULL) {
-        ESP_RETURN_ON_ERROR(i2c_master_bus_rm_device(s_rtc_dev),
-                            TAG, "remove RTC I2C device failed");
-        s_rtc_dev = NULL;
-    }
-
-    s_initialized = false;
-    s_time_valid = false;
-    s_synced_from_build_time = false;
-    s_last_error = ESP_OK;
-    s_last_time = (rtc_time_t) {0};
-    ESP_LOGI(TAG, "%s deinitialized", TEST_RTC_CHIP_NAME);
-    return ESP_OK;
+    ESP_RETURN_ON_ERROR(rtc_lifecycle_enter(), TAG,
+                        "enter RTC lifecycle failed");
+    esp_err_t ret = test_rtc_deinit_locked();
+    rtc_lifecycle_exit();
+    return ret;
 }
