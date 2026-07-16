@@ -160,6 +160,8 @@ static uint32_t s_disconnect_stream_generation;
 static uint32_t s_frames_received;
 static uint32_t s_frames_decoded;
 static uint32_t s_decode_errors;
+static uint32_t s_frames_truncated;
+static uint32_t s_frames_skipped;
 static uint32_t s_frames_dropped;
 static uint32_t s_frame_queue_high_water;
 static uint32_t s_last_frame_bytes;
@@ -489,13 +491,15 @@ static void uvc_log_stats_if_due(void)
     }
 
     ESP_LOGI(TAG, "UVC stats: state=%s received=%" PRIu32 " decoded=%" PRIu32 " errors=%" PRIu32
-             " dropped=%" PRIu32 " last=%" PRIu32 "x%" PRIu32 " len=%" PRIu32
+             " truncated=%" PRIu32 " skipped=%" PRIu32 " dropped=%" PRIu32
+             " last=%" PRIu32 "x%" PRIu32 " len=%" PRIu32
              " decode=%" PRIu32 "us preview=%" PRIu32 "us backend=%s",
              uvc_state_name(s_state),
              s_frames_received - s_stats_window_received,
              s_frames_decoded - s_stats_window_decoded,
              s_decode_errors - s_stats_window_errors,
-             s_frames_dropped, s_last_frame_w, s_last_frame_h, s_last_frame_bytes,
+             s_frames_truncated, s_frames_skipped, s_frames_dropped,
+             s_last_frame_w, s_last_frame_h, s_last_frame_bytes,
              s_last_decode_us, s_last_preview_us,
              s_preview_backend == TEST_UVC_PREVIEW_BACKEND_PPA ? "PPA" : "CPU");
 
@@ -1001,6 +1005,27 @@ static void uvc_retry_held_frames(void)
     }
 }
 
+/* 校验 MJPEG 帧完整性: 头部 SOI(FFD8) + 尾部窗口内存在 EOI(FFD9)。
+ * usb_host_uvc 驱动对 SKIPPED/TIMED_OUT 的等时包不作废当前帧, 被截断的
+ * 帧仍会按完整帧上交, 送入硬件解码器会报 data-unit 数与分辨率不匹配并
+ * 触发 dma2d 中止。此处拦截尾部截断的帧; 中段丢包但 SOI/EOI 完好的帧
+ * 仍会解码失败, 由现有 decode error 路径节流计数。 */
+static bool uvc_mjpeg_frame_complete(const uint8_t *data, size_t len)
+{
+    if (data == NULL || len < 4 || data[0] != 0xFF || data[1] != 0xD8) {
+        return false;
+    }
+    const size_t window = len < TEST_UVC_MJPEG_EOI_SEARCH_WINDOW
+                          ? len : TEST_UVC_MJPEG_EOI_SEARCH_WINDOW;
+    for (size_t i = 0; i + 2 <= window; ++i) {
+        const uint8_t *tail = &data[len - 2 - i];
+        if (tail[0] == 0xFF && tail[1] == 0xD9) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static esp_err_t uvc_ensure_rgb565_buf(uint32_t width, uint32_t height)
 {
     ESP_RETURN_ON_FALSE(width > 0 && height > 0 && width <= UINT16_MAX && height <= UINT16_MAX,
@@ -1216,6 +1241,34 @@ static void uvc_worker_task(void *arg)
             if (uvc_should_sample_error(decode_errors)) {
                 ESP_LOGW(TAG, "UVC decode errors=%" PRIu32 ": empty payload", decode_errors);
             }
+            uvc_return_frame_or_retry(&msg);
+            uvc_log_stats_if_due();
+            continue;
+        }
+
+        if (!uvc_mjpeg_frame_complete(frame->data, frame->data_len)) {
+            portENTER_CRITICAL(&s_frame_lock);
+            s_frames_truncated++;
+            const uint32_t frames_truncated = s_frames_truncated;
+            portEXIT_CRITICAL(&s_frame_lock);
+            if (uvc_should_sample_error(frames_truncated)) {
+                ESP_LOGW(TAG, "UVC truncated frames=%" PRIu32 ": skipped before decode, len=%u",
+                         frames_truncated, (unsigned)frame->data_len);
+            }
+            uvc_return_frame_or_retry(&msg);
+            uvc_log_stats_if_due();
+            continue;
+        }
+
+        /* 按需解码: 预览窗口未到期就直接归还帧, 不占用 JPEG 引擎和
+         * PSRAM 带宽(1080p 每帧解码要写 ~4MB)。解码率对齐显示率而非
+         * 相机帧率; 解码失败时 s_preview_last_update_us 不会前移, 下一
+         * 帧会立即重试, 预览不会因坏帧而卡住。 */
+        if (esp_timer_get_time() - s_preview_last_update_us <
+                TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS * 1000LL) {
+            portENTER_CRITICAL(&s_frame_lock);
+            s_frames_skipped++;
+            portEXIT_CRITICAL(&s_frame_lock);
             uvc_return_frame_or_retry(&msg);
             uvc_log_stats_if_due();
             continue;
@@ -1568,6 +1621,8 @@ static esp_err_t uvc_init_locked(void)
     s_frames_received = 0;
     s_frames_decoded = 0;
     s_decode_errors = 0;
+    s_frames_truncated = 0;
+    s_frames_skipped = 0;
     s_frames_dropped = 0;
     s_frame_queue_high_water = 0;
     s_last_frame_bytes = 0;
@@ -1634,6 +1689,11 @@ static esp_err_t uvc_init_locked(void)
     ESP_GOTO_ON_ERROR(jpeg_new_decoder_engine(&jpeg_dec_cfg, &s_jpeg_decoder),
                       fail, TAG, "jpeg_new_decoder_engine failed");
     uvc_log_memory("after JPEG decoder");
+    /* 中段丢包的 MJPEG 帧解码失败属已知现象(usb_host_uvc 驱动对 SKIPPED
+     * 等时包不作废当前帧), 失败帧已由 s_decode_errors 统计并节流告警,
+     * 屏蔽 jpeg 驱动内部的逐帧 ERROR 刷屏。dma2d 标签与显示路径共用,
+     * 保持可见。 */
+    esp_log_level_set("jpeg.decoder", ESP_LOG_NONE);
 
     task_created = xTaskCreatePinnedToCore(uvc_worker_task,
                                           "uvc_worker",

@@ -84,7 +84,7 @@ FULL USB 的 USJ 串口始终承担烧录和 IDF 日志；CDC 测试枚举出的
 UVC 不再硬编码 FPS：
 
 - 设备连接后读取 MJPEG frame descriptor，最多保存 `TEST_UVC_FRAME_INFO_MAX=24` 条能力。
-- 默认偏好为 `1280x720`；若设备支持该分辨率，选择对应最高 FPS。
+- 默认偏好为 `1920x1080`；若设备支持该分辨率，选择对应最高 FPS。
 - 偏好不匹配时，从设备实际支持的 MJPEG 能力中选择降级项，并记录最终协商的宽、高和 FPS。
 - `test_uvc_get_resolutions()` 向 UI 暴露去重后的分辨率列表。
 - `test_usb_role_restart_uvc()` 将分辨率请求投递到 role queue；若 UVC 已运行，worker 调用 `test_uvc_change_resolution()` 停止当前流并用新能力重新打开，不在 LVGL 回调中执行阻塞操作。
@@ -93,9 +93,19 @@ UVC 不再硬编码 FPS：
 
 - USB UVC 帧使用 PSRAM 缓冲，格式为 MJPEG；ESP32-P4 硬件 JPEG decoder 输出 RGB565。
 - 固定预览尺寸为 `896x448`，保持源画面宽高比并居中，空白区域清零。
-- 预览默认最多每 100 ms 更新一次。PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。
+- 按需解码：worker 以 `TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS=200 ms` 为最小间隔挑帧解码，窗口未到期的帧直接归还并计入 `skipped`。解码率对齐显示率而非相机帧率，避免 1080p@30fps 全量解码（每帧写约 4 MB RGB565）耗尽 PSRAM 带宽。解码失败不前移预览时间戳，下一帧立即重试，预览不会因坏帧卡住。
+- 解码前先做 MJPEG 完整性校验：头部 SOI（FFD8）+ 尾部 `TEST_UVC_MJPEG_EOI_SEARCH_WINDOW=512` 字节窗口内存在 EOI（FFD9）。尾部截断帧计入 `truncated` 并直接归还，不进硬件解码器。
+- PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。1080p 源经 PPA SRM 缩放实测约 90 ms/次，受 PPA 引擎吞吐（约 23 MPix/s）限制，属常数开销，不能靠减少总线争用优化。
 - `test_uvc_copy_preview()` 将最新预览复制到调用方缓冲；调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
-- 状态中保留接收、解码、丢帧、错误、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
+- 状态中保留接收、解码、错误、截断、按需跳帧、丢帧、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
+
+### ISOC 丢包与已知残余坏帧
+
+`usb_host_uvc` v2.5.1 的等时回调对 `SKIPPED/TIMED_OUT` 包只跳过、不作废当前帧（`uvc_isoc.c`），丢包的 MJPEG 帧仍按完整帧上交应用。按项目约束不修改 `managed_components/`，应用层采取以下绕过：
+
+- ISOC URB 配置为 4×20 KB（10 ms 等时缓冲，占内部 DMA RAM 80 KB），实证可用。注意 HCD 的 ISOC qTD 环只有 64 槽且每管道双缓冲调度：单 URB 不得超过 61 包，实测 8×20 KB 会令 ISOC 调度绕死、一帧不收，并进一步诱发 CTRL 超时和 usbh 断言崩溃复位；未上板验证不得加深。
+- 尾部截断帧由完整性校验拦截；中段丢包但 SOI/EOI 完好的帧无法在解码前识别，进入硬件解码器后报 data-unit 数与分辨率不匹配，由 `s_decode_errors` 统计并节流告警。`jpeg.decoder` 标签日志已静默避免逐帧刷屏；`dma2d` 标签与显示路径共用，保持可见。
+- 上板实测残余坏帧约占解码尝试的 15%，且该比例在多种负载配置下基本不变，说明与应用侧 PSRAM 争用无关；怀疑 core 1 周期性中断遮蔽 USB ISR 或摄像头/线缆信号完整性，待单变量实验（USB 任务迁 core 0、换线缆/摄像头）甄别。坏帧被静默丢弃，预览由下一帧补上，画面连续性不受影响。
 
 USB/JPEG/PPA 驱动负责其 DMA 边界，应用层仍显式维护自己写入的 PSRAM：UVC worker 更新预览缓冲后执行 `esp_cache_msync(..., DIR_C2M)`；UI 把预览复制到 LVGL image 自有缓冲后再次写回 cache，再 invalidate 图像对象。后续新增“CPU 写 PSRAM 后交 DMA 读取”的路径也必须在所有权交接点执行同类同步，不能依赖 LVGL 隐式处理。
 
@@ -147,8 +157,9 @@ JC1060P470 原理图没有给 HIGH USB VBUS load switch 提供 ESP32-P4 GPIO ena
 | FULL USB 烧录与日志 | 已使用 | USJ 固定功能，不属于应用层 TinyUSB |
 | CDC Device echo 单路径 | 已上板验证 | 枚举、RX dump、回显和 line state 有既有记录 |
 | UVC 收流 + JPEG 单路径 | 已上板验证 | MJPEG 收流和硬件解码日志有既有记录 |
-| 设备能力枚举与偏好降级 | 已实现，待本轮上板确认 | 需用不同摄像头核对 descriptor 和降级结果 |
-| UVC RGB565 预览、PPA/CPU 回退 | 已实现，编译验证通过 | 需测画面、帧率、耗时和长时间内存稳定性 |
+| UVC 1080p 出流 + 按需解码 | 已上板验证（2026-07） | 1920x1080@30fps 协商命中偏好；按需解码后 5s 窗口 decoded≈20、errors≈3.5（约 15% 解码尝试为链路级坏帧，静默丢弃）；无 uvc-isoc 告警和 buffer overflow |
+| 设备能力枚举与偏好降级 | 偏好命中已上板验证 | 1920x1080@30fps 命中记录在案；降级路径需用不支持偏好的摄像头核对 |
+| UVC RGB565 预览、PPA/CPU 回退 | PPA 路径已上板验证 | 1080p 源 PPA 缩放约 90 ms/次，letterbox 预览正常；CPU 回退和长时间内存稳定性未验证 |
 | 当前 capability/None 重复切换 | 已实现，编译验证通过 | CDC 和 UVC 分别在各自构建中循环验证 DWC、PHY、task 和 buffer 是否完整释放 |
 | 分辨率运行时切换 | 已实现，编译验证通过 | 需覆盖成功、设备不支持和切换中拔出设备 |
 | stall 与三级恢复 | 已实现，编译验证通过 | 需注入停帧、拔插和恢复耗尽场景 |

@@ -212,8 +212,8 @@
 /* Preferred resolution for stream negotiation. Not enforced: if the device
  * does not support this exact resolution, the module falls back to the
  * device's actual maximum supported MJPEG resolution. */
-#define TEST_UVC_PREFER_H_RES                   1280
-#define TEST_UVC_PREFER_V_RES                   720
+#define TEST_UVC_PREFER_H_RES                   1920
+#define TEST_UVC_PREFER_V_RES                   1080
 
 /* Maximum number of frame descriptors the module will enumerate from a single
  * UVC device via uvc_host_get_frame_list(). Must be >= the device's
@@ -224,8 +224,18 @@
 #define TEST_UVC_FRAME_BUF_COUNT                3
 #define TEST_UVC_FRAME_SIZE                     0          /* 0: use dwMaxVideoFrameSize from negotiation */
 #define TEST_UVC_FRAME_HEAP_CAPS                MALLOC_CAP_SPIRAM
-#define TEST_UVC_NUMBER_OF_URBS                 3
-#define TEST_UVC_URB_SIZE                       (10 * 1024)
+/* ISOC URB 缓冲: 每个 URB 容纳 urb_size/MPS(1024) 个等时包, 每包对应一个
+ * 125us microframe。4 x 20KB = 80 个包 = 10ms 缓冲(占内部 DMA RAM 80KB)。
+ * 注意 HCD(hcd_dwc.c) 的 ISOC qTD 环只有 64 槽且每管道仅双缓冲调度:
+ * 单个 URB 不得超过 61 包, URB 总深度也不能盲目加大 —— 实测 8x20KB
+ * 会导致 ISOC 调度绕死、一帧不收(并进一步诱发 CTRL 超时和 usbh 断言
+ * 崩溃), 4x20KB 为实证可用配置, 请勿在未上板验证的情况下加深。 */
+#define TEST_UVC_NUMBER_OF_URBS                 4
+#define TEST_UVC_URB_SIZE                       (20 * 1024)
+
+/* MJPEG 帧尾 EOI(FFD9) 搜索窗口: 部分摄像头在 EOI 后填充 padding 字节,
+ * 完整性校验从帧尾向前在该窗口内查找 EOI。 */
+#define TEST_UVC_MJPEG_EOI_SEARCH_WINDOW        512
 
 #define TEST_UVC_FRAME_QUEUE_LEN                3
 
@@ -261,5 +271,8 @@
 #define TEST_UVC_PREVIEW_H_RES                  896
 #define TEST_UVC_PREVIEW_V_RES                  448
 #define TEST_UVC_PREVIEW_REFRESH_MS             100
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     100
+/* worker 更新预览的最小间隔。1080p 下 PPA 缩放需整读 ~4MB PSRAM 源
+ * (实测 preview 耗时 90ms), 与 JPEG 解码/显示刷新争用 PSRAM 带宽,
+ * 会拉长 ISOC 回调 memcpy 进而诱发丢包截断帧, 故降低预览频率。 */
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     200
 #define TEST_UVC_PPA_BUFFER_ALIGNMENT           128

@@ -17,7 +17,7 @@ GT911 与 RX8025T-UC 的 device handle 使用共享总线的 `400 kHz` 配置；
 | ES8311 音频 | `test_audio` | `y` | 音频卡片 | 已实现播放内置 PCM、录音和录音回放 |
 | 电池 ADC | `test_battery` | `y` | BAT 卡片 | 已实现；百分比只是线性演示值 |
 | USB CDC Device | `test_usb` | USB choice 可选项 | HIGH USB 卡片 | 单路径有上板记录；与 UVC 共享 HIGH USB |
-| USB UVC Host | `test_uvc` | USB choice 默认项 | UVC 独立页面 | 收流/JPEG 有既有记录；最新预览、切换、恢复待上板验证 |
+| USB UVC Host | `test_uvc` | USB choice 默认项 | UVC 独立页面 | 1080p 收流/硬解/PPA 预览已上板验证；按需解码对齐显示率，链路级坏帧约 15% 静默丢弃（见 usb_solution.md）；切换、恢复待上板验证 |
 | USB 角色管理 | `test_usb_role` | 任一 USB choice 项启用 | USB 卡片和 UVC 页面 | 已实现异步切换；启动默认 None |
 | Hosted WiFi | `test_wireless` | `y`，WiFi 子项 `y` | WiFi 卡片和连接对话框 | 扫描/连接有既有上板记录 |
 | Hosted BLE | `test_wireless` | `y`，BLE 子项 `y` | BLE 卡片 | 广播、连接、GATT 测试已实现；最新路径未声明上板通过 |
