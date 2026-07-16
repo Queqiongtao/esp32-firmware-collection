@@ -4,7 +4,7 @@ mod wayland_capture;
 
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -166,10 +166,19 @@ enum VideoSender {
     },
 }
 
+/* FPS and JPEG quality can be retuned while a stream is running; the stream
+   thread reads them every loop iteration. */
+#[derive(Default)]
+struct LiveParams {
+    fps: AtomicU8,
+    quality: AtomicU8,
+}
+
 #[derive(Default)]
 struct StreamState {
     stop: Arc<Mutex<Option<Arc<AtomicBool>>>>,
     event: Arc<Mutex<StreamEvent>>,
+    live: Arc<LiveParams>,
 }
 
 enum CaptureSession {
@@ -186,6 +195,9 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PROTOCOL_VERSION: u8 = 2;
 const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
 const UDP_FRAGMENT_SPACING: Duration = Duration::from_millis(1);
+/* Two ~1.2 KB datagrams per tick stays far below the device's 24-packet
+   receive mailbox while halving per-frame pacing latency. */
+const UDP_FRAGMENTS_PER_TICK: usize = 2;
 const UDP_FRAME_SEND_LIMIT: Duration = Duration::from_millis(120);
 const STATIC_FRAME_INTERVAL: Duration = Duration::from_secs(1);
 const TCP_PRESENTED_POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -364,51 +376,59 @@ fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<Dyna
     Ok(DynamicImage::ImageRgb8(canvas))
 }
 
-fn encode_jpeg(image: &DynamicImage, requested_quality: u8) -> Result<Vec<u8>, String> {
+/* Returns the encoded JPEG and the quality that fit the device limit, so the
+   next frame can start near it instead of re-walking the ladder from the top. */
+fn encode_jpeg(image: &DynamicImage, requested_quality: u8) -> Result<(Vec<u8>, u8), String> {
     for quality in (30..=requested_quality.clamp(30, 95)).rev().step_by(5) {
         let mut output = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut output), quality)
             .encode_image(image)
             .map_err(|error| format!("JPEG encoding failed: {error}"))?;
         if output.len() <= protocol::MAX_JPEG_BYTES {
-            return Ok(output);
+            return Ok((output, quality));
         }
     }
     Err("JPEG remains larger than the device 100 KiB limit".to_string())
 }
 
+/* Crop, scale, and letterbox a raw capture to the device canvas. PipeWire
+   frames arrive already transformed, so they pass through untouched. */
+#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+fn prepare_image(
+    image: DynamicImage,
+    session: &CaptureSession,
+    config: &StreamConfig,
+) -> Result<DynamicImage, String> {
+    #[cfg(target_os = "linux")]
+    if matches!(session, CaptureSession::PipeWire(_)) {
+        return Ok(image);
+    }
+    crop_and_letterbox(image, config)
+}
+
+fn encode_prepared_frame(
+    image: &DynamicImage,
+    jpeg_quality: u8,
+    sequence: u32,
+) -> Result<(Vec<u8>, usize, u8), String> {
+    let (jpeg, used_quality) = encode_jpeg(image, jpeg_quality)?;
+    let jpeg_bytes = jpeg.len();
+    Ok((
+        protocol::encode_frame(sequence, &jpeg)?,
+        jpeg_bytes,
+        used_quality,
+    ))
+}
+
+#[cfg(test)]
 fn build_frame(
     image: DynamicImage,
     config: &StreamConfig,
     sequence: u32,
 ) -> Result<(Vec<u8>, usize), String> {
     let image = crop_and_letterbox(image, config)?;
-    let jpeg = encode_jpeg(&image, config.jpeg_quality)?;
-    let jpeg_bytes = jpeg.len();
-    Ok((protocol::encode_frame(sequence, &jpeg)?, jpeg_bytes))
-}
-
-fn build_prepared_frame(
-    image: DynamicImage,
-    jpeg_quality: u8,
-    sequence: u32,
-) -> Result<(Vec<u8>, usize), String> {
-    let jpeg = encode_jpeg(&image, jpeg_quality)?;
-    let jpeg_bytes = jpeg.len();
-    Ok((protocol::encode_frame(sequence, &jpeg)?, jpeg_bytes))
-}
-
-fn build_capture_frame(
-    image: DynamicImage,
-    session: &CaptureSession,
-    config: &StreamConfig,
-    sequence: u32,
-) -> Result<(Vec<u8>, usize), String> {
-    #[cfg(target_os = "linux")]
-    if matches!(session, CaptureSession::PipeWire(_)) {
-        return build_prepared_frame(image, config.jpeg_quality, sequence);
-    }
-    build_frame(image, config, sequence)
+    let (frame, jpeg_bytes, _) = encode_prepared_frame(&image, config.jpeg_quality, sequence)?;
+    Ok((frame, jpeg_bytes))
 }
 
 fn open_capture_session(
@@ -513,6 +533,41 @@ fn capture_next_optional(
 
 fn image_fingerprint(image: &DynamicImage) -> u32 {
     crc32fast::hash(image.to_rgb8().as_raw())
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let bits = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        output.push(ALPHABET[(bits >> 18) as usize & 63] as char);
+        output.push(ALPHABET[(bits >> 12) as usize & 63] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[(bits >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[bits as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    output
+}
+
+const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
+
+/* Mirrors the most recently sent JPEG into the UI so the user can confirm
+   what the device shows without looking at it. */
+fn emit_preview(app: &AppHandle, frame: &[u8], last_preview: &mut Instant) {
+    if last_preview.elapsed() < PREVIEW_INTERVAL || frame.len() <= protocol::HEADER_LEN {
+        return;
+    }
+    *last_preview = Instant::now();
+    let _ = app.emit("stream-preview", base64_encode(&frame[protocol::HEADER_LEN..]));
 }
 
 fn replay_frame(frame: &[u8], sequence: u32) -> Result<Vec<u8>, String> {
@@ -1074,7 +1129,7 @@ fn send_video_frame(
                 if index > 0 && started.elapsed() > UDP_FRAME_SEND_LIMIT {
                     return Err("UDP frame exceeded the 120 ms send budget".to_string());
                 }
-                if index + 1 < fragment_count {
+                if index + 1 < fragment_count && (index + 1) % UDP_FRAGMENTS_PER_TICK == 0 {
                     thread::sleep(UDP_FRAGMENT_SPACING);
                 }
             }
@@ -1098,11 +1153,19 @@ fn run_stream(
     app: AppHandle,
     config: StreamConfig,
     stop: Arc<AtomicBool>,
+    live: Arc<LiveParams>,
     mut socket: WebSocket<TcpStream>,
     mut sender: VideoSender,
 ) -> u32 {
     let video_transport = config.video_transport.as_str();
-    let frame_interval = Duration::from_millis(1000 / u64::from(config.fps.clamp(1, 30)));
+    let mut fps = config.fps.clamp(1, 30);
+    let mut jpeg_quality = config.jpeg_quality.clamp(30, 95);
+    live.fps.store(fps, Ordering::Relaxed);
+    live.quality.store(jpeg_quality, Ordering::Relaxed);
+    let mut frame_interval = Duration::from_millis(1000 / u64::from(fps));
+    /* Start each encode near the last quality that fit the 100 KiB limit
+       instead of re-walking the ladder from the user setting every frame. */
+    let mut adaptive_quality = jpeg_quality;
     let mut dropped_frames = 0_u32;
     let mut heartbeat = if matches!(sender, VideoSender::Udp { .. }) {
         if let Err(error) = configure_udp_control_socket(&mut socket) {
@@ -1156,10 +1219,17 @@ fn run_stream(
         return dropped_frames;
     }
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
-    let first_fingerprint = image_fingerprint(&image);
     let encode_started = Instant::now();
-    let (frame, jpeg_bytes) = match build_capture_frame(image, &capture, &config, sequence) {
-        Ok(frame) => frame,
+    let (frame, jpeg_bytes, first_fingerprint): (Vec<u8>, usize, u32) = match prepare_image(image, &capture, &config)
+        .and_then(|prepared| {
+            let fingerprint = image_fingerprint(&prepared);
+            encode_prepared_frame(&prepared, adaptive_quality, sequence)
+                .map(|(frame, jpeg_bytes, used_quality)| (frame, jpeg_bytes, used_quality, fingerprint))
+        }) {
+        Ok((frame, jpeg_bytes, used_quality, fingerprint)) => {
+            adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
+            (frame, jpeg_bytes, fingerprint)
+        }
         Err(error) => {
             if !stop.load(Ordering::Relaxed) {
                 emit(
@@ -1179,6 +1249,8 @@ fn run_stream(
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
     let mut cached_frame = frame.clone();
     let mut last_fingerprint = first_fingerprint;
+    let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
+    emit_preview(&app, &frame, &mut last_preview);
     emit(
         &app,
         "frame ready",
@@ -1253,6 +1325,18 @@ fn run_stream(
             thread::sleep(next_frame - now);
         }
         next_frame = Instant::now() + frame_interval;
+        let live_fps = live.fps.load(Ordering::Relaxed).clamp(1, 30);
+        if live_fps != fps {
+            fps = live_fps;
+            frame_interval = Duration::from_millis(1000 / u64::from(fps));
+        }
+        let live_quality = live.quality.load(Ordering::Relaxed).clamp(30, 95);
+        if live_quality != jpeg_quality {
+            jpeg_quality = live_quality;
+            adaptive_quality = jpeg_quality;
+            /* Force a re-encode so the new quality applies to a static scene too. */
+            last_fingerprint = last_fingerprint.wrapping_add(1);
+        }
         if let Some(heartbeat) = heartbeat.as_mut() {
             if let Err(reason) = service_udp_control(&mut socket, heartbeat) {
                 match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames) {
@@ -1288,17 +1372,41 @@ fn run_stream(
             }
         };
         let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
-        let mut static_frame = image.is_none();
         let encode_started = Instant::now();
-        let (frame, jpeg_bytes) = match image {
-            Some(image) if image_fingerprint(&image) != last_fingerprint => {
-                let fingerprint = image_fingerprint(&image);
-                match build_capture_frame(image, &capture, &config, sequence) {
-                    Ok(frame) => {
-                        cached_frame = frame.0.clone();
+        /* Fingerprint the already cropped/scaled 368x448 image exactly once
+           per captured frame; a raw desktop-sized hash costs far more. */
+        let prepared = match image {
+            Some(image) => match prepare_image(image, &capture, &config) {
+                Ok(prepared) => {
+                    let fingerprint = image_fingerprint(&prepared);
+                    (fingerprint != last_fingerprint).then_some((prepared, fingerprint))
+                }
+                Err(error) => {
+                    dropped_frames += 1;
+                    emit(
+                        &app,
+                        "dropping",
+                        error,
+                        0,
+                        0,
+                        dropped_frames,
+                        video_transport,
+                    );
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let static_frame = prepared.is_none();
+        let (frame, jpeg_bytes): (Vec<u8>, usize) = match prepared {
+            Some((prepared, fingerprint)) => {
+                match encode_prepared_frame(&prepared, adaptive_quality, sequence) {
+                    Ok((frame, jpeg_bytes, used_quality)) => {
+                        adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
+                        cached_frame = frame.clone();
                         last_fingerprint = fingerprint;
                         static_frames = 0;
-                        frame
+                        (frame, jpeg_bytes)
                     }
                     Err(error) => {
                         dropped_frames += 1;
@@ -1315,19 +1423,6 @@ fn run_stream(
                     }
                 }
             }
-            Some(_) => {
-                static_frame = true;
-                if last_video_sent.elapsed() < STATIC_FRAME_INTERVAL {
-                    continue;
-                }
-                match replay_frame(&cached_frame, sequence) {
-                    Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN),
-                    Err(error) => {
-                        emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
-                        break;
-                    }
-                }
-            }
             None => {
                 if last_video_sent.elapsed() < STATIC_FRAME_INTERVAL {
                     continue;
@@ -1341,6 +1436,7 @@ fn run_stream(
                 }
             }
         };
+        emit_preview(&app, &frame, &mut last_preview);
         if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
             if matches!(sender, VideoSender::Udp { .. }) {
                 match reconnect_udp_control(&app, &config, &stop, &error, dropped_frames) {
@@ -1423,7 +1519,7 @@ fn run_stream(
             } else {
                 "Sending TCP video frames".to_string()
             },
-            config.fps.clamp(1, 30),
+            fps,
             jpeg_bytes,
             dropped_frames,
             video_transport,
@@ -1549,11 +1645,12 @@ fn start_wifi_stream(
     *guard = Some(stop.clone());
     drop(guard);
     let controller = state.stop.clone();
+    let live = state.live.clone();
     let final_app = app.clone();
     let final_transport = config.video_transport.clone();
     let final_stop = stop.clone();
     thread::spawn(move || {
-        let dropped_frames = run_stream(app, config, stop, socket, sender);
+        let dropped_frames = run_stream(app, config, stop, live, socket, sender);
         if let Ok(mut active) = controller.lock() {
             *active = None;
         }
@@ -1569,6 +1666,19 @@ fn start_wifi_stream(
             );
         }
     });
+    Ok(())
+}
+
+#[tauri::command]
+fn set_stream_params(fps: u8, jpeg_quality: u8, state: State<'_, StreamState>) -> Result<(), String> {
+    if !(1..=30).contains(&fps) {
+        return Err("FPS must be between 1 and 30".to_string());
+    }
+    if !(30..=95).contains(&jpeg_quality) {
+        return Err("JPEG quality must be between 30 and 95".to_string());
+    }
+    state.live.fps.store(fps, Ordering::Relaxed);
+    state.live.quality.store(jpeg_quality, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1616,6 +1726,7 @@ fn main() {
             probe_wifi_device,
             get_stream_status,
             start_wifi_stream,
+            set_stream_params,
             stop_wifi_stream
         ])
         .run(tauri::generate_context!())
@@ -1628,8 +1739,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        active_stream_error, build_frame, parse_http_response, replay_frame, static_color_bars,
-        StreamConfig,
+        active_stream_error, base64_encode, build_frame, encode_jpeg, parse_http_response,
+        replay_frame, static_color_bars, StreamConfig,
     };
     use crate::protocol;
 
@@ -1722,6 +1833,23 @@ mod tests {
             parse_http_response(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").is_err()
         );
         assert!(parse_http_response(b"HTTP/1.1 200 OK\r\n\r\n").is_err());
+    }
+
+    #[test]
+    fn base64_matches_reference_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn encode_jpeg_reports_the_quality_that_fit() {
+        let (jpeg, used_quality) = encode_jpeg(&static_color_bars(), 80).unwrap();
+        assert!(!jpeg.is_empty());
+        assert!(jpeg.len() <= protocol::MAX_JPEG_BYTES);
+        assert!((30..=80).contains(&used_quality));
     }
 
     #[test]

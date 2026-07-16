@@ -15,7 +15,6 @@ const token = byId<HTMLInputElement>("token");
 const source = byId<HTMLSelectElement>("source");
 const sourceSummary = byId<HTMLDivElement>("source-summary");
 const status = byId<HTMLParagraphElement>("status");
-const metrics = byId<HTMLParagraphElement>("metrics");
 const devicePill = byId<HTMLSpanElement>("device-pill");
 const streamPill = byId<HTMLSpanElement>("stream-pill");
 const readyLabel = byId<HTMLSpanElement>("ready-label");
@@ -36,12 +35,31 @@ const regionHeight = byId<HTMLInputElement>("region-height");
 const fps = byId<HTMLInputElement>("fps");
 const quality = byId<HTMLInputElement>("quality");
 const videoTransport = byId<HTMLSelectElement>("video-transport");
+const preview = byId<HTMLImageElement>("preview");
+const previewEmpty = byId<HTMLSpanElement>("preview-empty");
+const metricTransport = byId<HTMLElement>("m-transport");
+const metricFps = byId<HTMLElement>("m-fps");
+const metricCapture = byId<HTMLElement>("m-capture");
+const metricEncode = byId<HTMLElement>("m-encode");
+const metricDevice = byId<HTMLElement>("m-device");
+const metricReplaced = byId<HTMLElement>("m-replaced");
+const metricDropped = byId<HTMLElement>("m-dropped");
+const metricLimited = byId<HTMLElement>("m-limited");
+
+const SETTINGS_KEY = "companion-display.settings.v1";
+const SLOW_STAGE_MS = 40;
+const PROBE_DEBOUNCE_MS = 800;
+const PARAMS_DEBOUNCE_MS = 300;
+const DEVICE_POLL_MS = 2000;
 
 const sourcesById = new Map<string, CaptureSource>();
 let lastDevice: DeviceStatus | null = null;
 let streamActive = false;
 let streamStopping = false;
 let stoppingStatusPoll: number | null = null;
+let probeTimer: number | null = null;
+let paramsTimer: number | null = null;
+let lastDevicePoll = 0;
 
 function setPill(element: HTMLElement, text: string, tone: "muted" | "good" | "warn" | "bad" | "active") {
   element.textContent = text;
@@ -65,6 +83,50 @@ function sanitizeToken() {
   token.value = token.value.replace(/\D/g, "").slice(0, 6);
 }
 
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      endpoint: endpoint.value,
+      token: token.value,
+      fps: fps.value,
+      quality: quality.value,
+      videoTransport: videoTransport.value,
+      cropEnabled: cropEnabled.checked,
+      regionX: regionX.value,
+      regionY: regionY.value,
+      regionWidth: regionWidth.value,
+      regionHeight: regionHeight.value,
+    }));
+  } catch {
+    /* Private mode or blocked storage never blocks streaming. */
+  }
+}
+
+function restoreSettings() {
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(SETTINGS_KEY);
+  } catch {
+    return;
+  }
+  if (!raw) return;
+  try {
+    const saved = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof saved.endpoint === "string") endpoint.value = saved.endpoint;
+    if (typeof saved.token === "string") token.value = saved.token;
+    if (typeof saved.fps === "string") fps.value = saved.fps;
+    if (typeof saved.quality === "string") quality.value = saved.quality;
+    if (typeof saved.videoTransport === "string") videoTransport.value = saved.videoTransport;
+    if (typeof saved.cropEnabled === "boolean") cropEnabled.checked = saved.cropEnabled;
+    if (typeof saved.regionX === "string") regionX.value = saved.regionX;
+    if (typeof saved.regionY === "string") regionY.value = saved.regionY;
+    if (typeof saved.regionWidth === "string") regionWidth.value = saved.regionWidth;
+    if (typeof saved.regionHeight === "string") regionHeight.value = saved.regionHeight;
+  } catch {
+    /* Ignore corrupted settings. */
+  }
+}
+
 function selectedSource() {
   return sourcesById.get(source.value) ?? null;
 }
@@ -86,12 +148,24 @@ function validationMessage() {
   return "";
 }
 
+/* Address, pairing code, source, and transport only apply at Start; lock them
+   while streaming. FPS and quality stay editable and apply live. */
+function updateLockedInputs() {
+  const locked = streamActive || streamStopping;
+  for (const input of [endpoint, token, source, videoTransport, cropEnabled, regionX, regionY, regionWidth, regionHeight]) {
+    input.disabled = locked;
+  }
+  refresh.disabled = locked;
+  checkDevice.disabled = locked;
+}
+
 function updateReadyState() {
   const message = validationMessage();
   start.disabled = streamActive || streamStopping || Boolean(message);
   stop.disabled = !streamActive || streamStopping;
   readyLabel.textContent = streamStopping ? "Stopping" : streamActive ? "Streaming" : message || "Ready";
   readyLabel.dataset.tone = streamActive || streamStopping ? "active" : message ? "warn" : "good";
+  updateLockedInputs();
 }
 
 function stopStoppingStatusPoll() {
@@ -125,6 +199,19 @@ function updateSourceSummary() {
   updateReadyState();
 }
 
+function clearPreview() {
+  preview.hidden = true;
+  preview.removeAttribute("src");
+  previewEmpty.hidden = false;
+}
+
+function friendlyError(message: string) {
+  if (message.includes("device_busy")) return `${message} — press Stop in the other client or restart the device.`;
+  if (message.includes("not_negotiated")) return `${message} — restart the stream to renegotiate.`;
+  if (message.includes("unsupported_protocol")) return `${message} — flash matching v2 firmware.`;
+  return message;
+}
+
 function applyDevice(device: DeviceStatus) {
   lastDevice = device;
   const online = device.wifi === "connected" && device.activeTransport === "none";
@@ -141,6 +228,22 @@ function applyDevice(device: DeviceStatus) {
   updateReadyState();
 }
 
+function applyMetrics(payload: StreamEvent) {
+  metricTransport.textContent = payload.videoTransport === "none" ? "--" : payload.videoTransport.toUpperCase();
+  metricFps.textContent = String(payload.fps);
+  metricCapture.textContent = `${payload.captureWaitMs} ms`;
+  metricEncode.textContent = `${payload.captureEncodeMs} ms`;
+  metricDevice.textContent = `${payload.deviceMs} ms`;
+  metricReplaced.textContent = String(payload.deviceReplacedFrames);
+  metricDropped.textContent = String(payload.droppedFrames);
+  metricCapture.classList.toggle("slow", payload.captureWaitMs > SLOW_STAGE_MS);
+  metricEncode.classList.toggle("slow", payload.captureEncodeMs > SLOW_STAGE_MS);
+  metricDevice.classList.toggle("slow", payload.deviceMs > SLOW_STAGE_MS);
+  metricLimited.hidden = payload.captureWaitMs <= SLOW_STAGE_MS
+    && payload.captureEncodeMs <= SLOW_STAGE_MS
+    && payload.deviceMs <= SLOW_STAGE_MS;
+}
+
 function applyStreamStatus(payload: StreamEvent) {
   if (payload.state === "idle") return;
   const state = payload.state.toLowerCase();
@@ -155,13 +258,14 @@ function applyStreamStatus(payload: StreamEvent) {
     lastDevice = null;
     setPill(devicePill, "Device unchecked", "muted");
     deviceTransport.textContent = "--";
+    clearPreview();
   } else if (failed) {
     stopStoppingStatusPoll();
+    clearPreview();
   }
   setPill(streamPill, stopped ? "Stopped" : payload.state, failed ? "bad" : warning ? "warn" : streamActive ? "active" : "muted");
-  setStatus(`${payload.state}: ${payload.detail}`, failed ? "bad" : warning ? "warn" : stopped ? "normal" : "good");
-  const slow = payload.captureWaitMs > 40 || payload.captureEncodeMs > 40 || payload.deviceMs > 40;
-  metrics.textContent = `${payload.videoTransport.toUpperCase()} | FPS ${payload.fps} | Capture ${payload.captureWaitMs} ms | Encode ${payload.captureEncodeMs} ms | Device ${payload.deviceMs} ms | Replaced ${payload.deviceReplacedFrames} | Dropped ${payload.droppedFrames}${slow ? " | Performance limited" : ""}`;
+  setStatus(`${payload.state}: ${friendlyError(payload.detail)}`, failed ? "bad" : warning ? "warn" : stopped ? "normal" : "good");
+  applyMetrics(payload);
   updateReadyState();
 }
 
@@ -173,6 +277,48 @@ async function probeDevice() {
   if (device.activeTransport !== "none") throw new Error(`Device is busy with ${device.activeTransport} transport`);
   if (device.wifi !== "connected") throw new Error("Device Wi-Fi is not connected");
   return device;
+}
+
+async function checkDeviceNow() {
+  setPill(devicePill, "Checking", "active");
+  deviceStatus.textContent = "Checking device...";
+  try {
+    await probeDevice();
+    setStatus("Device is reachable", "good");
+  } catch (error) {
+    lastDevice = null;
+    setPill(devicePill, "Device unavailable", "bad");
+    deviceStatus.textContent = String(error);
+    deviceWifi.textContent = "--";
+    deviceScreen.textContent = "--";
+    deviceTransport.textContent = "--";
+    setStatus(String(error), "bad");
+  } finally {
+    updateReadyState();
+  }
+}
+
+/* Re-probe automatically once the user stops editing the address or code. */
+function scheduleProbe() {
+  if (probeTimer !== null) window.clearTimeout(probeTimer);
+  probeTimer = window.setTimeout(() => {
+    probeTimer = null;
+    if (streamActive || streamStopping) return;
+    if (!normalizeEndpoint(endpoint.value) || token.value.length !== 6) return;
+    checkDeviceNow().catch(() => undefined);
+  }, PROBE_DEBOUNCE_MS);
+}
+
+function scheduleParamsUpdate() {
+  if (paramsTimer !== null) window.clearTimeout(paramsTimer);
+  paramsTimer = window.setTimeout(() => {
+    paramsTimer = null;
+    if (!streamActive || streamStopping) return;
+    const nextFps = Math.min(30, Math.max(1, Number(fps.value) || 25));
+    const nextQuality = Math.min(95, Math.max(30, Number(quality.value) || 70));
+    invoke("set_stream_params", { fps: nextFps, jpegQuality: nextQuality })
+      .catch((error) => setStatus(String(error), "warn"));
+  }, PARAMS_DEBOUNCE_MS);
 }
 
 async function refreshDeviceDiagnostics() {
@@ -214,23 +360,7 @@ refresh.onclick = () => refreshSources();
 
 checkDevice.onclick = async () => {
   checkDevice.disabled = true;
-  setPill(devicePill, "Checking", "active");
-  deviceStatus.textContent = "Checking device...";
-  try {
-    await probeDevice();
-    setStatus("Device is reachable", "good");
-  } catch (error) {
-    lastDevice = null;
-    setPill(devicePill, "Device unavailable", "bad");
-    deviceStatus.textContent = String(error);
-    deviceWifi.textContent = "--";
-    deviceScreen.textContent = "--";
-    deviceTransport.textContent = "--";
-    setStatus(String(error), "bad");
-  } finally {
-    checkDevice.disabled = false;
-    updateReadyState();
-  }
+  await checkDeviceNow();
 };
 
 start.onclick = async () => {
@@ -240,16 +370,15 @@ start.onclick = async () => {
     updateReadyState();
     return;
   }
+  saveSettings();
   start.disabled = true;
   stop.disabled = false;
   streamActive = true;
   streamStopping = false;
   setPill(streamPill, "Starting", "active");
-  setStatus("Checking device before streaming...");
-  metrics.textContent = "UDP | FPS 0 | Capture 0 ms | Encode 0 ms | Device 0 ms | Replaced 0 | Dropped 0";
+  setStatus("Opening Wi-Fi stream...");
   try {
-    await probeDevice();
-    setStatus("Opening Wi-Fi stream...");
+    /* start_wifi_stream probes the device itself; no separate probe here. */
     await invoke("start_wifi_stream", {
       config: {
         endpoint: normalizeEndpoint(endpoint.value),
@@ -282,7 +411,7 @@ start.onclick = async () => {
       stopStoppingStatusPoll();
       setPill(streamPill, "Error", "bad");
     }
-    setStatus(message, streamActive ? "warn" : "bad");
+    setStatus(friendlyError(message), streamActive ? "warn" : "bad");
     updateReadyState();
   }
 };
@@ -312,30 +441,61 @@ endpoint.addEventListener("blur", () => {
 endpoint.addEventListener("input", () => {
   lastDevice = null;
   setPill(devicePill, "Device unchecked", "muted");
+  saveSettings();
+  scheduleProbe();
   updateReadyState();
 });
 token.addEventListener("input", () => {
   sanitizeToken();
+  saveSettings();
+  scheduleProbe();
   updateReadyState();
 });
 source.addEventListener("change", updateSourceSummary);
 cropEnabled.addEventListener("change", () => {
   cropFields.hidden = !cropEnabled.checked;
+  saveSettings();
 });
-for (const input of [fps, quality, regionX, regionY, regionWidth, regionHeight, videoTransport]) {
-  input.addEventListener("input", updateReadyState);
+videoTransport.addEventListener("change", saveSettings);
+for (const input of [fps, quality]) {
+  input.addEventListener("input", () => {
+    saveSettings();
+    scheduleParamsUpdate();
+    updateReadyState();
+  });
+}
+for (const input of [regionX, regionY, regionWidth, regionHeight]) {
+  input.addEventListener("input", () => {
+    saveSettings();
+    updateReadyState();
+  });
 }
 
 async function initialize() {
+  restoreSettings();
   sanitizeToken();
   endpoint.value = normalizeEndpoint(endpoint.value);
   cropFields.hidden = !cropEnabled.checked;
   await listen<StreamEvent>("stream-status", ({ payload }) => applyStreamStatus(payload));
+  await listen<string>("stream-preview", ({ payload }) => {
+    preview.src = `data:image/jpeg;base64,${payload}`;
+    preview.hidden = false;
+    previewEmpty.hidden = true;
+  });
   await refreshSources();
   window.setInterval(() => {
     invoke<StreamEvent>("get_stream_status").then(applyStreamStatus).catch(() => undefined);
-    if (streamActive) refreshDeviceDiagnostics().catch(() => undefined);
+    /* TCP already reports device timings per frame; only UDP needs the
+       HTTP diagnostics, and 2 s keeps the device HTTP server quiet. */
+    const now = Date.now();
+    if (streamActive && videoTransport.value === "udp" && now - lastDevicePoll >= DEVICE_POLL_MS) {
+      lastDevicePoll = now;
+      refreshDeviceDiagnostics().catch(() => undefined);
+    }
   }, 300);
+  if (normalizeEndpoint(endpoint.value) && token.value.length === 6) {
+    checkDeviceNow().catch(() => undefined);
+  }
   updateReadyState();
 }
 

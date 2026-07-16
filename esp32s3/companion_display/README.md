@@ -41,9 +41,11 @@ npm run tauri:dev
 
 1. 给设备烧录与客户端同一版本的 `companion_display` 固件。
 2. 连接设备创建的 `Companion-XXXX` 热点，在浏览器访问 `http://192.168.4.1/`，让设备接入 PC 所在局域网。
-3. 确认设备屏幕显示的局域网 IP 和六位配对码。客户端默认填写 `ws://192.168.51.205/stream` 和 `728211`；设备信息不同时以屏幕显示为准。
-4. 点击 `Check`，确认状态为可连接。首次联调选择 TCP 和 `Static color bars`，再点击 `Start Wi-Fi Stream` 验证网络、JPEG 和显示链路。
+3. 按设备屏幕显示的局域网 IP 和六位配对码填写客户端的 `Address` 与 `Pairing code`。填写完成约 1 秒后客户端自动检查设备可达性，也可点击 `Check` 立即检查；地址、配对码和流参数会保存在本机，下次启动自动恢复并自动检查。
+4. 确认状态为可连接后，首次联调选择 TCP 和 `Static color bars`，再点击 `Start Wi-Fi Stream` 验证网络、JPEG 和显示链路。Stream 面板下方的预览图显示最近发送到设备的画面，应与设备屏幕一致。
 5. 基础链路正常后点击 `Stop`，选择真实屏幕来源。Linux 选择 `Portal`，在系统弹窗中选择要共享的屏幕或窗口；实时画面推荐 UDP、25 FPS、JPEG 质量 70。
+
+流运行期间可以直接修改 FPS 和 JPEG 质量，约 0.3 秒后生效，无需停止再启动；地址、配对码、采集来源和传输方式在流运行期间锁定，修改它们需要先 `Stop`。Portal/PipeWire 的采集帧率在启动流时协商，流中将 FPS 调高到超过启动值时，实际帧率可能受采集端限制，重新启动流即可按新值协商。
 
 关闭开发窗口会停止客户端。后续仍在同一目录执行 `npm run tauri:dev` 即可启动。需要生成发布包时执行：
 
@@ -55,7 +57,7 @@ npm run tauri:build
 
 Linux 客户端会在 WebKitGTK 初始化前自动设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。这用于规避 Wayland 下部分虚拟 GPU 或显卡驱动的 DMA-BUF 合成兼容问题；该问题会使客户端窗口出现固定颜色杂块。此设置只影响客户端界面渲染，不影响 Portal/PipeWire 采集、JPEG 编码或视频传输。
 
-客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；质量可在 30 到 95 之间调整，单帧编码结果超过 100 KiB 时客户端会按 5 为步长自动降低该帧质量重新编码，直到装入限制，降到 30 仍超限才丢弃该帧。采集画面会等比例缩放到设备可容纳的最大尺寸，不拉伸、不裁剪，并只在宽高比不一致时居中补齐必要黑边。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；选择单个窗口时，客户端优先请求标准 `SPA_META_VideoCrop` 有效区域，没有该元数据时再尝试 BGRA/RGBA Alpha，从 GNOME Portal 的透明全屏画布中识别真正的窗口主体。窗口内部的黑色内容不会被误裁，手动 Crop 坐标相对于识别后的窗口区域。Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态栏会分别显示采集等待、编码和设备耗时及替换帧数；TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
+客户端输出固定为 `368x448` JPEG，最多 30 FPS，JPEG 负载最多 100 KiB。默认使用 25 FPS、JPEG 质量 70；质量可在 30 到 95 之间调整，单帧编码结果超过 100 KiB 时客户端会按 5 为步长自动降低该帧质量重新编码，直到装入限制，降到 30 仍超限才丢弃该帧。采集画面会等比例缩放到设备可容纳的最大尺寸，不拉伸、不裁剪，并只在宽高比不一致时居中补齐必要黑边。Linux 的真实画面采集统一通过系统 Portal/PipeWire 对话框选择屏幕或窗口，不使用逐帧 XCap 抓屏；选择单个窗口时，客户端优先请求标准 `SPA_META_VideoCrop` 有效区域，没有该元数据时再尝试 BGRA/RGBA Alpha，从 GNOME Portal 的透明全屏画布中识别真正的窗口主体。窗口内部的黑色内容不会被误裁，手动 Crop 坐标相对于识别后的窗口区域。Portal 会将共享区域内的鼠标光标嵌入视频帧，随后与画面一起裁剪和缩放，光标在裁剪区域外时不会显示。PipeWire 回调直接生成设备尺寸图像，避免复制完整桌面；需要支持嵌入式光标的 `xdg-desktop-portal` 与桌面后端，否则客户端会拒绝启动共享。状态区以独立指标格显示传输方式、FPS、采集等待、编码、设备耗时、替换与丢弃帧数；任一耗时超过 40 ms 时对应指标变红并显示 `Performance limited`。TCP 模式一次只允许一帧在途，避免可靠传输累积旧画面。
 
 部分 GNOME Portal 后端即使选择了单个窗口，仍会报告全屏大小的 Portal/PipeWire 外层画布。客户端会读取每帧的 `SPA_META_VideoCrop`，只处理其中声明的窗口有效区域。正常日志类似：
 
@@ -83,7 +85,7 @@ Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 
 
 实时画面推荐使用 UDP、25 FPS 和 JPEG 质量 70。Linux 必须选择 `Portal` 系统对话框来源；`Static color bars` 只用于验证编码、网络和显示链路，不能代表真实桌面采集延迟。
 
-状态栏中的 `Capture` 是等待最新采集图像的时间，`Encode` 是 JPEG 编码与帧封装时间，`Device` 是设备报告的排队、解码和 LCD 提交时间。三项通常应各自低于 40 ms；任一项持续超过该值时会显示 `Performance limited`。`Capture` 超过 500 ms 时，优先停止流并重新建立 Portal 共享会话，而不是调整设备端参数。
+指标格中的 `Capture` 是等待最新采集图像的时间，`Encode` 是 JPEG 编码与帧封装时间，`Device` 是设备报告的排队、解码和 LCD 提交时间。三项通常应各自低于 40 ms；任一项持续超过该值时对应指标变红并显示 `Performance limited`。`Capture` 超过 500 ms 时，优先停止流并重新建立 Portal 共享会话，而不是调整设备端参数。UDP 分片发送节奏为每毫秒最多 2 片，单帧发送预算 120 ms 不变。
 
 实机运行时，设备状态中的 `completedFrames` 与 `submittedFrames` 应持续增长且接近；`reassemblyTimeouts` 不应持续快速增长。出现少量 UDP 丢帧是允许的，但画面不应持续落后。
 
@@ -92,7 +94,7 @@ Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 
 - Linux 客户端窗口出现固定颜色杂块时，确认使用的是当前版本客户端。当前版本会自动禁用 WebKitGTK DMA-BUF 渲染；使用旧版本时可通过 `WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri:dev` 验证。该现象与 ESP32 屏幕画面和视频传输链路无关。
 - 先用 TCP 和 `Static color bars` 验证基础链路。设备显示 `TCP VIDEO` 或 `RECEIVING FRAME` 即表示已进入视频接收。
 - Portal 选择单个窗口后仍看到整屏黑色背景时，检查终端是否打印 `PipeWire VideoCrop`。有该日志时以其矩形为实际窗口范围；只有 `Window alpha fallback` 而没有 `PipeWire VideoCrop` 时，说明当前桌面 Portal 后端未提供可精确裁取的窗口边界。
-- UDP 无画面时，查看设备串口的 `UDP stats`。`rx` 增长说明数据已到设备；`accepted` 为零时查看 `last` 拒绝原因；`submitted` 增长才表示完整帧已进入显示管线。发送端会以 1 ms 间隔发送分片，并限制单帧发送在 120 ms 内；设备 UDP 邮箱为 24 包，持续 `timeout` 仍表示 Wi-Fi 丢包或发送端负载过高。
+- UDP 无画面时，查看设备串口的 `UDP stats`。`rx` 增长说明数据已到设备；`accepted` 为零时查看 `last` 拒绝原因；`submitted` 增长才表示完整帧已进入显示管线。发送端以每毫秒最多 2 片的节奏发送分片，并限制单帧发送在 120 ms 内；设备 UDP 邮箱为 24 包，持续 `timeout` 仍表示 Wi-Fi 丢包或发送端负载过高。
 - `accepted` 增长而 `completed` 不增长：完整帧有分片丢失、被较新帧替换，或发送端未在预算内发完。`completed` 增长而 `submitted` 不增长：完整帧已收齐，但 `CDP1` 校验或显示管线提交失败。
 - `source_ip`：UDP 来源地址与已绑定地址不一致。PC 必须将 UDP socket 绑定到 WebSocket 控制连接使用的本机 IPv4；重新启动流可创建新会话。
 - `bad CRC`：完整 `CDP1` 帧的 JPEG CRC 校验失败。检查发送端和固件是否使用同一协议版本，或先改用 TCP 确认编码链路。
