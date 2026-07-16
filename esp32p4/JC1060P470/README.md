@@ -100,7 +100,7 @@ Run `idf.py menuconfig` and go to `Example Configuration`:
 * Choose `esp_lvgl_adapter tear avoidance mode`. The default is `DOUBLE_DIRECT`; `TRIPLE_PARTIAL` and `DOUBLE_FULL` are available for controlled comparison.
 * Enable `Bypass PWM and force backlight always on` if you need to distinguish backlight PWM flicker from display timing or panel instability.
 * Adjust `LVGL draw buffer lines` and `LVGL draw buffer memory` to compare PSRAM/internal RAM tradeoffs without changing source code.
-* Enable `WiFi/BLE test module` if you want the integrated demo UI to show the wireless card and initialize the hosted WiFi test path over the on-board `ESP32-C6`.
+* Enable `WiFi/BLE test module` to initialize the shared hosted transport over the on-board `ESP32-C6`. The WiFi status/actions and BLE status/actions sub-options are independent, so WiFi-only, BLE-only, and combined WiFi+BLE builds are all supported; the demo UI enables only the capabilities compiled into the firmware.
 * Select the single HIGH USB capability. The default is UVC Host; CDC Device is an alternative build-time choice. The role worker normally starts at None and occupies controller[0] after a UI request; automatic UVC recovery after an interrupted warm reset is the documented exception.
 * For the two-chip WiFi path, set `Component config -> Wi-Fi Remote -> choose slave target` to `esp32c6`.
 
@@ -216,10 +216,10 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 
 ```bash
 ...
+I (21xx) board_i2c: Shared I2C ready: port=1 SDA=7 SCL=8
 I (22xx) display_lvgl: Initialize LVGL via esp_lvgl_adapter
 I (22xx) display_lvgl: LVGL v9.4.0 lvgl_builtin_ppa=0 DMA2D_hook=1 adapter_ppa=1 tear=DOUBLE_DIRECT num_fbs=2 lane=750Mbps dpi=54MHz
 I (22xx) app_main: Display LVGL integrated demo UI (static patch font)
-I (23xx) board_i2c: Shared I2C ready: port=1 SDA=7 SCL=8
 I (24xx) test_sdcard: Hosted+SDMMC workaround: enabled
 I (24xx) test_sdcard: Filesystem mounted
 I (24xx) test_sdcard: Test file removed, SD card read/write test passed

@@ -85,11 +85,14 @@ USB `choice EXAMPLE_USB_ROLE` 保证两个配置符号不同时为 `y`，CMake �
 ### Wireless
 
 - ESP32-P4 与 ESP32-C6 通过 SDIO 4-bit、25 MHz 连接。Hosted transport 是 WiFi 与 BLE 的共同前置条件。
-- `test_wireless_init()` 校验 Hosted 配置，连接协处理器，初始化 WiFi STA，并在配置允许时启动 NimBLE Host；`test_wireless_run()` 当前只是兼容统一 `init/run` 入口的状态校验。
+- `test_wireless_init()` 校验 Hosted 配置并连接协处理器；仅在 `EXAMPLE_WIRELESS_ENABLE_WIFI` 启用时初始化 WiFi STA，仅在 `EXAMPLE_WIRELESS_ENABLE_BLE` 启用时启动 NimBLE Host。WiFi-only、BLE-only 和 WiFi+BLE 都是合法配置；`test_wireless_run()` 当前只是兼容统一 `init/run` 入口的状态校验。
 - WiFi capability 支持异步扫描、读取最多 12 条结果、连接指定 SSID/密码和断开；状态包含 transport、STA、RSSI、IP、重试次数及协处理器元信息。
+- Hosted transport down/failure 会失效当前连接代次并清除 connected、RSSI 和 IP 快照。WiFi/IP 事件入口必须先通过 transport gate；连接状态提交还要匹配当前请求与 SSID，IP 状态提交进一步校验当前 request generation，避免 transport 失效后的迟到事件恢复旧快照。
 - BLE capability 使用 Hosted VHCI，设备名为 `JC1060P470-BLE`，提供可连接广播和一个 128-bit UUID 的 read/write/notify 单字节测试特征。
+- 停止 BLE 广告失败时保留 advertising 状态和资源所有权，供后续重试；`BLE_HS_EALREADY` 按已经停止处理。
 - BLE 头文件保留 `test_wireless_request_ble_scan()` 接口，但当前业务重点是 Peripheral 广播/GATT；文档不把该接口等同于已完成 Central 扫描产品能力。
 - `test_wireless_deinit()` 按依赖逆序停止 NimBLE 和 WiFi，注销 Hosted 事件并释放本模块对象；`esp_hosted` 实例由组件 constructor/destructor 持有，模块不直接销毁其全局生命周期。
+- 本轮已分别完成 WiFi-only 和 BLE-only 编译验证，但没有新增无线功能上板验证。
 
 ## UI 与数据边界
 
