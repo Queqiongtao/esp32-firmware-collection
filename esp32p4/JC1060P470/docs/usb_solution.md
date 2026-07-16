@@ -105,7 +105,9 @@ UVC 不再硬编码 FPS：
 
 - ISOC URB 配置为 4×20 KB（10 ms 等时缓冲，占内部 DMA RAM 80 KB），实证可用。注意 HCD 的 ISOC qTD 环只有 64 槽且每管道双缓冲调度：单 URB 不得超过 61 包，实测 8×20 KB 会令 ISOC 调度绕死、一帧不收，并进一步诱发 CTRL 超时和 usbh 断言崩溃复位；未上板验证不得加深。
 - 尾部截断帧由完整性校验拦截；中段丢包但 SOI/EOI 完好的帧无法在解码前识别，进入硬件解码器后报 data-unit 数与分辨率不匹配，由 `s_decode_errors` 统计并节流告警。`jpeg.decoder` 标签日志已静默避免逐帧刷屏；`dma2d` 标签与显示路径共用，保持可见。
-- 上板实测残余坏帧约占解码尝试的 15%，且该比例在多种负载配置下基本不变，说明与应用侧 PSRAM 争用无关；怀疑 core 1 周期性中断遮蔽 USB ISR 或摄像头/线缆信号完整性，待单变量实验（USB 任务迁 core 0、换线缆/摄像头）甄别。坏帧被静默丢弃，预览由下一帧补上，画面连续性不受影响。
+- 上板实测残余坏帧约占解码尝试的 15%，且该比例在多种负载配置（预览频率、按需解码、URB 深度）下基本不变，说明与应用侧 PSRAM 争用无关。坏帧被静默丢弃，预览由下一帧补上，画面连续性不受影响。
+- 迁核甄别实验（2026-07-16，已回退）：USB 栈整体迁 core 0——role worker（`usb_host_install()` 在调用核上分配 USB-DWC ISR，其所在核由 `test_usb_role.c` 的 `TEST_USB_ROLE_TASK_CORE_ID` 决定）+ USB lib task + UVC driver task 均 1→0，解码 worker 留 core 1。结果坏帧占比约 20%（errors≈5.5/5s vs 基线 3.5），无改善，**排除 core 1 周期性中断遮蔽 USB ISR 的假设**。
+- 剩余怀疑指向摄像头/线缆/UTMI PHY 链路信号完整性，待硬件甄别：换 USB 线缆、同一摄像头+线缆接 PC 验证源头帧质量（如 `ffmpeg -f v4l2 -input_format mjpeg` 采集后检查坏帧）、换另一颗摄像头。零代码软件旁证：UVC 页面运行时切 720p，若坏帧占比随帧字节数等比下降为随机每包丢损特征（链路级），保持不变则为帧结构性问题。
 
 USB/JPEG/PPA 驱动负责其 DMA 边界，应用层仍显式维护自己写入的 PSRAM：UVC worker 更新预览缓冲后执行 `esp_cache_msync(..., DIR_C2M)`；UI 把预览复制到 LVGL image 自有缓冲后再次写回 cache，再 invalidate 图像对象。后续新增“CPU 写 PSRAM 后交 DMA 读取”的路径也必须在所有权交接点执行同类同步，不能依赖 LVGL 隐式处理。
 
