@@ -277,10 +277,9 @@
 #define TEST_UVC_PREVIEW_REFRESH_MS             100
 /* worker 更新预览的最小间隔, 按协商的源分辨率自适应。1080p 下 PPA 缩放
  * 需整读 ~4MB PSRAM 源 (实测 preview 耗时 90ms), 与 JPEG 解码/显示刷新
- * 争用 PSRAM 带宽, 会拉长 ISOC 回调 memcpy 进而诱发丢包截断帧, 故大
- * 分辨率保持保守间隔; 小分辨率源 PSRAM 读取量小, 可提高预览频率。
- * 分级值未经全量上板验证, 若出现截断帧计数上升需回调保守。 */
+ * 争用 PSRAM 带宽。1080p 间隔由 200ms 单变量下调到 100ms, 目标
+ * 8~10fps; 上板仍约 3fps, 保留该值用于后续分段耗时诊断。 */
 #define TEST_UVC_PREVIEW_UPDATE_INTERVAL_SMALL_MS  100  /* 源 <= 640x480, ~10fps */
 #define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MEDIUM_MS 100  /* 源 <= 1280x720, ~10fps */
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS  200  /* 更大源 (1080p), 实证保守值 */
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS  100  /* 更大源 (1080p), 目标 8~10fps */
 #define TEST_UVC_PPA_BUFFER_ALIGNMENT           128
