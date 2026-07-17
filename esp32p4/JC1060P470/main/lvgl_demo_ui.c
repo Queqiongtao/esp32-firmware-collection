@@ -139,6 +139,7 @@ static size_t s_uvc_resolution_count;
 static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
 
 #define DEMO_UVC_PREVIEW_SIZE (TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U)
+#define DEMO_FONT_TOUCH_REFRESH_MS 16
 
 static demo_touch_state_t s_touch_state;
 #if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
@@ -153,8 +154,11 @@ static uint32_t s_ui_list_rebuild_count;
 static uint32_t s_ui_update_report_start_ms;
 static uint16_t s_font_sample_size_px = 22;
 static uint16_t s_font_pinch_base_size_px = 22;
+static uint16_t s_font_pinch_target_size_px = 22;
 static float s_font_pinch_base_distance;
 static bool s_font_pinch_active;
+static bool s_font_pinch_commit_failed;
+static uint32_t s_font_touch_sequence;
 
 #define WIFI_KB_CTRL_KEY (LV_KEYBOARD_CTRL_BUTTON_FLAGS)
 #define WIFI_KB_CHECKED_KEY (LV_BUTTONMATRIX_CTRL_CHECKED)
@@ -1394,7 +1398,7 @@ static const char *demo_font_diag_state_text(display_font_diag_state_t state)
     }
 }
 
-static uint16_t demo_font_size_clamp(int32_t size_px)
+static uint16_t demo_font_size_normalize(int32_t size_px)
 {
     if (size_px < DISPLAY_FONT_SAMPLE_SIZE_MIN) {
         return DISPLAY_FONT_SAMPLE_SIZE_MIN;
@@ -1402,12 +1406,14 @@ static uint16_t demo_font_size_clamp(int32_t size_px)
     if (size_px > DISPLAY_FONT_SAMPLE_SIZE_MAX) {
         return DISPLAY_FONT_SAMPLE_SIZE_MAX;
     }
-    return (uint16_t)size_px;
+
+    return (uint16_t)(((size_px + (DISPLAY_FONT_SAMPLE_SIZE_STEP / 2)) /
+                       DISPLAY_FONT_SAMPLE_SIZE_STEP) * DISPLAY_FONT_SAMPLE_SIZE_STEP);
 }
 
 static bool demo_font_apply_sample_size(uint16_t size_px)
 {
-    size_px = demo_font_size_clamp(size_px);
+    size_px = demo_font_size_normalize(size_px);
     if (s_font_sample_label == NULL) {
         return false;
     }
@@ -1419,7 +1425,7 @@ static bool demo_font_apply_sample_size(uint16_t size_px)
 
     s_font_sample_size_px = size_px;
     lv_obj_set_style_text_font(s_font_sample_label, font, 0);
-    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
+    lv_obj_set_style_transform_scale(s_font_sample_label, LV_SCALE_NONE, 0);
     lv_obj_center(s_font_sample_label);
     lv_obj_invalidate(s_font_sample_label);
     return true;
@@ -1443,6 +1449,29 @@ static float demo_font_touch_distance(const display_touch_point_t *a, const disp
     return sqrtf(dx * dx + dy * dy);
 }
 
+static void demo_font_reset_sample_transform(void)
+{
+    lv_obj_set_style_transform_scale(s_font_sample_label, LV_SCALE_NONE, 0);
+    lv_obj_center(s_font_sample_label);
+    lv_obj_invalidate(s_font_sample_label);
+}
+
+static void demo_font_finish_pinch(void)
+{
+    const uint16_t target_size = s_font_pinch_target_size_px;
+
+    s_font_pinch_active = false;
+    s_font_pinch_base_distance = 0.0f;
+    if (demo_font_apply_sample_size(target_size)) {
+        s_font_pinch_commit_failed = false;
+    } else {
+        s_font_pinch_commit_failed = true;
+        demo_font_reset_sample_transform();
+    }
+    s_font_pinch_base_size_px = s_font_sample_size_px;
+    s_font_pinch_target_size_px = s_font_sample_size_px;
+}
+
 static void demo_update_font_touch_zoom(void)
 {
     if (s_font_sample_area == NULL || s_font_sample_label == NULL) {
@@ -1453,6 +1482,10 @@ static void demo_update_font_touch_zoom(void)
     if (display_touch_get_snapshot(&snapshot) != ESP_OK) {
         return;
     }
+    if (snapshot.sequence == s_font_touch_sequence) {
+        return;
+    }
+    s_font_touch_sequence = snapshot.sequence;
 
     display_touch_point_t area_points[2] = {0};
     uint8_t area_count = 0;
@@ -1463,13 +1496,17 @@ static void demo_update_font_touch_zoom(void)
     }
 
     if (area_count < 2) {
-        s_font_pinch_active = false;
-        s_font_pinch_base_size_px = s_font_sample_size_px;
-        s_font_pinch_base_distance = 0.0f;
+        if (s_font_pinch_active) {
+            demo_font_finish_pinch();
+        } else {
+            s_font_pinch_base_size_px = s_font_sample_size_px;
+            s_font_pinch_target_size_px = s_font_sample_size_px;
+        }
         if (s_font_touch_label != NULL) {
-            demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: %u point(s) in area  Font: %upx",
+            demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: %u point(s) in area  Font: %upx%s",
                                                (unsigned int)area_count,
-                                               (unsigned int)s_font_sample_size_px);
+                                               (unsigned int)s_font_sample_size_px,
+                                               s_font_pinch_commit_failed ? " create failed" : "");
         }
         return;
     }
@@ -1482,12 +1519,6 @@ static void demo_update_font_touch_zoom(void)
         return;
     }
 
-    if (!s_font_pinch_active) {
-        s_font_pinch_active = true;
-        s_font_pinch_base_size_px = s_font_sample_size_px;
-        s_font_pinch_base_distance = distance;
-    }
-
     if (!display_font_is_freetype_ready()) {
         if (s_font_touch_label != NULL) {
             demo_label_set_text_if_changed(s_font_touch_label, "Touch: 2 points  Font: static fallback");
@@ -1495,17 +1526,31 @@ static void demo_update_font_touch_zoom(void)
         return;
     }
 
-    bool font_ok = true;
+    if (!s_font_pinch_active) {
+        s_font_pinch_active = true;
+        s_font_pinch_base_size_px = s_font_sample_size_px;
+        s_font_pinch_target_size_px = s_font_sample_size_px;
+        s_font_pinch_base_distance = distance;
+        s_font_pinch_commit_failed = false;
+        lv_obj_update_layout(s_font_sample_label);
+        lv_obj_set_style_transform_pivot_x(s_font_sample_label, lv_obj_get_width(s_font_sample_label) / 2, 0);
+        lv_obj_set_style_transform_pivot_y(s_font_sample_label, lv_obj_get_height(s_font_sample_label) / 2, 0);
+    }
+
     if (s_font_pinch_base_distance > 0.01f) {
-        const float scale = distance / s_font_pinch_base_distance;
-        const uint16_t target_size = demo_font_size_clamp((int32_t)((float)s_font_pinch_base_size_px * scale));
-        font_ok = demo_font_apply_sample_size(target_size);
+        const float min_scale = (float)DISPLAY_FONT_SAMPLE_SIZE_MIN / (float)s_font_pinch_base_size_px;
+        const float max_scale = (float)DISPLAY_FONT_SAMPLE_SIZE_MAX / (float)s_font_pinch_base_size_px;
+        const float raw_scale = distance / s_font_pinch_base_distance;
+        const float scale = LV_CLAMP(min_scale, raw_scale, max_scale);
+        s_font_pinch_target_size_px = demo_font_size_normalize(
+            (int32_t)lroundf((float)s_font_pinch_base_size_px * scale));
+        lv_obj_set_style_transform_scale(s_font_sample_label,
+                                         (int32_t)lroundf(scale * (float)LV_SCALE_NONE), 0);
     }
 
     if (s_font_touch_label != NULL) {
-        demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: 2 points  Font: %upx%s",
-                                           (unsigned int)s_font_sample_size_px,
-                                           font_ok ? "" : " create failed");
+        demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: 2 points  Font: %upx",
+                                           (unsigned int)s_font_pinch_target_size_px);
     }
 }
 
@@ -1533,6 +1578,9 @@ static void demo_font_return_btn_cb(lv_event_t *e)
     s_font_touch_label = NULL;
     s_font_pinch_active = false;
     s_font_pinch_base_distance = 0.0f;
+    s_font_pinch_target_size_px = s_font_sample_size_px;
+    s_font_pinch_commit_failed = false;
+    s_font_touch_sequence = UINT32_MAX;
 }
 
 static void demo_font_enter_btn_cb(lv_event_t *e)
@@ -1562,7 +1610,7 @@ static void demo_font_enter_btn_cb(lv_event_t *e)
     demo_config_label(s_font_sample_label, DISPLAY_FONT_ROLE_TITLE);
     lv_label_set_text(s_font_sample_label, "缩放测试 中文");
     lv_obj_set_style_text_color(s_font_sample_label, lv_color_hex(0x17324D), 0);
-    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
+    lv_obj_set_style_transform_scale(s_font_sample_label, LV_SCALE_NONE, 0);
     lv_obj_center(s_font_sample_label);
     demo_font_apply_sample_size(s_font_sample_size_px);
 
@@ -1595,7 +1643,10 @@ static void demo_font_enter_btn_cb(lv_event_t *e)
 
     s_font_pinch_active = false;
     s_font_pinch_base_distance = 0.0f;
-    s_font_timer = lv_timer_create(demo_font_touch_timer_cb, 40, NULL);
+    s_font_pinch_target_size_px = s_font_sample_size_px;
+    s_font_pinch_commit_failed = false;
+    s_font_touch_sequence = UINT32_MAX;
+    s_font_timer = lv_timer_create(demo_font_touch_timer_cb, DEMO_FONT_TOUCH_REFRESH_MS, NULL);
     lv_screen_load(s_font_screen);
 }
 

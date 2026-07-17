@@ -190,7 +190,7 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 - 运行时资源为 `assets/fonts/ui_shs_sc.otf`，挂载路径 `/spiffs/ui_shs_sc.otf`，Kconfig 文件名为 `CONFIG_EXAMPLE_FONT_FILE_NAME`。
 - LVGL 当前启用 `FreeType + FS_STDIO`；`CONFIG_LV_USE_TINY_TTF=n`、`CONFIG_LV_USE_FONT_MANAGER=n`，不再使用早期 Tiny TTF 方案。
 - `display_font_init()` 在低优先级后台任务中挂载分区、检查文件、初始化 FreeType，并创建 `16/16/18/22 px` 的 Small、Body、Card Title、Title 诊断字体。
-- FreeType 卡片可按 14~120 px、步进 2 px 请求动态样本字体；模块缓存有限数量的字号对象并回收旧对象。
+- FreeType 卡片可按 14~240 px、步进 2 px 请求动态样本字体；模块缓存有限数量的字号对象并回收旧对象。双指手势期间只按实时指距对当前字体做 transform 预览，松手后再创建或复用最终字号，避免在触摸高频路径同步创建和淘汰 FreeType 字体。
 
 `display_font_get_role_font()` 返回静态 UI 字体；只有显式调用 `display_font_get_freetype_role_font()` 或 `display_font_get_freetype_sample_font()` 的诊断控件使用运行时 OTF。这个边界避免把字体文件、SPIFFS 和 FreeType 的失败扩散到主 UI。
 

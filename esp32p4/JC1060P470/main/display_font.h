@@ -29,7 +29,7 @@ typedef struct {
 } display_font_diagnostics_t;
 
 #define DISPLAY_FONT_SAMPLE_SIZE_MIN 14
-#define DISPLAY_FONT_SAMPLE_SIZE_MAX 120
+#define DISPLAY_FONT_SAMPLE_SIZE_MAX 240
 #define DISPLAY_FONT_SAMPLE_SIZE_STEP 2
 
 esp_err_t display_font_init(void);
