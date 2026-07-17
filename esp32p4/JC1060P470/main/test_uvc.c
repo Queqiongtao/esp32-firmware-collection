@@ -54,6 +54,7 @@ void test_uvc_clear_resume_marker(void)
 #define UVC_USB_ALL_FREE_BIT     BIT1
 #define UVC_WORKER_EXITED_BIT    BIT2
 #define UVC_USBLIB_EXITED_BIT    BIT3
+#define UVC_DEVICE_GONE_BIT      BIT4
 #define UVC_TASK_STOP_TIMEOUT_MS 2000
 /* Retired slots are not reused until uvc_host_uninstall() joins all callbacks.
  * Exhaustion is reported so the role recovery state machine escalates to STACK. */
@@ -875,6 +876,7 @@ static void uvc_stream_event_callback(const uvc_host_stream_event_data_t *event,
             s_disconnect_stream_hdl = hdl;
             s_disconnect_stream_generation = generation;
             s_accept_frames = false;
+            s_stream_started = false;
             s_device_connected = false;
             s_format_negotiated = false;
             s_frame_info_count = 0;
@@ -885,6 +887,7 @@ static void uvc_stream_event_callback(const uvc_host_stream_event_data_t *event,
                  generation);
         if (generation != 0 && s_device_event_group != NULL) {
             xEventGroupClearBits(s_device_event_group, UVC_DEVICE_CONNECTED_BIT);
+            xEventGroupSetBits(s_device_event_group, UVC_DEVICE_GONE_BIT);
         }
         const uvc_app_queue_msg_t msg = {
             .event = UVC_APP_EVENT_DISCONNECTED,
@@ -2237,6 +2240,11 @@ static esp_err_t uvc_close_active_stream(void)
     if (ret != ESP_OK) {
         return first_error;
     }
+    if (first_error != ESP_OK) {
+        ESP_LOGW(TAG, "UVC stream stop failed; retain handle until USB control transfer is quiesced: %s",
+                 esp_err_to_name(first_error));
+        return first_error;
+    }
 
     portENTER_CRITICAL(&s_frame_lock);
     const bool still_active = stream_hdl != NULL &&
@@ -2258,10 +2266,47 @@ static esp_err_t uvc_close_active_stream(void)
             s_stream_hdl = NULL;
             s_stream_opened = false;
             s_stream_started = false;
+            if (s_disconnect_stream_hdl == stream_hdl &&
+                s_disconnect_stream_generation == stream_generation) {
+                s_disconnect_pending = false;
+                s_disconnect_stream_hdl = NULL;
+                s_disconnect_stream_generation = 0;
+            }
             portEXIT_CRITICAL(&s_frame_lock);
         }
     }
     return first_error;
+}
+
+static esp_err_t uvc_root_port_quiesce_and_close_stream(void)
+{
+    xEventGroupClearBits(s_device_event_group, UVC_DEVICE_GONE_BIT);
+    portENTER_CRITICAL(&s_frame_lock);
+    const bool has_stream = s_stream_hdl != NULL;
+    const bool root_port_powered = s_root_port_powered;
+    const bool device_already_gone = s_disconnect_pending && !s_device_connected && !s_stream_started;
+    portEXIT_CRITICAL(&s_frame_lock);
+
+    if (root_port_powered) {
+        ESP_RETURN_ON_ERROR(usb_host_lib_set_root_port_power(false), TAG,
+                            "stop UVC root port failed during recovery");
+        portENTER_CRITICAL(&s_frame_lock);
+        s_root_port_powered = false;
+        portEXIT_CRITICAL(&s_frame_lock);
+    }
+    if (!has_stream) {
+        return ESP_OK;
+    }
+
+    if (!device_already_gone) {
+        EventBits_t bits = xEventGroupWaitBits(s_device_event_group, UVC_DEVICE_GONE_BIT,
+                                               pdFALSE, pdFALSE,
+                                               pdMS_TO_TICKS(TEST_UVC_DEVICE_GONE_TIMEOUT_MS));
+        ESP_RETURN_ON_FALSE((bits & UVC_DEVICE_GONE_BIT) != 0, ESP_ERR_TIMEOUT, TAG,
+                            "UVC device-gone timeout; retain stream handle");
+    }
+    ESP_LOGI(TAG, "UVC device gone after root-port stop; EP0 transfers are quiesced");
+    return uvc_close_active_stream();
 }
 
 static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
@@ -2282,16 +2327,15 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
             ret = test_uvc_run();
         }
     } else if (level == TEST_UVC_RECOVERY_ROOT_PORT) {
-        if (s_root_port_powered) {
-            esp_err_t power_ret = usb_host_lib_set_root_port_power(false);
-            if (power_ret == ESP_OK) {
-                s_root_port_powered = false;
-            } else if (ret == ESP_OK) {
-                ret = power_ret;
-            }
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "normal UVC stream close failed; use root-port quiesce: %s",
+                     esp_err_to_name(ret));
         }
+        ret = uvc_root_port_quiesce_and_close_stream();
+        portENTER_CRITICAL(&s_frame_lock);
         s_device_connected = false;
         s_format_negotiated = false;
+        portEXIT_CRITICAL(&s_frame_lock);
         xEventGroupClearBits(s_device_event_group, UVC_DEVICE_CONNECTED_BIT);
         if (ret == ESP_OK) {
             ret = test_uvc_run();

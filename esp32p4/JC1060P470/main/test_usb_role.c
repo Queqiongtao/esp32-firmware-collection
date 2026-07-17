@@ -402,6 +402,14 @@ static void usb_role_check_health(void)
         return;
     }
 
+    if (s_auto_recovery_level == TEST_UVC_RECOVERY_STREAM && ret == ESP_ERR_TIMEOUT) {
+        s_auto_recovery_level = TEST_UVC_RECOVERY_ROOT_PORT;
+        s_auto_recovery_attempt = 0;
+        s_next_recovery_us = now_us + 500U * 1000LL;
+        ESP_LOGW(TAG, "UVC stream recovery timed out; escalate directly to root-port recovery");
+        return;
+    }
+
     s_auto_recovery_attempt++;
     if (s_auto_recovery_attempt >= TEST_UVC_RECOVERY_MAX_ATTEMPTS) {
         s_auto_recovery_attempt = 0;

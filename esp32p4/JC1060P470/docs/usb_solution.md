@@ -77,6 +77,7 @@ FULL USB 的 USJ 串口始终承担烧录和 IDF 日志；CDC 测试枚举出的
 - 新 stream 生命周期发布时才递增 generation；frame callback 只把当前 generation 和 `stream_hdl` 带入消息、增加 held-frame 计数并将 frame handle 的所有权交给应用队列。队列满时立即归还该帧并回退 held-frame 计数，不把裸指针当成无主资源。
 - worker 消费消息前同时匹配 `stream_hdl` 与 generation。过期消息只做归还，不参与解码、统计或状态迁移。
 - 断连 callback 只投递“断连 + handle + generation”事件；worker 先停止接收，再排空队列、归还所有帧，最后关闭匹配句柄。关闭新代次 stream 的请求不能被旧断连事件抢先执行。
+- `uvc_host_stream_stop()` 的 control transfer 超时时，在途请求不会被 UVC 组件取消；应用必须保留 stream 句柄，禁止继续 close。root-port 恢复先逻辑停端口，并等待 USBH 完成 EP0 flush/dequeue 后发出的 device-gone 事件，再关闭句柄。物理断连同样以 device-gone 作为无需再次发送 `SET_INTERFACE` 的关闭屏障。
 - `test_uvc_deinit()` 和分辨率切换都复用同一生命周期锁，只有在 `held_frames == 0` 且活动句柄已关闭后才释放 Host、JPEG/PPA 等下游资源。
 
 ### 能力枚举与分辨率切换
@@ -143,6 +144,10 @@ role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视�
 1. `STREAM`：停止并重新打开 UVC stream。
 2. `ROOT_PORT`：逻辑关闭/开启 DWC root port 后重新枚举和出流。
 3. `STACK`：完整卸载并重建 UVC Host、DWC PHY、JPEG 和 PPA 资源。
+
+若 `STREAM` 级停止操作返回 control timeout，则不重复执行危险关闭，直接升级到
+`ROOT_PORT`。该级在最多 `2000 ms` 内等待 device-gone；超时则保留句柄和 controller
+所有权并报告失败，不强行卸载 USB Host。
 
 成功出流后在 RTC no-init 内存写入标记；有意退出 UVC 时清除。热复位中断出流会保留标记，下一次启动自动请求 UVC，并在没有设备对象时从 root-port 级别开始恢复。所有等级耗尽后停止自动重试，UI 显示错误并提示重新插拔。
 
