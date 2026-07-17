@@ -17,7 +17,9 @@
 
 首次启动时，连接设备创建的 `Companion-XXXX` Wi-Fi 热点，密码由 `CONFIG_COMPANION_AP_PASSWORD` 配置，默认是 `companion-display`。在浏览器打开 `http://192.168.4.1/`，填写目标 Wi-Fi 的 SSID 和密码。设备获取 DHCP 地址后，屏幕会显示 IP 地址和六位配对码。
 
-默认端口为 HTTP/WebSocket `80` 和 UDP 视频 `5000`，可在 `menuconfig` 的 `Companion Display Wi-Fi` 中修改。`menuconfig` 的 `Companion Display` 菜单还提供 JPEG 帧大小上限（默认 100 KiB，同时决定协商时报告的 `max_frame_bytes`）、PSRAM 帧缓冲数量和绘制任务优先级。当前不提供 mDNS 发现，请在 PC 客户端中直接输入设备 IP。
+默认端口为 HTTP/WebSocket `80` 和 UDP 视频 `5000`，可在 `menuconfig` 的 `Companion Display Wi-Fi` 中修改；该菜单还提供无帧超时（默认 10 秒）。`menuconfig` 的 `Companion Display` 菜单还提供 JPEG 帧大小上限（默认 100 KiB，同时决定协商时报告的 `max_frame_bytes`）、PSRAM 帧缓冲数量和绘制任务优先级。当前不提供 mDNS 发现，请在 PC 客户端中直接输入设备 IP。
+
+设备主界面按信息卡片布局显示 Wi-Fi 状态、IP 地址和六位配对码，底部状态栏显示当前传输状态。视频流结束时设备回到主界面：PC 点击 Stop 或控制连接断开（含异常断开）立即返回；流启动后连续 10 秒（可配置）未收到任何完整画面时，设备主动结束会话、关闭控制连接并返回主界面，状态栏显示 `STREAM TIMEOUT`。
 
 ## PC 客户端
 
@@ -102,8 +104,9 @@ Capture layout: source=1738x3600 crop=120,240,1200x900 draw=368x276 offset=0,86 
 - `bad CRC`：完整 `CDP1` 帧的 JPEG CRC 校验失败。检查发送端和固件是否使用同一协议版本，或先改用 TCP 确认编码链路。
 - `device_busy`：设备已有活动控制会话或显示管线仍被占用。先在旧客户端点击 Stop；若连接异常断开，关闭旧 WebSocket 或重启设备以释放会话。
 - 点击 Stop 后客户端会显示 `stopping` 并等待 WebSocket 发送 `stop_stream`、关闭控制连接和释放设备传输；期间不要重复 Start，等状态回到 `Stopped` 后再启动。
+- Stop 后再次 Start 时，部分 Portal/PipeWire 后端会先返回空帧、损坏帧或布局尚未稳定的过渡缓冲区。客户端会跳过这些帧并继续等待；终端中的 `Skipping transient PipeWire frame` 仅用于诊断。共享获批后持续 10 秒仍没有有效帧时，客户端才会报告首帧超时，此时应停止并重新选择共享对象。
 - `UDP REJECTED`、`UDP DROPPED` 或 `SESSION EXPIRED`：分别表示分片被拒绝、重组超时丢帧或 5 秒未收到 UDP 数据。UDP 丢帧不重传，持续异常时改用 TCP。
-- `SESSION EXPIRED` 在 UDP 模式只表示媒体暂时没有新包；设备会保留 WebSocket 与 UDP session，静态 1 FPS 保活帧或恢复后的画面可继续使用原 session。只有 Stop 或 WebSocket 关闭会释放会话。
+- `SESSION EXPIRED` 在 UDP 模式只表示媒体暂时没有新包；设备会先保留 WebSocket 与 UDP session，静态 1 FPS 保活帧或恢复后的画面可继续使用原 session。中断持续到无帧超时（默认 10 秒）仍无完整画面时，设备结束会话、关闭控制连接并回到主界面，屏幕显示 `STREAM TIMEOUT`；PC 客户端会按控制通道重连流程自动恢复推流。Stop 或 WebSocket 关闭同样会立即释放会话并回到主界面。
 - `WebSocket peer closed`：对端已显式关闭控制连接；这会释放会话。若客户端显示 `Reconnecting control channel`，它会以同一 PC IPv4 自动替换设备端遗留的旧会话，并使用新 UDP session 恢复；重连 5 次仍失败时检查 Wi-Fi、IP 与配对码。
 - `PC` 或 `Device` 耗时持续接近帧间隔：降低手动 FPS 或 JPEG 质量。`Replaced` 增长说明系统正在主动跳过旧画面以维持低延迟；这比画面持续落后是预期且更适合实时显示的行为。
 - Linux 真实画面延迟异常时，重新启动流并在 Portal 对话框重新选择共享对象。若 `Capture`、`Encode` 或 `Device` 任一项超过 40 ms，客户端会显示 `Performance limited`；先保持默认 25 FPS、质量 70，再依据该指标逐步降低配置。

@@ -58,6 +58,7 @@ int companion_control_build_stream_started(char *buffer, size_t buffer_size,
                                            const char *video_transport);
 int companion_control_build_stream_stopped(char *buffer, size_t buffer_size,
                                            const char *request_id);
+int companion_control_build_stream_timeout(char *buffer, size_t buffer_size);
 int companion_control_build_pong(char *buffer, size_t buffer_size,
                                  const char *request_id);
 int companion_control_build_frame_presented(char *buffer, size_t buffer_size,

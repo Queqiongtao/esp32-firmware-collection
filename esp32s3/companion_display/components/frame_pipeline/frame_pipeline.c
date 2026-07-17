@@ -8,19 +8,31 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "subscreen_display.h"
 
 static const char *TAG = "frame_pipeline";
 #define FRAME_LIMIT ((size_t)CONFIG_COMPANION_FRAME_LIMIT_KB * 1024U)
 
-typedef struct { uint8_t *data; size_t length; uint16_t width; uint16_t height; uint32_t sequence; int64_t received_us; } frame_t;
+typedef struct {
+    uint8_t *data;
+    size_t length;
+    uint16_t width;
+    uint16_t height;
+    uint32_t sequence;
+    int64_t received_us;
+    companion_transport_t source;
+    uint32_t generation;
+} frame_t;
 static struct {
     subscreen_display_t *display;
     QueueHandle_t empty;
     QueueHandle_t filled;
+    SemaphoreHandle_t render_lock;
     frame_t *frames;
     companion_transport_t active;
+    uint32_t generation;
     uint32_t replaced_frames;
     frame_pipeline_presented_callback_t presented_callback;
     void *presented_context;
@@ -41,6 +53,15 @@ static void return_frame(frame_t *frame)
     if (frame != NULL) xQueueSend(s_pipeline.empty, &frame, 0);
 }
 
+static bool frame_is_current(const frame_t *frame)
+{
+    bool current;
+    portENTER_CRITICAL(&s_pipeline.lock);
+    current = s_pipeline.active == frame->source && s_pipeline.generation == frame->generation;
+    portEXIT_CRITICAL(&s_pipeline.lock);
+    return current;
+}
+
 static void draw_task(void *arg)
 {
     (void)arg;
@@ -52,6 +73,12 @@ static void draw_task(void *arg)
             return_frame(frame);
             frame = newer;
         }
+        xSemaphoreTake(s_pipeline.render_lock, portMAX_DELAY);
+        if (!frame_is_current(frame)) {
+            xSemaphoreGive(s_pipeline.render_lock);
+            return_frame(frame);
+            continue;
+        }
         const uint32_t queue_wait_us = (uint32_t)(esp_timer_get_time() - frame->received_us);
         subscreen_display_frame_metrics_t metrics = {};
         esp_err_t err = subscreen_display_draw_jpeg(s_pipeline.display, frame->data, frame->length,
@@ -60,19 +87,24 @@ static void draw_task(void *arg)
             ESP_LOGW(TAG, "JPEG frame rejected by display: %s", esp_err_to_name(err));
             subscreen_display_set_transport_status(s_pipeline.display, SUBSCREEN_TRANSPORT_FRAME_FAILED);
         }
-        if (err == ESP_OK && s_pipeline.presented_callback != NULL) {
-            frame_pipeline_presented_frame_t presented = {
-                .sequence = frame->sequence,
-                .queue_wait_us = queue_wait_us,
-                .jpeg_decode_us = metrics.jpeg_decode_us,
-                .lcd_wait_us = metrics.lcd_wait_us,
-                .lcd_submit_us = metrics.lcd_submit_us,
-                .previous_dma_us = metrics.previous_dma_us,
-                .replaced_frames = s_pipeline.replaced_frames,
-            };
-            s_pipeline.presented_callback(&presented, s_pipeline.presented_context);
-        }
+        frame_pipeline_presented_frame_t presented = {
+            .sequence = frame->sequence,
+            .queue_wait_us = queue_wait_us,
+            .jpeg_decode_us = metrics.jpeg_decode_us,
+            .lcd_wait_us = metrics.lcd_wait_us,
+            .lcd_submit_us = metrics.lcd_submit_us,
+            .previous_dma_us = metrics.previous_dma_us,
+            .replaced_frames = s_pipeline.replaced_frames,
+        };
+        frame_pipeline_presented_callback_t callback = NULL;
+        void *callback_context = NULL;
+        portENTER_CRITICAL(&s_pipeline.lock);
+        callback = s_pipeline.presented_callback;
+        callback_context = s_pipeline.presented_context;
+        portEXIT_CRITICAL(&s_pipeline.lock);
+        xSemaphoreGive(s_pipeline.render_lock);
         return_frame(frame);
+        if (err == ESP_OK && callback != NULL) callback(&presented, callback_context);
     }
 }
 
@@ -81,6 +113,7 @@ bool frame_pipeline_acquire(companion_transport_t source)
     bool acquired = false;
     portENTER_CRITICAL(&s_pipeline.lock);
     if (s_pipeline.active == COMPANION_TRANSPORT_NONE || s_pipeline.active == source) {
+        if (s_pipeline.active == COMPANION_TRANSPORT_NONE) s_pipeline.generation++;
         s_pipeline.active = source;
         acquired = true;
     }
@@ -88,11 +121,25 @@ bool frame_pipeline_acquire(companion_transport_t source)
     return acquired;
 }
 
-void frame_pipeline_release(companion_transport_t source)
+esp_err_t frame_pipeline_release(companion_transport_t source)
 {
+    ESP_RETURN_ON_FALSE(source != COMPANION_TRANSPORT_NONE, ESP_ERR_INVALID_ARG, TAG,
+                        "invalid transport release");
+    bool released = false;
     portENTER_CRITICAL(&s_pipeline.lock);
-    if (s_pipeline.active == source) s_pipeline.active = COMPANION_TRANSPORT_NONE;
+    if (s_pipeline.active == source) {
+        s_pipeline.active = COMPANION_TRANSPORT_NONE;
+        s_pipeline.generation++;
+        released = true;
+    }
     portEXIT_CRITICAL(&s_pipeline.lock);
+    if (!released) return ESP_OK;
+
+    xSemaphoreTake(s_pipeline.render_lock, portMAX_DELAY);
+    frame_t *frame = NULL;
+    while (xQueueReceive(s_pipeline.filled, &frame, 0) == pdPASS) return_frame(frame);
+    xSemaphoreGive(s_pipeline.render_lock);
+    return ESP_OK;
 }
 
 companion_transport_t frame_pipeline_active_transport(void)
@@ -157,7 +204,12 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
         ESP_LOGW(TAG, "empty frame: transport=%s", transport_name(source));
         return FRAME_PIPELINE_SUBMIT_INVALID_ARG;
     }
-    if (!frame_pipeline_acquire(source)) {
+    uint32_t generation;
+    portENTER_CRITICAL(&s_pipeline.lock);
+    const bool active = s_pipeline.active == source;
+    generation = s_pipeline.generation;
+    portEXIT_CRITICAL(&s_pipeline.lock);
+    if (!active) {
         ESP_LOGW(TAG, "transport busy: source=%s active=%s", transport_name(source), transport_name(frame_pipeline_active_transport()));
         return FRAME_PIPELINE_SUBMIT_BUSY;
     }
@@ -190,6 +242,8 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
     frame->height = header->height;
     frame->sequence = header->sequence;
     frame->received_us = esp_timer_get_time();
+    frame->source = source;
+    frame->generation = generation;
     if (xQueueReceive(s_pipeline.filled, &replaced, 0) == pdPASS) {
         s_pipeline.replaced_frames++;
         return_frame(replaced);
@@ -209,8 +263,10 @@ esp_err_t frame_pipeline_init(subscreen_display_t *display)
     s_pipeline.display = display;
     s_pipeline.empty = xQueueCreate(count, sizeof(frame_t *));
     s_pipeline.filled = xQueueCreate(1, sizeof(frame_t *));
+    s_pipeline.render_lock = xSemaphoreCreateMutex();
     s_pipeline.frames = heap_caps_calloc(count, sizeof(frame_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    ESP_RETURN_ON_FALSE(s_pipeline.empty && s_pipeline.filled && s_pipeline.frames, ESP_ERR_NO_MEM, TAG, "queue alloc");
+    ESP_RETURN_ON_FALSE(s_pipeline.empty && s_pipeline.filled && s_pipeline.render_lock && s_pipeline.frames,
+                        ESP_ERR_NO_MEM, TAG, "pipeline synchronization alloc");
     for (size_t i = 0; i < count; ++i) {
         frame_t *frame = &s_pipeline.frames[i];
         frame->data = heap_caps_aligned_alloc(16, FRAME_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

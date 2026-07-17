@@ -8,4 +8,14 @@ config COMPANION_UDP_PORT
 config COMPANION_AP_PASSWORD
     string "Provisioning AP password"
     default "companion-display"
+config COMPANION_FRAME_TIMEOUT_MS
+    int "Video frame idle timeout (ms)"
+    range 2000 60000
+    default 10000
+    help
+        After start_stream, if no complete video frame is received for this
+        long the device ends the session, closes the control connection and
+        returns to the main info screen. The PC client repeats a keepalive
+        frame at 1 FPS for static content, so the default of 10 seconds only
+        triggers when the stream is genuinely gone.
 endmenu

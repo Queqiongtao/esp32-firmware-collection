@@ -30,6 +30,12 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 
 视频只能在收到 `stream_started` 后发送。客户端应在关闭连接前发送 `stop_stream`；WebSocket `CLOSE` 同样会释放会话和显示管线。未协商即开始、`start_stream` 不属于当前会话、协议版本或传输方式不支持时，设备以 `error` 响应。`stop_stream` 是幂等的：即使没有活动会话或请求来自其他连接，设备也返回 `stream_stopped`，只释放属于该连接的会话。同一连接可以再次发送 `hello` 重新协商：设备会释放已启动的显示管线、生成新的 UDP `session_id` 与 `session_token`，客户端必须重新执行 `start_stream`。
 
+会话在以下任一情况结束，设备释放显示管线并回到主信息界面：
+
+- 客户端发送 `stop_stream`；
+- 控制 WebSocket 关闭或底层 TCP 连接断开（含异常断开）；
+- `stream_started` 后连续 `CONFIG_COMPANION_FRAME_TIMEOUT_MS`（默认 10 秒）未收到任何完整视频帧。此时设备尽力发送一条非请求式 `stream_stopped`（含 `reason:"frame_timeout"`，无 `request_id`），随后主动关闭控制连接，屏幕状态栏显示 `STREAM TIMEOUT`。客户端可以忽略该消息，仅依赖连接关闭事件按既有重连流程恢复。
+
 ### `hello`
 
 客户端请求：
@@ -68,6 +74,14 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 ```
 
 `start_stream` 必须在成功的 `hello` 后执行。设备在响应 `stream_started` 后开始接受所选视频通道的数据。
+
+设备在无帧超时结束会话时还会主动发送一条非请求式 `stream_stopped`，它没有 `request_id`，携带 `reason` 字段：
+
+```json
+{"type":"stream_stopped","reason":"frame_timeout"}
+```
+
+发送后设备关闭控制连接。当前 PC 客户端忽略该消息，依赖随后的连接关闭事件结束或重连。
 
 ### 心跳与错误
 
@@ -138,9 +152,9 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
-接收 UDP 数据 5 秒中断时，设备显示 `SESSION EXPIRED`；当前实现保留控制会话，客户端应发送 `stop_stream` 或关闭 WebSocket 释放它。
+接收 UDP 数据 5 秒中断时，设备显示 `SESSION EXPIRED` 并保留控制会话，等待同一 session 的后续数据；继续中断到累计 `CONFIG_COMPANION_FRAME_TIMEOUT_MS`（默认 10 秒）仍无完整帧时，设备按无帧超时结束会话并关闭控制连接。
 
-画面静止或 Portal 暂时未提供新图像时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。设备将静态保活帧视为普通视频帧。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。只有 `stop_stream` 或 WebSocket 关闭释放会话。
+画面静止或 Portal 暂时未提供新图像时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。设备将静态保活帧视为普通视频帧，保活帧同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
 
 控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。
 
@@ -198,7 +212,7 @@ UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submit
 
 `touch`、`audio_capture` 以及 `hello_ack.capabilities.text_input` 只描述硬件或后续协议扩展方向，不是运行时可用性或授权结果。v2 没有对应控制消息、数据格式和生命周期；客户端不得依据这些字段发送未定义消息。
 
-设备屏幕和串口同时提供状态。关键屏幕状态包括 `WS CONNECTED`、`NEGOTIATING`、`TCP VIDEO`、`UDP VIDEO`、`RECEIVING FRAME`、`BAD CRC`、`UDP REJECTED`、`UDP DROPPED`、`SESSION EXPIRED` 与 `DEVICE BUSY`。UDP 活动期间，串口每秒输出一次 `UDP stats: rx=... accepted=... rejected=... completed=... submitted=... timeout=... failed=... last=...`。
+设备屏幕和串口同时提供状态。关键屏幕状态包括 `WS CONNECTED`、`NEGOTIATING`、`TCP VIDEO`、`UDP VIDEO`、`RECEIVING FRAME`、`BAD CRC`、`UDP REJECTED`、`UDP DROPPED`、`SESSION EXPIRED`、`STREAM TIMEOUT` 与 `DEVICE BUSY`。会话结束（`stop_stream`、控制连接断开或无帧超时）后设备回到主信息界面，显示 IP 地址与配对码。UDP 活动期间，串口每秒输出一次 `UDP stats: rx=... accepted=... rejected=... completed=... submitted=... timeout=... failed=... last=...`。
 
 ## Wi-Fi 配网接口
 

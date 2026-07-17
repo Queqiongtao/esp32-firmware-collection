@@ -18,9 +18,48 @@ struct PipeWireData {
     transform: CaptureTransform,
     is_window: bool,
     layout_logged: bool,
+    last_layout_issue: Option<FrameLayoutIssue>,
     last_alpha_status: Option<AlphaStatus>,
     stop: Arc<AtomicBool>,
     mainloop: pw::main_loop::MainLoop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameLayoutIssue {
+    Corrupted,
+    EmptyChunk,
+    InvalidStride,
+    InvalidRange,
+}
+
+impl FrameLayoutIssue {
+    fn description(self) -> &'static str {
+        match self {
+            Self::Corrupted => "buffer is marked corrupted",
+            Self::EmptyChunk => "buffer contains no frame data",
+            Self::InvalidStride => "stride is smaller than one pixel row",
+            Self::InvalidRange => "frame data falls outside the mapped buffer",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameLayout {
+    first_row_offset: usize,
+    stride: isize,
+}
+
+impl FrameLayout {
+    fn row_offset(self, y: usize) -> usize {
+        self.first_row_offset
+            .checked_add_signed(self.stride.saturating_mul(y as isize))
+            .expect("validated PipeWire row offset")
+    }
+}
+
+enum CaptureFrameError {
+    Retry(FrameLayoutIssue),
+    Fatal(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -219,6 +258,7 @@ fn run(
             transform,
             is_window,
             layout_logged: false,
+            last_layout_issue: None,
             last_alpha_status: None,
             stop,
             mainloop: mainloop.clone(),
@@ -248,6 +288,7 @@ fn run(
                             user_data.format.format()
                         );
                         user_data.layout_logged = false;
+                        user_data.last_layout_issue = None;
                         user_data.last_alpha_status = None;
                     }
                 }
@@ -274,6 +315,7 @@ fn run(
                 video_crop,
             ) {
                 Ok(Some(prepared)) => {
+                    user_data.last_layout_issue = None;
                     if user_data.last_alpha_status != Some(prepared.alpha_status) {
                         match prepared.alpha_status {
                             AlphaStatus::VideoCrop(region) => eprintln!(
@@ -317,12 +359,34 @@ fn run(
                     user_data.frames.publish(Ok(prepared.image));
                 }
                 Ok(None) => {
+                    user_data.last_layout_issue = None;
                     if user_data.last_alpha_status != Some(AlphaStatus::Empty) {
                         eprintln!("Window alpha bounds: frame is fully transparent; skipping it");
                         user_data.last_alpha_status = Some(AlphaStatus::Empty);
                     }
                 }
-                Err(error) => user_data.frames.publish(Err(error)),
+                Err(CaptureFrameError::Retry(issue)) => {
+                    if user_data.last_layout_issue != Some(issue) {
+                        let chunk = data.chunk();
+                        let chunk_offset = chunk.offset();
+                        let chunk_size = chunk.size();
+                        let chunk_stride = chunk.stride();
+                        let size = user_data.format.size();
+                        let mapped_len = data.data().map_or(0, |bytes| bytes.len());
+                        eprintln!(
+                            "Skipping transient PipeWire frame: {}; offset={} size={} stride={} mapped={} negotiated={}x{}",
+                            issue.description(),
+                            chunk_offset,
+                            chunk_size,
+                            chunk_stride,
+                            mapped_len,
+                            size.width,
+                            size.height
+                        );
+                        user_data.last_layout_issue = Some(issue);
+                    }
+                }
+                Err(CaptureFrameError::Fatal(error)) => user_data.frames.publish(Err(error)),
             }
         })
         .register()
@@ -422,25 +486,32 @@ fn image_from_data(
     transform: CaptureTransform,
     is_window: bool,
     video_crop: Option<CaptureRegion>,
-) -> Result<Option<PreparedFrame>, String> {
+) -> Result<Option<PreparedFrame>, CaptureFrameError> {
     let size = format.size();
     let width = size.width as usize;
     let height = size.height as usize;
     if width == 0 || height == 0 {
-        return Err("PipeWire supplied an empty frame".to_string());
+        return Err(CaptureFrameError::Retry(FrameLayoutIssue::EmptyChunk));
     }
     let pixel_format = format.format();
-    let offset = data.chunk().offset() as usize;
-    let chunk_size = data.chunk().size() as usize;
-    let stride = data.chunk().stride().unsigned_abs() as usize;
-    let stride = if stride == 0 { width * 4 } else { stride };
-    let bytes = data
-        .data()
-        .ok_or_else(|| "PipeWire frame is not mapped into memory".to_string())?;
-    let needed = offset + stride.saturating_mul(height.saturating_sub(1)) + width * 4;
-    if needed > bytes.len() || chunk_size + offset < needed {
-        return Err("PipeWire frame has an invalid buffer layout".to_string());
-    }
+    let chunk = data.chunk();
+    let chunk_offset = chunk.offset();
+    let chunk_size = chunk.size();
+    let chunk_stride = chunk.stride();
+    let corrupted = chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED);
+    let bytes = data.data().ok_or_else(|| {
+        CaptureFrameError::Fatal("PipeWire frame is not mapped into memory".to_string())
+    })?;
+    let layout = frame_layout(
+        width,
+        height,
+        chunk_offset,
+        chunk_size,
+        chunk_stride,
+        corrupted,
+        bytes.len(),
+    )
+    .map_err(CaptureFrameError::Retry)?;
     let rgb_ordered = matches!(
         pixel_format,
         spa::param::video::VideoFormat::RGBx | spa::param::video::VideoFormat::RGBA
@@ -450,9 +521,9 @@ fn image_from_data(
         spa::param::video::VideoFormat::BGRx | spa::param::video::VideoFormat::BGRA
     );
     if !rgb_ordered && !bgr_ordered {
-        return Err(format!(
+        return Err(CaptureFrameError::Fatal(format!(
             "Unsupported PipeWire video format: {pixel_format:?}"
-        ));
+        )));
     }
     let has_alpha = matches!(
         pixel_format,
@@ -461,7 +532,7 @@ fn image_from_data(
     let (alpha_status, base) = if let Some(region) = video_crop {
         (AlphaStatus::VideoCrop(region), region)
     } else if is_window && has_alpha {
-        match detect_alpha_region(bytes, offset, stride, width, height) {
+        match detect_alpha_region(bytes, layout, width, height) {
             AlphaStatus::Bounds(region) => (AlphaStatus::Bounds(region), region),
             AlphaStatus::FullyOpaque => (
                 AlphaStatus::FullyOpaque,
@@ -503,7 +574,9 @@ fn image_from_data(
         || crop_width > base.width - relative_x
         || crop_height > base.height - relative_y
     {
-        return Err("capture region is outside the selected source".to_string());
+        return Err(CaptureFrameError::Fatal(
+            "capture region is outside the selected source".to_string(),
+        ));
     }
     let crop_x = base.x + relative_x;
     let crop_y = base.y + relative_y;
@@ -517,7 +590,8 @@ fn image_from_data(
         Rgb([0, 0, 0]),
     );
     let sample = |x: usize, y: usize| -> [u8; 3] {
-        let pixel = &bytes[offset + y * stride + x * 4..offset + y * stride + x * 4 + 4];
+        let offset = layout.row_offset(y) + x * 4;
+        let pixel = &bytes[offset..offset + 4];
         if rgb_ordered {
             [pixel[0], pixel[1], pixel[2]]
         } else {
@@ -574,6 +648,66 @@ fn image_from_data(
     }))
 }
 
+fn frame_layout(
+    width: usize,
+    height: usize,
+    chunk_offset: u32,
+    chunk_size: u32,
+    chunk_stride: i32,
+    corrupted: bool,
+    mapped_len: usize,
+) -> Result<FrameLayout, FrameLayoutIssue> {
+    if corrupted {
+        return Err(FrameLayoutIssue::Corrupted);
+    }
+    if chunk_size == 0 || mapped_len == 0 {
+        return Err(FrameLayoutIssue::EmptyChunk);
+    }
+    let row_bytes = width.checked_mul(4).ok_or(FrameLayoutIssue::InvalidRange)?;
+    let stride_magnitude = if chunk_stride == 0 {
+        row_bytes
+    } else {
+        chunk_stride.unsigned_abs() as usize
+    };
+    if stride_magnitude < row_bytes {
+        return Err(FrameLayoutIssue::InvalidStride);
+    }
+    let preceding_rows = stride_magnitude
+        .checked_mul(height.saturating_sub(1))
+        .ok_or(FrameLayoutIssue::InvalidRange)?;
+    let frame_span = preceding_rows
+        .checked_add(row_bytes)
+        .ok_or(FrameLayoutIssue::InvalidRange)?;
+    if frame_span > (chunk_size as usize).min(mapped_len) {
+        return Err(FrameLayoutIssue::InvalidRange);
+    }
+
+    let first_row_offset = chunk_offset as usize % mapped_len;
+    if chunk_stride < 0 {
+        if first_row_offset < preceding_rows
+            || first_row_offset
+                .checked_add(row_bytes)
+                .is_none_or(|end| end > mapped_len)
+        {
+            return Err(FrameLayoutIssue::InvalidRange);
+        }
+    } else if first_row_offset
+        .checked_add(frame_span)
+        .is_none_or(|end| end > mapped_len)
+    {
+        return Err(FrameLayoutIssue::InvalidRange);
+    }
+
+    Ok(FrameLayout {
+        first_row_offset,
+        stride: if chunk_stride < 0 {
+            -(stride_magnitude as isize)
+        } else {
+            stride_magnitude as isize
+        },
+    })
+}
+
 fn validate_video_crop(
     crop: Option<pw::buffer::VideoCrop>,
     format: &spa::param::video::VideoInfoRaw,
@@ -602,8 +736,7 @@ fn validate_video_crop(
 
 fn detect_alpha_region(
     bytes: &[u8],
-    offset: usize,
-    stride: usize,
+    layout: FrameLayout,
     width: usize,
     height: usize,
 ) -> AlphaStatus {
@@ -614,7 +747,7 @@ fn detect_alpha_region(
         let mut last = 0usize;
         let mut count = 0usize;
         for x in 0..width {
-            if bytes[offset + y * stride + x * 4 + 3] != 0 {
+            if bytes[layout.row_offset(y) + x * 4 + 3] != 0 {
                 first = first.min(x);
                 last = x;
                 count += 1;
@@ -660,7 +793,7 @@ fn detect_alpha_region(
     let mut last_x = 0usize;
     for x in 0..width {
         let count = (best_start..best_end)
-            .filter(|y| bytes[offset + y * stride + x * 4 + 3] != 0)
+            .filter(|y| bytes[layout.row_offset(*y) + x * 4 + 3] != 0)
             .count();
         if count >= minimum_column_pixels {
             first_x = first_x.min(x);
@@ -778,7 +911,12 @@ mod tests {
         };
         let bytes = alpha_frame(10, 8, &[window]);
         assert_eq!(
-            detect_alpha_region(&bytes, 0, 40, 10, 8),
+            detect_alpha_region(
+                &bytes,
+                frame_layout(10, 8, 0, 320, 40, false, 320).unwrap(),
+                10,
+                8
+            ),
             AlphaStatus::Bounds(window)
         );
     }
@@ -799,7 +937,12 @@ mod tests {
         };
         let bytes = alpha_frame(20, 16, &[cursor, window]);
         assert_eq!(
-            detect_alpha_region(&bytes, 0, 80, 20, 16),
+            detect_alpha_region(
+                &bytes,
+                frame_layout(20, 16, 0, 1280, 80, false, 1280).unwrap(),
+                20,
+                16
+            ),
             AlphaStatus::Bounds(window)
         );
     }
@@ -808,7 +951,12 @@ mod tests {
     fn alpha_bounds_report_empty_and_fully_opaque_frames() {
         let empty = alpha_frame(10, 8, &[]);
         assert_eq!(
-            detect_alpha_region(&empty, 0, 40, 10, 8),
+            detect_alpha_region(
+                &empty,
+                frame_layout(10, 8, 0, 320, 40, false, 320).unwrap(),
+                10,
+                8
+            ),
             AlphaStatus::Empty
         );
         let full = alpha_frame(
@@ -822,8 +970,73 @@ mod tests {
             }],
         );
         assert_eq!(
-            detect_alpha_region(&full, 0, 40, 10, 8),
+            detect_alpha_region(
+                &full,
+                frame_layout(10, 8, 0, 320, 40, false, 320).unwrap(),
+                10,
+                8
+            ),
             AlphaStatus::FullyOpaque
+        );
+    }
+
+    #[test]
+    fn frame_layout_accepts_packed_padded_and_offset_frames() {
+        assert_eq!(
+            frame_layout(2, 2, 0, 16, 0, false, 16).unwrap(),
+            FrameLayout {
+                first_row_offset: 0,
+                stride: 8,
+            }
+        );
+        assert_eq!(
+            frame_layout(2, 2, 0, 20, 12, false, 20).unwrap(),
+            FrameLayout {
+                first_row_offset: 0,
+                stride: 12,
+            }
+        );
+        assert_eq!(
+            frame_layout(2, 2, 4, 16, 8, false, 20).unwrap(),
+            FrameLayout {
+                first_row_offset: 4,
+                stride: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn frame_layout_preserves_negative_stride_orientation() {
+        let layout = frame_layout(2, 2, 12, 20, -12, false, 20).unwrap();
+        assert_eq!(layout.row_offset(0), 12);
+        assert_eq!(layout.row_offset(1), 0);
+    }
+
+    #[test]
+    fn frame_layout_classifies_transient_buffers() {
+        assert_eq!(
+            frame_layout(2, 2, 0, 16, 8, true, 16),
+            Err(FrameLayoutIssue::Corrupted)
+        );
+        assert_eq!(
+            frame_layout(2, 2, 0, 0, 8, false, 16),
+            Err(FrameLayoutIssue::EmptyChunk)
+        );
+        assert_eq!(
+            frame_layout(2, 2, 0, 16, 4, false, 16),
+            Err(FrameLayoutIssue::InvalidStride)
+        );
+        assert_eq!(
+            frame_layout(2, 2, 0, 15, 8, false, 16),
+            Err(FrameLayoutIssue::InvalidRange)
+        );
+        assert_eq!(
+            frame_layout(2, 2, 8, 16, 8, false, 16),
+            Err(FrameLayoutIssue::InvalidRange)
+        );
+        assert_eq!(
+            frame_layout(usize::MAX, 2, 0, u32::MAX, 0, false, usize::MAX),
+            Err(FrameLayoutIssue::InvalidRange)
         );
     }
 }

@@ -28,8 +28,14 @@ static const char *TAG = "subscreen_display";
 #define COLOR_CARD 0x2945
 #define COLOR_DARK 0x0000
 #define COLOR_TEXT 0xFFFF
+#define COLOR_MUTED 0x8410
 #define COLOR_SUCCESS 0x07E0
 #define COLOR_WARNING 0xFBE0
+
+#define LAYOUT_HEADER_HEIGHT 48
+#define LAYOUT_FOOTER_HEIGHT 32
+#define LAYOUT_MARGIN 16
+#define LAYOUT_CARD_BORDER 2
 
 struct subscreen_display {
     esp_lcd_panel_handle_t panel;
@@ -103,28 +109,6 @@ static esp_err_t submit_bitmap_locked(subscreen_display_t *display,
     return ESP_OK;
 }
 
-static uint16_t placeholder_pixel(int x, int y, int width, int height)
-{
-    if (y < 42) {
-        return COLOR_HEADER;
-    }
-    if (y >= height - 26) {
-        return COLOR_ACCENT;
-    }
-    if (x < 10 || x >= width - 10 || y < 52 || y >= height - 36) {
-        return COLOR_TRACK;
-    }
-    if ((x >= 34 && x < width - 34 && y >= 92 && y < 174) ||
-        (x >= 34 && x < width - 34 && y >= 208 && y < 290) ||
-        (x >= 34 && x < width - 34 && y >= 324 && y < 388)) {
-        return COLOR_CARD;
-    }
-    if ((x / 18 + y / 18) % 9 == 0) {
-        return 0x2104;
-    }
-    return COLOR_BG;
-}
-
 static const uint8_t s_font_5x7[][5] = {
     {0x1e, 0x05, 0x05, 0x05, 0x1e}, {0x1f, 0x15, 0x15, 0x15, 0x0a},
     {0x0e, 0x11, 0x11, 0x11, 0x0a}, {0x1f, 0x11, 0x11, 0x0a, 0x04},
@@ -189,29 +173,91 @@ static void draw_centered_text(uint16_t *pixels, int width, int height, int y,
     draw_text(pixels, width, height, (width - text_width(text, scale)) / 2, y, scale, text, color);
 }
 
+static void fill_rect(uint16_t *pixels, int width, int height, int x, int y,
+                      int rect_width, int rect_height, uint16_t color)
+{
+    const int x_end = x + rect_width < width ? x + rect_width : width;
+    const int y_end = y + rect_height < height ? y + rect_height : height;
+    for (int py = y > 0 ? y : 0; py < y_end; ++py) {
+        uint16_t *row = pixels + py * width;
+        for (int px = x > 0 ? x : 0; px < x_end; ++px) {
+            row[px] = color;
+        }
+    }
+}
+
+static void draw_card(uint16_t *pixels, int width, int height, int y, int card_height)
+{
+    const int x = LAYOUT_MARGIN;
+    const int card_width = width - 2 * LAYOUT_MARGIN;
+    fill_rect(pixels, width, height, x, y, card_width, card_height, COLOR_TRACK);
+    fill_rect(pixels, width, height, x + LAYOUT_CARD_BORDER, y + LAYOUT_CARD_BORDER,
+              card_width - 2 * LAYOUT_CARD_BORDER, card_height - 2 * LAYOUT_CARD_BORDER, COLOR_CARD);
+}
+
+typedef struct {
+    const char *text;
+    int scale;
+    uint16_t color;
+    int gap_before;
+} card_line_t;
+
+#define FONT_GLYPH_HEIGHT 7
+
+static void draw_card_with_lines(uint16_t *pixels, int width, int height, int y,
+                                 int card_height, const card_line_t *lines, int line_count)
+{
+    draw_card(pixels, width, height, y, card_height);
+    int content_height = 0;
+    for (int i = 0; i < line_count; ++i) {
+        content_height += lines[i].gap_before + FONT_GLYPH_HEIGHT * lines[i].scale;
+    }
+    int text_y = y + (card_height - content_height) / 2;
+    for (int i = 0; i < line_count; ++i) {
+        text_y += lines[i].gap_before;
+        draw_centered_text(pixels, width, height, text_y, lines[i].scale, lines[i].text, lines[i].color);
+        text_y += FONT_GLYPH_HEIGHT * lines[i].scale;
+    }
+}
+
 static void draw_network_status(uint16_t *pixels, int width, int height,
                                 const subscreen_display_t *display)
 {
-    draw_centered_text(pixels, width, height, 68, 3, "COMPANION DISPLAY", COLOR_TEXT);
     switch (display->network_status) {
-    case SUBSCREEN_NETWORK_CONNECTED:
-        draw_centered_text(pixels, width, height, 150, 3, "WIFI CONNECTED", COLOR_SUCCESS);
-        draw_centered_text(pixels, width, height, 222, 4, display->network_ipv4, COLOR_TEXT);
+    case SUBSCREEN_NETWORK_CONNECTED: {
+        const card_line_t network_lines[] = {
+            {"WIFI CONNECTED", 2, COLOR_SUCCESS, 0},
+            {display->network_ipv4, 3, COLOR_TEXT, 20},
+        };
+        draw_card_with_lines(pixels, width, height, 64, 120, network_lines, 2);
         if (strlen(display->pairing_token) == 6) {
-            draw_centered_text(pixels, width, height, 292, 2, "PAIRING CODE", COLOR_ACCENT);
-            draw_centered_text(pixels, width, height, 328, 6, display->pairing_token, COLOR_TEXT);
+            const card_line_t pairing_lines[] = {
+                {"PAIRING CODE", 2, COLOR_ACCENT, 0},
+                {display->pairing_token, 6, COLOR_TEXT, 24},
+            };
+            draw_card_with_lines(pixels, width, height, 200, 144, pairing_lines, 2);
         }
+        draw_centered_text(pixels, width, height, 372, 2, "ENTER IP AND CODE ON PC", COLOR_MUTED);
         break;
-    case SUBSCREEN_NETWORK_CONNECTING:
-        draw_centered_text(pixels, width, height, 160, 3, "WIFI CONNECTING", COLOR_WARNING);
-        draw_centered_text(pixels, width, height, 220, 2, "WAITING FOR IP", COLOR_TEXT);
+    }
+    case SUBSCREEN_NETWORK_CONNECTING: {
+        const card_line_t lines[] = {
+            {"WIFI CONNECTING", 2, COLOR_WARNING, 0},
+            {"WAITING FOR IP", 2, COLOR_TEXT, 24},
+        };
+        draw_card_with_lines(pixels, width, height, 140, 160, lines, 2);
         break;
+    }
     case SUBSCREEN_NETWORK_SETUP_REQUIRED:
-    default:
-        draw_centered_text(pixels, width, height, 150, 2, "WIFI SETUP REQUIRED", COLOR_WARNING);
-        draw_centered_text(pixels, width, height, 204, 2, "CONNECT TO COMPANION AP", COLOR_TEXT);
-        draw_centered_text(pixels, width, height, 258, 2, "OPEN 192.168.4.1", COLOR_TEXT);
+    default: {
+        const card_line_t lines[] = {
+            {"WIFI SETUP REQUIRED", 2, COLOR_WARNING, 0},
+            {"CONNECT TO COMPANION AP", 2, COLOR_TEXT, 26},
+            {"OPEN 192.168.4.1", 2, COLOR_TEXT, 26},
+        };
+        draw_card_with_lines(pixels, width, height, 120, 200, lines, 3);
         break;
+    }
     }
 }
 
@@ -239,6 +285,7 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
     case SUBSCREEN_TRANSPORT_UDP_DROPPED:
     case SUBSCREEN_TRANSPORT_UDP_REJECTED:
     case SUBSCREEN_TRANSPORT_SESSION_EXPIRED:
+    case SUBSCREEN_TRANSPORT_STREAM_TIMEOUT:
         return 0xF800;
     case SUBSCREEN_TRANSPORT_FRAME_FAILED:
         return 0xF81F;
@@ -289,6 +336,8 @@ static const char *transport_status_text(subscreen_transport_status_t status)
         return "UDP REJECTED";
     case SUBSCREEN_TRANSPORT_SESSION_EXPIRED:
         return "SESSION EXPIRED";
+    case SUBSCREEN_TRANSPORT_STREAM_TIMEOUT:
+        return "STREAM TIMEOUT";
     case SUBSCREEN_TRANSPORT_READY:
     default:
         return "READY";
@@ -299,28 +348,27 @@ static esp_err_t draw_placeholder_locked(subscreen_display_t *display)
 {
     ESP_RETURN_ON_ERROR(wait_color_transfer_locked(display, NULL, NULL), TAG,
                         "wait previous frame failed");
-    const size_t pixel_count = (size_t)display->physical_width * display->physical_height;
+    const int width = display->physical_width;
+    const int height = display->physical_height;
+    const size_t pixel_count = (size_t)width * height;
     uint16_t *pixels = heap_caps_malloc(pixel_count * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(pixels != NULL, ESP_ERR_NO_MEM, TAG, "placeholder buffer alloc failed");
 
-    for (int row = 0; row < display->physical_height; ++row) {
-        uint16_t *dst = pixels + row * display->physical_width;
-        for (int x = 0; x < display->physical_width; ++x) {
-            dst[x] = placeholder_pixel(x, row, display->physical_width, display->physical_height);
-            if (row >= display->physical_height - 26) {
-                dst[x] = transport_status_color(display->transport_status);
-            }
-        }
-    }
-    draw_network_status(pixels, display->physical_width, display->physical_height, display);
-    draw_centered_text(pixels, display->physical_width, display->physical_height,
-                       display->physical_height - 20, 2,
+    fill_rect(pixels, width, height, 0, 0, width, height, COLOR_BG);
+    fill_rect(pixels, width, height, 0, 0, width, LAYOUT_HEADER_HEIGHT, COLOR_HEADER);
+    draw_centered_text(pixels, width, height, (LAYOUT_HEADER_HEIGHT - FONT_GLYPH_HEIGHT * 2) / 2, 2,
+                       "COMPANION DISPLAY", COLOR_DARK);
+    draw_network_status(pixels, width, height, display);
+    const int footer_top = height - LAYOUT_FOOTER_HEIGHT;
+    fill_rect(pixels, width, height, 0, footer_top, width, LAYOUT_FOOTER_HEIGHT,
+              transport_status_color(display->transport_status));
+    draw_centered_text(pixels, width, height,
+                       footer_top + (LAYOUT_FOOTER_HEIGHT - FONT_GLYPH_HEIGHT * 2) / 2, 2,
                        transport_status_text(display->transport_status), COLOR_DARK);
 
-    for (int y = 0; y < display->physical_height; y += PLACEHOLDER_CHUNK_LINES) {
-        const int y2 = (y + PLACEHOLDER_CHUNK_LINES < display->physical_height) ?
-                       y + PLACEHOLDER_CHUNK_LINES : display->physical_height;
-        esp_err_t err = submit_bitmap_locked(display, y, y2, pixels + y * display->physical_width);
+    for (int y = 0; y < height; y += PLACEHOLDER_CHUNK_LINES) {
+        const int y2 = (y + PLACEHOLDER_CHUNK_LINES < height) ? y + PLACEHOLDER_CHUNK_LINES : height;
+        esp_err_t err = submit_bitmap_locked(display, y, y2, pixels + y * width);
         if (err == ESP_OK) {
             err = wait_color_transfer_locked(display, NULL, NULL);
         }
@@ -374,9 +422,15 @@ esp_err_t subscreen_display_init(subscreen_display_t **ret_display)
 
 esp_err_t subscreen_display_show_placeholder(subscreen_display_t *display)
 {
+    return subscreen_display_return_to_placeholder(display, SUBSCREEN_TRANSPORT_READY);
+}
+
+esp_err_t subscreen_display_return_to_placeholder(subscreen_display_t *display,
+                                                  subscreen_transport_status_t status)
+{
     ESP_RETURN_ON_FALSE(display != NULL && display->lock != NULL, ESP_ERR_INVALID_STATE, TAG, "display not ready");
     xSemaphoreTake(display->lock, portMAX_DELAY);
-    display->transport_status = SUBSCREEN_TRANSPORT_READY;
+    display->transport_status = status;
     esp_err_t err = draw_placeholder_locked(display);
     if (err == ESP_OK) {
         display->has_frame = false;
@@ -390,12 +444,12 @@ esp_err_t subscreen_display_set_transport_status(subscreen_display_t *display,
 {
     ESP_RETURN_ON_FALSE(display != NULL && display->lock != NULL, ESP_ERR_INVALID_STATE, TAG, "display not ready");
     xSemaphoreTake(display->lock, portMAX_DELAY);
-    if (display->transport_status == status || display->has_frame) {
-        xSemaphoreGive(display->lock);
-        return ESP_OK;
-    }
+    const bool changed = display->transport_status != status;
     display->transport_status = status;
-    esp_err_t err = draw_placeholder_locked(display);
+    esp_err_t err = ESP_OK;
+    if (changed && !display->has_frame) {
+        err = draw_placeholder_locked(display);
+    }
     xSemaphoreGive(display->lock);
     return err;
 }

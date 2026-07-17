@@ -33,6 +33,7 @@ typedef enum {
     SUBSCREEN_TRANSPORT_UDP_DROPPED,
     SUBSCREEN_TRANSPORT_UDP_REJECTED,
     SUBSCREEN_TRANSPORT_SESSION_EXPIRED,
+    SUBSCREEN_TRANSPORT_STREAM_TIMEOUT,
 } subscreen_transport_status_t;
 
 typedef enum {
@@ -50,6 +51,8 @@ typedef struct {
 
 esp_err_t subscreen_display_init(subscreen_display_t **ret_display);
 esp_err_t subscreen_display_show_placeholder(subscreen_display_t *display);
+esp_err_t subscreen_display_return_to_placeholder(subscreen_display_t *display,
+                                                  subscreen_transport_status_t status);
 esp_err_t subscreen_display_set_transport_status(subscreen_display_t *display,
                                                  subscreen_transport_status_t status);
 esp_err_t subscreen_display_set_network_status(subscreen_display_t *display,

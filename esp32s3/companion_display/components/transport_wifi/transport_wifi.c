@@ -26,6 +26,7 @@
 
 #define UDP_REASSEMBLY_TIMEOUT_US (250 * 1000)
 #define UDP_SESSION_TIMEOUT_US (5 * 1000 * 1000)
+#define FRAME_TIMEOUT_US ((int64_t)CONFIG_COMPANION_FRAME_TIMEOUT_MS * 1000)
 #define FRAME_LIMIT ((size_t)CONFIG_COMPANION_FRAME_LIMIT_KB * 1024U)
 
 typedef enum { VIDEO_TRANSPORT_NONE, VIDEO_TRANSPORT_TCP, VIDEO_TRANSPORT_UDP } video_transport_t;
@@ -34,6 +35,7 @@ typedef struct {
     bool active;
     bool negotiated;
     bool started;
+    uint32_t generation;
     int ws_fd;
     video_transport_t video_transport;
     uint32_t session_id;
@@ -42,6 +44,7 @@ typedef struct {
     bool peer_addr_bound;
     int64_t last_control_us;
     int64_t last_udp_us;
+    int64_t last_frame_us;
     bool udp_media_paused;
     uint32_t dropped_frames;
     uint32_t udp_rx_packets;
@@ -69,8 +72,13 @@ static char s_ipv4[16];
 static subscreen_network_status_t s_network_status;
 static subscreen_display_t *s_display;
 static bool s_has_credentials;
+/* Serializes stream start/release and complete-frame submission. Always take
+ * this mutex before s_session_lock when both are needed. */
+static SemaphoreHandle_t s_stream_transition_lock;
 static SemaphoreHandle_t s_session_lock;
 static stream_session_t s_session;
+static uint32_t s_next_session_generation;
+static int s_last_ws_fd = -1;
 static uint8_t *s_udp_reassembly;
 static int64_t s_last_udp_summary_us;
 static int64_t s_last_udp_reject_log_us;
@@ -81,6 +89,18 @@ typedef struct {
     int ws_fd;
     frame_pipeline_presented_frame_t frame;
 } frame_feedback_work_t;
+
+typedef struct {
+    bool released;
+    bool started;
+    video_transport_t transport;
+} released_session_t;
+
+typedef struct {
+    int ws_fd;
+    uint32_t generation;
+    int64_t last_frame_us;
+} frame_timeout_snapshot_t;
 
 static void update_network_status(subscreen_network_status_t status, const char *ip)
 {
@@ -214,23 +234,111 @@ static esp_err_t send_control(httpd_req_t *req, const char *message)
     return httpd_ws_send_frame(req, &frame);
 }
 
-static void reset_session_locked(void)
+static released_session_t detach_session_locked(void)
 {
+    released_session_t released = {
+        .released = s_session.active,
+        .started = s_session.started,
+        .transport = s_session.video_transport,
+    };
     if (s_session.active) {
         ESP_LOGI(TAG, "session release: fd=%d transport=%s started=%d rx=%lu submitted=%lu",
                  s_session.ws_fd, video_transport_name(s_session.video_transport), s_session.started,
                  (unsigned long)s_session.udp_rx_packets, (unsigned long)s_session.udp_submitted_frames);
     }
-    if (s_session.started) frame_pipeline_release(pipeline_transport(s_session.video_transport));
     memset(&s_session, 0, sizeof(s_session));
+    return released;
+}
+
+static void release_pipeline(const released_session_t *released)
+{
+    if (released->released && released->started) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(frame_pipeline_release(pipeline_transport(released->transport)));
+    }
 }
 
 static void reset_session_for_fd(int ws_fd)
 {
+    released_session_t released = {};
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
-    if (s_session.active && s_session.ws_fd == ws_fd) reset_session_locked();
+    if (s_session.active && s_session.ws_fd == ws_fd) released = detach_session_locked();
     xSemaphoreGive(s_session_lock);
-    update_transport_status(SUBSCREEN_TRANSPORT_READY);
+    release_pipeline(&released);
+    if (released.released && s_display != NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            subscreen_display_return_to_placeholder(s_display, SUBSCREEN_TRANSPORT_READY));
+    }
+    xSemaphoreGive(s_stream_transition_lock);
+}
+
+static void control_socket_closed(httpd_handle_t server, int sockfd)
+{
+    (void)server;
+    released_session_t released = {};
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    if (s_session.active && s_session.ws_fd == sockfd) released = detach_session_locked();
+    xSemaphoreGive(s_session_lock);
+    release_pipeline(&released);
+    if (released.released) {
+        ESP_LOGI(TAG, "control socket closed: fd=%d", sockfd);
+        if (s_display != NULL) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(
+                subscreen_display_return_to_placeholder(s_display, SUBSCREEN_TRANSPORT_READY));
+        }
+    } else if (sockfd == s_last_ws_fd) {
+        update_transport_status(SUBSCREEN_TRANSPORT_READY);
+    }
+    if (sockfd == s_last_ws_fd) s_last_ws_fd = -1;
+    xSemaphoreGive(s_stream_transition_lock);
+    close(sockfd);
+}
+
+static void send_stream_timeout_work(void *arg)
+{
+    const int ws_fd = (int)(intptr_t)arg;
+    char message[96];
+    companion_control_build_stream_timeout(message, sizeof(message));
+    httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)message, .len = strlen(message)};
+    esp_err_t err = httpd_ws_send_frame_async(s_server, ws_fd, &frame);
+    if (err != ESP_OK) ESP_LOGW(TAG, "stream timeout notify failed: %s", esp_err_to_name(err));
+    httpd_sess_trigger_close(s_server, ws_fd);
+}
+
+static void end_session_on_frame_timeout(const frame_timeout_snapshot_t *snapshot)
+{
+    released_session_t released = {};
+    const int64_t now = esp_timer_get_time();
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    if (s_session.active && s_session.started &&
+        s_session.ws_fd == snapshot->ws_fd &&
+        s_session.generation == snapshot->generation &&
+        s_session.last_frame_us == snapshot->last_frame_us &&
+        now - s_session.last_frame_us > FRAME_TIMEOUT_US) {
+        released = detach_session_locked();
+    }
+    xSemaphoreGive(s_session_lock);
+    if (!released.released) {
+        xSemaphoreGive(s_stream_transition_lock);
+        return;
+    }
+
+    ESP_LOGW(TAG, "stream frame timeout: fd=%d no frame for %d ms; ending session",
+             snapshot->ws_fd, CONFIG_COMPANION_FRAME_TIMEOUT_MS);
+    release_pipeline(&released);
+    if (snapshot->ws_fd == s_last_ws_fd) s_last_ws_fd = -1;
+    if (s_display != NULL) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            subscreen_display_return_to_placeholder(s_display, SUBSCREEN_TRANSPORT_STREAM_TIMEOUT));
+    }
+    xSemaphoreGive(s_stream_transition_lock);
+    if (s_server == NULL ||
+        httpd_queue_work(s_server, send_stream_timeout_work,
+                         (void *)(intptr_t)snapshot->ws_fd) != ESP_OK) {
+        if (s_server != NULL) httpd_sess_trigger_close(s_server, snapshot->ws_fd);
+    }
 }
 
 static void json_error(httpd_req_t *req, const char *request_id, const char *code)
@@ -263,16 +371,26 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
     struct in_addr peer_addr = {};
     const bool peer_addr_valid = peer_address(req, &peer_addr);
     const int ws_fd = httpd_req_to_sockfd(req);
+    released_session_t released = {};
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     if (s_session.active && s_session.ws_fd != ws_fd) {
         xSemaphoreGive(s_session_lock);
+        xSemaphoreGive(s_stream_transition_lock);
         json_error(req, message->request_id, "device_busy");
         return;
     }
-    if (s_session.active) reset_session_locked();
-    else memset(&s_session, 0, sizeof(s_session));
+    if (s_session.active) released = detach_session_locked();
+    xSemaphoreGive(s_session_lock);
+    release_pipeline(&released);
+
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    memset(&s_session, 0, sizeof(s_session));
+    s_next_session_generation++;
+    if (s_next_session_generation == 0) s_next_session_generation++;
     s_session.active = true;
     s_session.negotiated = true;
+    s_session.generation = s_next_session_generation;
     s_session.ws_fd = ws_fd;
     s_session.video_transport = strcmp(message->video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0 ? VIDEO_TRANSPORT_UDP : VIDEO_TRANSPORT_TCP;
     s_session.peer_addr = peer_addr;
@@ -284,6 +402,7 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
     uint32_t session_token = s_session.session_token;
     video_transport_t transport = s_session.video_transport;
     xSemaphoreGive(s_session_lock);
+    xSemaphoreGive(s_stream_transition_lock);
     if (peer_addr_valid) {
         ESP_LOGI(TAG, "hello: peer=%s fd=%d transport=%s session=%08lx", inet_ntoa(peer_addr), ws_fd,
                  video_transport_name(transport), (unsigned long)session_id);
@@ -304,17 +423,26 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
 static void handle_start(httpd_req_t *req, const char *request_id)
 {
     const int ws_fd = httpd_req_to_sockfd(req);
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     if (!s_session.active || !s_session.negotiated || s_session.ws_fd != ws_fd) {
-        xSemaphoreGive(s_session_lock); json_error(req, request_id, "not_negotiated"); return;
+        xSemaphoreGive(s_session_lock);
+        xSemaphoreGive(s_stream_transition_lock);
+        json_error(req, request_id, "not_negotiated");
+        return;
     }
     if (!s_session.started && !frame_pipeline_acquire(pipeline_transport(s_session.video_transport))) {
-        xSemaphoreGive(s_session_lock); json_error(req, request_id, "device_busy"); return;
+        xSemaphoreGive(s_session_lock);
+        xSemaphoreGive(s_stream_transition_lock);
+        json_error(req, request_id, "device_busy");
+        return;
     }
     s_session.started = true;
     s_session.last_control_us = esp_timer_get_time();
+    s_session.last_frame_us = s_session.last_control_us;
     video_transport_t transport = s_session.video_transport;
     xSemaphoreGive(s_session_lock);
+    xSemaphoreGive(s_stream_transition_lock);
     ESP_LOGI(TAG, "stream started: fd=%d transport=%s", ws_fd, video_transport_name(transport));
     char response[160];
     companion_control_build_stream_started(response, sizeof(response), request_id, video_transport_name(transport));
@@ -356,12 +484,40 @@ static void handle_control(httpd_req_t *req, const uint8_t *payload, size_t leng
     } else json_error(req, control.request_id, "unsupported_message");
 }
 
-static void handle_tcp_frame(const uint8_t *data, size_t length)
+static void handle_tcp_frame(int ws_fd, const uint8_t *data, size_t length)
 {
-    if (length < sizeof(companion_frame_header_t)) { update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE); return; }
+    xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    const bool accept = s_session.active && s_session.started && s_session.ws_fd == ws_fd &&
+                        s_session.video_transport == VIDEO_TRANSPORT_TCP;
+    const uint32_t generation = s_session.generation;
+    xSemaphoreGive(s_session_lock);
+    if (!accept) {
+        xSemaphoreGive(s_stream_transition_lock);
+        return;
+    }
+    if (length < sizeof(companion_frame_header_t)) {
+        xSemaphoreGive(s_stream_transition_lock);
+        update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
+        return;
+    }
     const companion_frame_header_t *header = (const companion_frame_header_t *)data;
-    if (length != sizeof(*header) + header->payload_size) { update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE); return; }
-    frame_pipeline_submit_result_t result = frame_pipeline_submit(COMPANION_TRANSPORT_TCP_VIDEO, header, data + sizeof(*header));
+    if (length != sizeof(*header) + header->payload_size) {
+        xSemaphoreGive(s_stream_transition_lock);
+        update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
+        return;
+    }
+    frame_pipeline_submit_result_t result =
+        frame_pipeline_submit(COMPANION_TRANSPORT_TCP_VIDEO, header, data + sizeof(*header));
+    if (result == FRAME_PIPELINE_SUBMIT_OK) {
+        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+        if (s_session.active && s_session.started && s_session.ws_fd == ws_fd &&
+            s_session.generation == generation) {
+            s_session.last_frame_us = esp_timer_get_time();
+        }
+        xSemaphoreGive(s_session_lock);
+    }
+    xSemaphoreGive(s_stream_transition_lock);
     update_transport_status(submit_result_status(result));
     if (result != FRAME_PIPELINE_SUBMIT_OK) ESP_LOGW(TAG, "TCP frame rejected: %s", frame_pipeline_submit_result_name(result));
 }
@@ -373,6 +529,8 @@ static esp_err_t stream_ws(httpd_req_t *req)
         const int ws_fd = httpd_req_to_sockfd(req);
         struct in_addr peer_addr = {};
         const bool peer_addr_valid = peer_address(req, &peer_addr);
+        released_session_t released = {};
+        xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
         xSemaphoreTake(s_session_lock, portMAX_DELAY);
         bool busy = s_session.active && s_session.ws_fd != ws_fd;
         const bool replacing_same_peer = busy && peer_addr_valid && s_session.peer_addr_bound &&
@@ -380,13 +538,21 @@ static esp_err_t stream_ws(httpd_req_t *req)
         if (replacing_same_peer) {
             ESP_LOGW(TAG, "WebSocket reconnect replacing stale session: old_fd=%d new_fd=%d peer=%s",
                      s_session.ws_fd, ws_fd, inet_ntoa(peer_addr));
-            reset_session_locked();
+            released = detach_session_locked();
             busy = false;
         }
         xSemaphoreGive(s_session_lock);
-        if (busy) { ESP_LOGW(TAG, "WebSocket rejected: active session is busy"); update_transport_status(SUBSCREEN_TRANSPORT_DEVICE_BUSY); return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "control session active"); }
+        release_pipeline(&released);
+        if (busy) {
+            xSemaphoreGive(s_stream_transition_lock);
+            ESP_LOGW(TAG, "WebSocket rejected: active session is busy");
+            update_transport_status(SUBSCREEN_TRANSPORT_DEVICE_BUSY);
+            return httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "control session active");
+        }
         ESP_LOGI(TAG, "WebSocket connected: fd=%d", ws_fd);
+        s_last_ws_fd = ws_fd;
         update_transport_status(SUBSCREEN_TRANSPORT_WS_CONNECTED);
+        xSemaphoreGive(s_stream_transition_lock);
         return ESP_OK;
     }
     httpd_ws_frame_t frame = {};
@@ -419,7 +585,8 @@ static esp_err_t stream_ws(httpd_req_t *req)
             xSemaphoreTake(s_session_lock, portMAX_DELAY);
             bool accept = s_session.active && s_session.started && s_session.ws_fd == httpd_req_to_sockfd(req) && s_session.video_transport == VIDEO_TRANSPORT_TCP;
             xSemaphoreGive(s_session_lock);
-            if (accept) handle_tcp_frame(data, frame.len); else json_error(req, "", "tcp_video_not_started");
+            if (accept) handle_tcp_frame(httpd_req_to_sockfd(req), data, frame.len);
+            else json_error(req, "", "tcp_video_not_started");
         } else update_transport_status(SUBSCREEN_TRANSPORT_BAD_WS_FRAME);
     }
     free(data);
@@ -501,22 +668,49 @@ static void udp_task(void *arg)
                 s_session.last_udp_us = now;
                 if (reassembly_complete_locked()) {
                     uint32_t frame_length = s_session.reassembly_length;
+                    const uint32_t session_generation = s_session.generation;
                     s_session.reassembly_fragments = 0;
                     s_session.udp_completed_frames++;
                     xSemaphoreGive(s_session_lock);
                     const companion_frame_header_t *frame = (const companion_frame_header_t *)s_udp_reassembly;
                     if (frame_length == sizeof(*frame) + frame->payload_size) {
-                        frame_pipeline_submit_result_t result = frame_pipeline_submit(COMPANION_TRANSPORT_UDP_VIDEO, frame, s_udp_reassembly + sizeof(*frame));
+                        xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
                         xSemaphoreTake(s_session_lock, portMAX_DELAY);
-                        if (result == FRAME_PIPELINE_SUBMIT_OK) s_session.udp_submitted_frames++;
-                        else s_session.udp_submit_failures++;
+                        const bool accept = s_session.active && s_session.started &&
+                                            s_session.generation == session_generation &&
+                                            s_session.video_transport == VIDEO_TRANSPORT_UDP;
                         xSemaphoreGive(s_session_lock);
-                        if (result != FRAME_PIPELINE_SUBMIT_OK) {
+                        frame_pipeline_submit_result_t result = accept ?
+                            frame_pipeline_submit(COMPANION_TRANSPORT_UDP_VIDEO, frame,
+                                                  s_udp_reassembly + sizeof(*frame)) :
+                            FRAME_PIPELINE_SUBMIT_BUSY;
+                        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+                        if (s_session.active && s_session.started &&
+                            s_session.generation == session_generation) {
+                            if (result == FRAME_PIPELINE_SUBMIT_OK) {
+                                s_session.udp_submitted_frames++;
+                                s_session.last_frame_us = esp_timer_get_time();
+                            } else {
+                                s_session.udp_submit_failures++;
+                            }
+                        }
+                        xSemaphoreGive(s_session_lock);
+                        xSemaphoreGive(s_stream_transition_lock);
+                        if (accept && result != FRAME_PIPELINE_SUBMIT_OK) {
                             ESP_LOGW(TAG, "UDP frame rejected: frame=%lu result=%s", (unsigned long)header->frame_sequence,
                                      frame_pipeline_submit_result_name(result));
                         }
-                        update_transport_status(submit_result_status(result));
-                    } else update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
+                        if (accept) update_transport_status(submit_result_status(result));
+                    } else {
+                        xSemaphoreTake(s_stream_transition_lock, portMAX_DELAY);
+                        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+                        const bool current = s_session.active && s_session.started &&
+                                             s_session.generation == session_generation &&
+                                             s_session.video_transport == VIDEO_TRANSPORT_UDP;
+                        xSemaphoreGive(s_session_lock);
+                        xSemaphoreGive(s_stream_transition_lock);
+                        if (current) update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
+                    }
                     continue;
                 }
             } else {
@@ -533,11 +727,20 @@ static void udp_task(void *arg)
                     s_last_logged_reject = reject;
                     s_last_udp_reject_log_us = now;
                 }
-                update_transport_status(SUBSCREEN_TRANSPORT_UDP_REJECTED);
+                if (session_active) update_transport_status(SUBSCREEN_TRANSPORT_UDP_REJECTED);
             }
             xSemaphoreGive(s_session_lock);
         }
         xSemaphoreTake(s_session_lock, portMAX_DELAY);
+        frame_timeout_snapshot_t frame_timeout = {};
+        if (s_session.active && s_session.started && s_session.last_frame_us > 0 &&
+            now - s_session.last_frame_us > FRAME_TIMEOUT_US) {
+            frame_timeout = (frame_timeout_snapshot_t) {
+                .ws_fd = s_session.ws_fd,
+                .generation = s_session.generation,
+                .last_frame_us = s_session.last_frame_us,
+            };
+        }
         if (s_session.active && s_session.started && s_session.video_transport == VIDEO_TRANSPORT_UDP &&
             s_session.last_udp_us > 0 && now - s_session.last_udp_us > UDP_SESSION_TIMEOUT_US) {
             if (!s_session.udp_media_paused) {
@@ -554,6 +757,7 @@ static void udp_task(void *arg)
             update_transport_status(SUBSCREEN_TRANSPORT_UDP_DROPPED);
         }
         xSemaphoreGive(s_session_lock);
+        if (frame_timeout.generation != 0) end_session_on_frame_timeout(&frame_timeout);
         log_udp_summary();
     }
 }
@@ -618,6 +822,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 static esp_err_t start_server(void)
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.server_port = CONFIG_COMPANION_HTTP_PORT; config.max_uri_handlers = 4; config.max_open_sockets = 4;
+    config.close_fn = control_socket_closed;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "HTTP server");
     const httpd_uri_t root = {.uri = "/", .method = HTTP_GET, .handler = root_get};
     const httpd_uri_t status = {.uri = "/api/status", .method = HTTP_GET, .handler = status_get};
@@ -647,7 +852,12 @@ esp_err_t transport_wifi_init(subscreen_display_t *display)
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) { ESP_ERROR_CHECK(nvs_flash_erase()); err = nvs_flash_init(); }
     ESP_RETURN_ON_ERROR(err, TAG, "NVS");
-    ensure_token(); s_display = display; s_session_lock = xSemaphoreCreateMutex(); ESP_RETURN_ON_FALSE(s_session_lock != NULL, ESP_ERR_NO_MEM, TAG, "session lock");
+    ensure_token();
+    s_display = display;
+    s_stream_transition_lock = xSemaphoreCreateMutex();
+    s_session_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_stream_transition_lock != NULL && s_session_lock != NULL,
+                        ESP_ERR_NO_MEM, TAG, "stream synchronization locks");
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif"); ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
     s_sta_netif = esp_netif_create_default_wifi_sta(); esp_netif_create_default_wifi_ap();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT(); ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "wifi init");

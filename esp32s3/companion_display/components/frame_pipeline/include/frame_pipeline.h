@@ -64,7 +64,15 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
 esp_err_t frame_pipeline_submit_result_to_esp_err(frame_pipeline_submit_result_t result);
 const char *frame_pipeline_submit_result_name(frame_pipeline_submit_result_t result);
 bool frame_pipeline_acquire(companion_transport_t source);
-void frame_pipeline_release(companion_transport_t source);
+/**
+ * @brief Stop accepting frames from a transport and synchronously invalidate
+ *        queued/in-flight work before returning.
+ *
+ * A frame already being drawn is allowed to finish. Queued frames from the
+ * released generation are discarded and cannot overwrite a subsequent
+ * placeholder screen.
+ */
+esp_err_t frame_pipeline_release(companion_transport_t source);
 companion_transport_t frame_pipeline_active_transport(void);
 void frame_pipeline_set_presented_callback(frame_pipeline_presented_callback_t callback, void *context);
 

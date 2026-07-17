@@ -262,6 +262,12 @@ int companion_control_build_stream_stopped(char *buffer, size_t buffer_size,
                     request_id);
 }
 
+int companion_control_build_stream_timeout(char *buffer, size_t buffer_size)
+{
+    return snprintf(buffer, buffer_size,
+                    "{\"type\":\"stream_stopped\",\"reason\":\"frame_timeout\"}");
+}
+
 int companion_control_build_pong(char *buffer, size_t buffer_size,
                                  const char *request_id)
 {
