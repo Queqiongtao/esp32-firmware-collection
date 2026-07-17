@@ -8,6 +8,7 @@
 
 #include "esp_adc/adc_oneshot.h"
 #include "driver/gpio.h"
+#include "display_config.h"
 #include "esp_heap_caps.h"
 
 #define TEST_AUDIO_BYTES_PER_SAMPLE             2
@@ -267,12 +268,18 @@
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */
 
 /* 固定大小的 RGB565 预览帧。UVC worker 将已解码的原始画面等比缩放并居中
- * 到此缓冲；UI 通过受控拷贝取得快照，避免直接持有 JPEG DMA 输出缓冲。 */
-#define TEST_UVC_PREVIEW_H_RES                  896
-#define TEST_UVC_PREVIEW_V_RES                  448
+ * 到此缓冲；UI 通过受控拷贝取得快照，避免直接持有 JPEG DMA 输出缓冲。
+ * 全屏预览: 与 MIPI-DSI 面板同尺寸, 非同比例源等比缩放后
+ * 上下/左右留黑边。 */
+#define TEST_UVC_PREVIEW_H_RES                  DISPLAY_PANEL_H_RES
+#define TEST_UVC_PREVIEW_V_RES                  DISPLAY_PANEL_V_RES
 #define TEST_UVC_PREVIEW_REFRESH_MS             100
-/* worker 更新预览的最小间隔。1080p 下 PPA 缩放需整读 ~4MB PSRAM 源
- * (实测 preview 耗时 90ms), 与 JPEG 解码/显示刷新争用 PSRAM 带宽,
- * 会拉长 ISOC 回调 memcpy 进而诱发丢包截断帧, 故降低预览频率。 */
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS     200
+/* worker 更新预览的最小间隔, 按协商的源分辨率自适应。1080p 下 PPA 缩放
+ * 需整读 ~4MB PSRAM 源 (实测 preview 耗时 90ms), 与 JPEG 解码/显示刷新
+ * 争用 PSRAM 带宽, 会拉长 ISOC 回调 memcpy 进而诱发丢包截断帧, 故大
+ * 分辨率保持保守间隔; 小分辨率源 PSRAM 读取量小, 可提高预览频率。
+ * 分级值未经全量上板验证, 若出现截断帧计数上升需回调保守。 */
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_SMALL_MS  100  /* 源 <= 640x480, ~10fps */
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MEDIUM_MS 100  /* 源 <= 1280x720, ~10fps */
+#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS  200  /* 更大源 (1080p), 实证保守值 */
 #define TEST_UVC_PPA_BUFFER_ALIGNMENT           128

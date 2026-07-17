@@ -122,10 +122,17 @@ static lv_obj_t *s_uvc_status_label;
 static lv_obj_t *s_uvc_detail_label;
 static lv_obj_t *s_uvc_resolution_dropdown;
 static lv_obj_t *s_uvc_preview_image;
+static lv_obj_t *s_uvc_fps_label;
 static lv_timer_t *s_uvc_timer;
 static uint8_t *s_uvc_preview_image_buf;
 static lv_image_dsc_t s_uvc_preview_dsc;
 static uint32_t s_uvc_preview_frame_id;
+/* 实际帧率 1s 滑动窗口: 预览 fps 取 UI 成功提交次数, 相机 fps 取
+ * frames_received 增量。worker frame_id 可能跳变，不能代表屏幕提交次数。 */
+static uint32_t s_uvc_preview_submit_count;
+static uint32_t s_uvc_fps_last_submit_count;
+static uint32_t s_uvc_fps_last_received;
+static uint32_t s_uvc_fps_window_start;
 static size_t s_uvc_resolution_count;
 static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
 
@@ -1672,6 +1679,31 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
         esp_cache_msync(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE,
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         lv_obj_invalidate(s_uvc_preview_image);
+        s_uvc_preview_submit_count++;
+    }
+
+    /* 实际帧率: 每 1s 窗口结算一次。预览 fps = UI 提交次数增量,
+     * 相机 fps = frames_received 增量; 计数器回卷(流重启)时重置基线。 */
+    uint32_t fps_elapsed_ms = lv_tick_elaps(s_uvc_fps_window_start);
+    if (fps_elapsed_ms >= 1000) {
+        test_uvc_status_t uvc_status = {0};
+        if (test_uvc_get_status(&uvc_status) == ESP_OK) {
+            const uint32_t submitted = s_uvc_preview_submit_count;
+            const uint32_t received = uvc_status.frames_received;
+            if (submitted >= s_uvc_fps_last_submit_count && received >= s_uvc_fps_last_received) {
+                const float preview_fps =
+                    (float)(submitted - s_uvc_fps_last_submit_count) * 1000.0f / (float)fps_elapsed_ms;
+                const float camera_fps =
+                    (float)(received - s_uvc_fps_last_received) * 1000.0f / (float)fps_elapsed_ms;
+                demo_label_set_text_fmt_if_changed(s_uvc_fps_label, "预览 %.1f fps  相机 %.1f fps",
+                                                   preview_fps, camera_fps);
+            } else {
+                demo_label_set_text_if_changed(s_uvc_fps_label, "预览 -- fps  相机 -- fps");
+            }
+            s_uvc_fps_last_submit_count = submitted;
+            s_uvc_fps_last_received = received;
+        }
+        s_uvc_fps_window_start = lv_tick_get();
     }
 #endif
 }
@@ -1697,11 +1729,16 @@ static void demo_uvc_return_btn_cb(lv_event_t *e)
     s_uvc_detail_label = NULL;
     s_uvc_resolution_dropdown = NULL;
     s_uvc_preview_image = NULL;
+    s_uvc_fps_label = NULL;
     heap_caps_free(s_uvc_preview_image_buf);
     s_uvc_preview_image_buf = NULL;
     memset(&s_uvc_preview_dsc, 0, sizeof(s_uvc_preview_dsc));
     s_uvc_preview_frame_id = 0;
+    s_uvc_preview_submit_count = 0;
     s_uvc_resolution_count = 0;
+    s_uvc_fps_last_submit_count = 0;
+    s_uvc_fps_last_received = 0;
+    s_uvc_fps_window_start = 0;
 }
 
 static void demo_uvc_enter_btn_cb(lv_event_t *e)
@@ -1726,48 +1763,12 @@ static void demo_uvc_enter_btn_cb(lv_event_t *e)
     }
 
     s_uvc_screen = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(s_uvc_screen, lv_color_hex(0x101820), 0);
-    lv_obj_set_style_pad_all(s_uvc_screen, 12, 0);
+    lv_obj_set_style_bg_color(s_uvc_screen, lv_color_black(), 0);
+    lv_obj_set_style_pad_all(s_uvc_screen, 0, 0);
     lv_obj_clear_flag(s_uvc_screen, LV_OBJ_FLAG_SCROLLABLE);
     demo_set_text_role(s_uvc_screen, DISPLAY_FONT_ROLE_BODY);
 
-    lv_obj_t *title = lv_label_create(s_uvc_screen);
-    lv_label_set_text(title, "UVC 摄像头测试");
-    demo_config_label(title, DISPLAY_FONT_ROLE_TITLE);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 2);
-
-    lv_obj_t *return_btn = lv_button_create(s_uvc_screen);
-    lv_obj_set_size(return_btn, 112, 42);
-    lv_obj_align(return_btn, LV_ALIGN_TOP_LEFT, 0, 0);
-    lv_obj_add_event_cb(return_btn, demo_uvc_return_btn_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *return_label = lv_label_create(return_btn);
-    lv_label_set_text(return_label, "返回主页");
-    demo_set_text_role(return_label, DISPLAY_FONT_ROLE_BODY);
-    lv_obj_center(return_label);
-
-    s_uvc_status_label = lv_label_create(s_uvc_screen);
-    s_uvc_detail_label = lv_label_create(s_uvc_screen);
-    demo_config_label(s_uvc_status_label, DISPLAY_FONT_ROLE_BODY);
-    demo_config_label(s_uvc_detail_label, DISPLAY_FONT_ROLE_SMALL);
-    lv_obj_set_style_text_color(s_uvc_status_label, lv_color_hex(0xE8F1F5), 0);
-    lv_obj_set_style_text_color(s_uvc_detail_label, lv_color_hex(0xA9C0C9), 0);
-    lv_obj_align(s_uvc_status_label, LV_ALIGN_TOP_MID, 0, 42);
-    lv_obj_align(s_uvc_detail_label, LV_ALIGN_TOP_MID, 0, 66);
-
-    s_uvc_resolution_dropdown = lv_dropdown_create(s_uvc_screen);
-    lv_obj_set_size(s_uvc_resolution_dropdown, 270, 42);
-    lv_obj_align(s_uvc_resolution_dropdown, LV_ALIGN_TOP_MID, 0, 92);
-    demo_set_text_role(s_uvc_resolution_dropdown, DISPLAY_FONT_ROLE_BODY);
-    lv_obj_t *uvc_resolution_list = lv_dropdown_get_list(s_uvc_resolution_dropdown);
-    demo_set_text_role(uvc_resolution_list, DISPLAY_FONT_ROLE_BODY);
-    lv_obj_set_style_text_font(uvc_resolution_list,
-                               demo_get_role_font(DISPLAY_FONT_ROLE_BODY),
-                               LV_PART_SELECTED);
-    lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
-    lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
-    lv_obj_add_event_cb(s_uvc_resolution_dropdown, demo_uvc_resolution_dropdown_cb,
-                        LV_EVENT_VALUE_CHANGED, NULL);
-
+    /* 全屏预览图铺底 (与面板同尺寸 1024x600), 控件悬浮其上。 */
     s_uvc_preview_dsc = (lv_image_dsc_t) {
         .header = {
             .cf = LV_COLOR_FORMAT_RGB565,
@@ -1781,10 +1782,74 @@ static void demo_uvc_enter_btn_cb(lv_event_t *e)
     s_uvc_preview_image = lv_image_create(s_uvc_screen);
     lv_image_set_src(s_uvc_preview_image, &s_uvc_preview_dsc);
     lv_obj_set_size(s_uvc_preview_image, TEST_UVC_PREVIEW_H_RES, TEST_UVC_PREVIEW_V_RES);
-    lv_obj_align(s_uvc_preview_image, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_align(s_uvc_preview_image, LV_ALIGN_CENTER, 0, 0);
+
+    /* 半透明悬浮顶栏: 返回按钮 + 分辨率下拉框 + 实际帧率。 */
+    lv_obj_t *topbar = lv_obj_create(s_uvc_screen);
+    lv_obj_set_size(topbar, LV_PCT(100), 56);
+    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(topbar, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(topbar, 0, 0);
+    lv_obj_set_style_radius(topbar, 0, 0);
+    lv_obj_set_style_pad_all(topbar, 7, 0);
+    lv_obj_clear_flag(topbar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *return_btn = lv_button_create(topbar);
+    lv_obj_set_size(return_btn, 112, 42);
+    lv_obj_align(return_btn, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_event_cb(return_btn, demo_uvc_return_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *return_label = lv_label_create(return_btn);
+    lv_label_set_text(return_label, "返回主页");
+    demo_set_text_role(return_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(return_label);
+
+    s_uvc_resolution_dropdown = lv_dropdown_create(topbar);
+    lv_obj_set_size(s_uvc_resolution_dropdown, 260, 42);
+    lv_obj_align(s_uvc_resolution_dropdown, LV_ALIGN_LEFT_MID, 124, 0);
+    demo_set_text_role(s_uvc_resolution_dropdown, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_t *uvc_resolution_list = lv_dropdown_get_list(s_uvc_resolution_dropdown);
+    demo_set_text_role(uvc_resolution_list, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_set_style_text_font(uvc_resolution_list,
+                               demo_get_role_font(DISPLAY_FONT_ROLE_BODY),
+                               LV_PART_SELECTED);
+    lv_dropdown_set_options(s_uvc_resolution_dropdown, "等待摄像头枚举");
+    lv_obj_add_state(s_uvc_resolution_dropdown, LV_STATE_DISABLED);
+    lv_obj_add_event_cb(s_uvc_resolution_dropdown, demo_uvc_resolution_dropdown_cb,
+                        LV_EVENT_VALUE_CHANGED, NULL);
+
+    s_uvc_fps_label = lv_label_create(topbar);
+    demo_config_label(s_uvc_fps_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_set_style_text_color(s_uvc_fps_label, lv_color_hex(0xE8F1F5), 0);
+    lv_obj_align(s_uvc_fps_label, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_label_set_text(s_uvc_fps_label, "预览 -- fps  相机 -- fps");
+
+    /* 半透明悬浮底栏: 流状态 + 计数明细。 */
+    lv_obj_t *statusbar = lv_obj_create(s_uvc_screen);
+    lv_obj_set_size(statusbar, LV_PCT(100), 60);
+    lv_obj_align(statusbar, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_color(statusbar, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(statusbar, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(statusbar, 0, 0);
+    lv_obj_set_style_radius(statusbar, 0, 0);
+    lv_obj_set_style_pad_all(statusbar, 6, 0);
+    lv_obj_clear_flag(statusbar, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_uvc_status_label = lv_label_create(statusbar);
+    s_uvc_detail_label = lv_label_create(statusbar);
+    demo_config_label(s_uvc_status_label, DISPLAY_FONT_ROLE_BODY);
+    demo_config_label(s_uvc_detail_label, DISPLAY_FONT_ROLE_SMALL);
+    lv_obj_set_style_text_color(s_uvc_status_label, lv_color_hex(0xE8F1F5), 0);
+    lv_obj_set_style_text_color(s_uvc_detail_label, lv_color_hex(0xA9C0C9), 0);
+    lv_obj_align(s_uvc_status_label, LV_ALIGN_TOP_LEFT, 4, 0);
+    lv_obj_align(s_uvc_detail_label, LV_ALIGN_BOTTOM_LEFT, 4, 0);
 
     s_uvc_preview_frame_id = 0;
+    s_uvc_preview_submit_count = 0;
     s_uvc_resolution_count = 0;
+    s_uvc_fps_last_submit_count = 0;
+    s_uvc_fps_last_received = 0;
+    s_uvc_fps_window_start = lv_tick_get();
     s_uvc_timer = lv_timer_create(demo_uvc_timer_cb, TEST_UVC_PREVIEW_REFRESH_MS, NULL);
     lv_screen_load(s_uvc_screen);
     esp_err_t ret = test_usb_role_switch(TEST_USB_ROLE_UVC_HOST);

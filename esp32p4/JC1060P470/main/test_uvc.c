@@ -122,6 +122,23 @@ static uint32_t s_preview_dst_x;
 static uint32_t s_preview_dst_y;
 static int64_t s_preview_last_update_us;
 
+/* worker 预览节流间隔(ms), 按协商的源分辨率分级(见 test_config.h)。
+ * 协商/切换分辨率时在 s_frame_lock 内更新; worker 以对齐 32 位读取,
+ * 本平台为原子, 无需加锁。 */
+static volatile uint32_t s_preview_update_interval_ms = TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS;
+
+static uint32_t uvc_preview_interval_ms_for(uint32_t h_res, uint32_t v_res)
+{
+    const uint32_t pixels = h_res * v_res;
+    if (pixels <= 640U * 480U) {
+        return TEST_UVC_PREVIEW_UPDATE_INTERVAL_SMALL_MS;
+    }
+    if (pixels <= 1280U * 720U) {
+        return TEST_UVC_PREVIEW_UPDATE_INTERVAL_MEDIUM_MS;
+    }
+    return TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS;
+}
+
 /* Device capability enumeration result, filled in the DEVICE_CONNECTED
  * callback and consumed by test_uvc_run() when opening the stream. */
 static uvc_host_stream_format_t s_negotiated_format;
@@ -652,6 +669,8 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
     s_frame_info_count = list_size;
     s_negotiated_format = negotiated_format;
     s_format_negotiated = true;
+    s_preview_update_interval_ms =
+        uvc_preview_interval_ms_for(negotiated_format.h_res, negotiated_format.v_res);
     portEXIT_CRITICAL(&s_frame_lock);
 
     ESP_LOGI(TAG, "negotiated format: %ux%u@%.1ffps format=%d%s",
@@ -1265,7 +1284,7 @@ static void uvc_worker_task(void *arg)
          * 相机帧率; 解码失败时 s_preview_last_update_us 不会前移, 下一
          * 帧会立即重试, 预览不会因坏帧而卡住。 */
         if (esp_timer_get_time() - s_preview_last_update_us <
-                TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS * 1000LL) {
+                (int64_t)s_preview_update_interval_ms * 1000LL) {
             portENTER_CRITICAL(&s_frame_lock);
             s_frames_skipped++;
             portEXIT_CRITICAL(&s_frame_lock);
@@ -1359,7 +1378,7 @@ static void uvc_worker_task(void *arg)
         uvc_return_frame_or_retry(&msg);
         if (ret == ESP_OK) {
             int64_t now_us = esp_timer_get_time();
-            if (now_us - s_preview_last_update_us >= TEST_UVC_PREVIEW_UPDATE_INTERVAL_MS * 1000LL) {
+            if (now_us - s_preview_last_update_us >= (int64_t)s_preview_update_interval_ms * 1000LL) {
                 s_preview_last_update_us = now_us;
                 uvc_update_preview(info.width, info.height, out_size);
             }
@@ -2156,6 +2175,8 @@ static esp_err_t uvc_change_resolution_locked(uint32_t h_res, uint32_t v_res)
     portENTER_CRITICAL(&s_frame_lock);
     s_negotiated_format = format;
     s_format_negotiated = true;
+    s_preview_update_interval_ms =
+        uvc_preview_interval_ms_for(format.h_res, format.v_res);
     s_stream_started = true;
     s_accept_frames = true;
     s_uvc_streaming_marker = UVC_STREAMING_MARKER;
