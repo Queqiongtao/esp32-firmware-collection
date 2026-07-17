@@ -117,6 +117,8 @@ static lv_obj_t *s_wifi_password_ta;
 static lv_obj_t *s_wifi_keyboard;
 
 static lv_obj_t *s_main_screen;
+static lv_obj_t *s_font_screen;
+static lv_timer_t *s_font_timer;
 static lv_obj_t *s_uvc_screen;
 static lv_obj_t *s_uvc_status_label;
 static lv_obj_t *s_uvc_detail_label;
@@ -1510,10 +1512,91 @@ static void demo_update_font_touch_zoom(void)
 static void demo_font_touch_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
-    if (lv_screen_active() != s_main_screen) {
+    if (s_font_screen == NULL || lv_screen_active() != s_font_screen) {
         return;
     }
     demo_update_font_touch_zoom();
+}
+
+static void demo_font_return_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_font_timer != NULL) {
+        lv_timer_delete(s_font_timer);
+        s_font_timer = NULL;
+    }
+    lv_screen_load(s_main_screen);
+    lv_obj_delete(s_font_screen);
+    s_font_screen = NULL;
+    s_font_sample_area = NULL;
+    s_font_sample_label = NULL;
+    s_font_touch_label = NULL;
+    s_font_pinch_active = false;
+    s_font_pinch_base_distance = 0.0f;
+}
+
+static void demo_font_enter_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    if (s_font_screen != NULL) {
+        lv_screen_load(s_font_screen);
+        return;
+    }
+
+    s_font_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(s_font_screen, lv_color_hex(0xFFF9EF), 0);
+    lv_obj_set_style_pad_all(s_font_screen, 0, 0);
+    lv_obj_clear_flag(s_font_screen, LV_OBJ_FLAG_SCROLLABLE);
+    demo_set_text_role(s_font_screen, DISPLAY_FONT_ROLE_BODY);
+
+    /* 全屏采样区铺底, 整个屏幕都可用双指捏合缩放。 */
+    s_font_sample_area = lv_obj_create(s_font_screen);
+    lv_obj_set_size(s_font_sample_area, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(s_font_sample_area, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_radius(s_font_sample_area, 0, 0);
+    lv_obj_set_style_bg_color(s_font_sample_area, lv_color_hex(0xFFF9EF), 0);
+    lv_obj_set_style_border_width(s_font_sample_area, 0, 0);
+    lv_obj_clear_flag(s_font_sample_area, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_font_sample_label = lv_label_create(s_font_sample_area);
+    demo_config_label(s_font_sample_label, DISPLAY_FONT_ROLE_TITLE);
+    lv_label_set_text(s_font_sample_label, "缩放测试 中文");
+    lv_obj_set_style_text_color(s_font_sample_label, lv_color_hex(0x17324D), 0);
+    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
+    lv_obj_center(s_font_sample_label);
+    demo_font_apply_sample_size(s_font_sample_size_px);
+
+    /* 半透明悬浮顶栏: 返回按钮 + 触点/字号信息。 */
+    lv_obj_t *topbar = lv_obj_create(s_font_screen);
+    lv_obj_set_size(topbar, LV_PCT(100), 56);
+    lv_obj_align(topbar, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_color(topbar, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(topbar, LV_OPA_60, 0);
+    lv_obj_set_style_border_width(topbar, 0, 0);
+    lv_obj_set_style_radius(topbar, 0, 0);
+    lv_obj_set_style_pad_all(topbar, 7, 0);
+    lv_obj_clear_flag(topbar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *return_btn = lv_button_create(topbar);
+    lv_obj_set_size(return_btn, 112, 42);
+    lv_obj_align(return_btn, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_add_event_cb(return_btn, demo_font_return_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *return_label = lv_label_create(return_btn);
+    lv_label_set_text(return_label, "返回主页");
+    demo_set_text_role(return_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(return_label);
+
+    s_font_touch_label = lv_label_create(topbar);
+    demo_config_label(s_font_touch_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_set_style_text_color(s_font_touch_label, lv_color_hex(0xE8F1F5), 0);
+    lv_obj_align(s_font_touch_label, LV_ALIGN_RIGHT_MID, -8, 0);
+    lv_label_set_text_fmt(s_font_touch_label, "双指捏合缩放  Font: %upx",
+                          (unsigned int)s_font_sample_size_px);
+
+    s_font_pinch_active = false;
+    s_font_pinch_base_distance = 0.0f;
+    s_font_timer = lv_timer_create(demo_font_touch_timer_cb, 40, NULL);
+    lv_screen_load(s_font_screen);
 }
 
 static void demo_update_font_card(void)
@@ -1526,27 +1609,24 @@ static void demo_update_font_card(void)
     if (diag == NULL) {
         demo_label_set_text_if_changed(s_font_status_label, "State: NA");
         demo_label_set_text_if_changed(s_font_file_label, "Font: static fallback");
-        demo_label_set_text_if_changed(s_font_size_label, "Gesture: pinch with two fingers");
-        demo_label_set_text_fmt_if_changed(s_font_touch_label, "Touch: 0 point(s) in area  Font: %upx",
-                                           (unsigned int)s_font_sample_size_px);
+        demo_label_set_text_if_changed(s_font_size_label, "点击按钮进入全屏缩放测试");
         demo_label_set_text_if_changed(s_font_glyph_label, "FreeType: --");
-        demo_label_set_text_if_changed(s_font_sample_label, "缩放测试 中文");
         return;
     }
 
-    bool sample_font_ready = demo_font_apply_sample_size(s_font_sample_size_px);
+    bool sample_font_ready = display_font_is_freetype_ready() &&
+                             display_font_get_freetype_sample_font(s_font_sample_size_px) != NULL;
 
     demo_label_set_text_fmt_if_changed(s_font_status_label, "State: %s stage=%s",
                                        demo_font_diag_state_text(diag->state),
                                        diag->stage[0] != '\0' ? diag->stage : "--");
     demo_label_set_text_fmt_if_changed(s_font_file_label, "Font: %s",
                                        sample_font_ready ? "FreeType dynamic" : "static fallback");
-    demo_label_set_text_if_changed(s_font_size_label, "Gesture: pinch with two fingers");
+    demo_label_set_text_if_changed(s_font_size_label, "点击按钮进入全屏缩放测试");
     demo_label_set_text_fmt_if_changed(s_font_glyph_label, "Roles: ready=%" PRIu32 " fail=%" PRIu32 " %s",
                                        diag->role_ready_count,
                                        diag->role_fail_count,
                                        diag->first_error[0] != '\0' ? diag->first_error : "");
-    demo_label_set_text_if_changed(s_font_sample_label, "缩放测试 中文");
 }
 
 static void demo_uvc_update_resolution_options(void)
@@ -2144,32 +2224,23 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     lv_obj_add_state(s_ble_adv_btn, LV_STATE_DISABLED);
     demo_build_progress(progress_cb, "ble");
 
-    lv_obj_t *font_card = demo_create_card(row, "8. FreeType", 488, 420);
+    lv_obj_t *font_card = demo_create_card(row, "8. FreeType", 488, 282);
     s_font_status_label = lv_label_create(font_card);
     s_font_file_label = lv_label_create(font_card);
     s_font_size_label = lv_label_create(font_card);
-    s_font_touch_label = lv_label_create(font_card);
     s_font_glyph_label = lv_label_create(font_card);
     demo_config_label(s_font_status_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_font_file_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_font_size_label, DISPLAY_FONT_ROLE_BODY);
-    demo_config_label(s_font_touch_label, DISPLAY_FONT_ROLE_BODY);
     demo_config_label(s_font_glyph_label, DISPLAY_FONT_ROLE_BODY);
 
-    s_font_sample_area = lv_obj_create(font_card);
-    lv_obj_set_size(s_font_sample_area, lv_pct(100), 250);
-    lv_obj_set_style_radius(s_font_sample_area, 8, 0);
-    lv_obj_set_style_bg_color(s_font_sample_area, lv_color_hex(0xFFF9EF), 0);
-    lv_obj_set_style_border_width(s_font_sample_area, 1, 0);
-    lv_obj_set_style_border_color(s_font_sample_area, lv_color_hex(0xD7C7AF), 0);
-    lv_obj_clear_flag(s_font_sample_area, LV_OBJ_FLAG_SCROLLABLE);
-
-    s_font_sample_label = lv_label_create(s_font_sample_area);
-    demo_config_label(s_font_sample_label, DISPLAY_FONT_ROLE_TITLE);
-    lv_label_set_text(s_font_sample_label, "缩放测试 中文");
-    lv_obj_set_style_text_color(s_font_sample_label, lv_color_hex(0x17324D), 0);
-    lv_obj_set_style_transform_scale(s_font_sample_label, 256, 0);
-    lv_obj_center(s_font_sample_label);
+    lv_obj_t *font_enter_btn = lv_button_create(font_card);
+    lv_obj_set_size(font_enter_btn, 200, 48);
+    lv_obj_add_event_cb(font_enter_btn, demo_font_enter_btn_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *font_enter_label = lv_label_create(font_enter_btn);
+    lv_label_set_text(font_enter_label, "进入缩放测试");
+    demo_set_text_role(font_enter_label, DISPLAY_FONT_ROLE_BODY);
+    lv_obj_center(font_enter_label);
 
     demo_build_progress(progress_cb, "font");
 
@@ -2272,6 +2343,5 @@ void example_lvgl_demo_ui(lv_display_t *disp, demo_ui_progress_cb_t progress_cb)
     demo_update_wireless_card();
     demo_update_font_card();
     demo_build_progress(progress_cb, "initial-update");
-    lv_timer_create(demo_font_touch_timer_cb, 40, NULL);
     lv_timer_create(demo_ui_timer_cb, 250, NULL);
 }
