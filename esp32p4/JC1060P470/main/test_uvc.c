@@ -917,6 +917,11 @@ static void uvc_update_preview_cpu(uint32_t src_w, uint32_t src_h, size_t source
     }
 }
 
+static bool uvc_preview_use_native_size(uint32_t src_w, uint32_t src_h)
+{
+    return src_w <= 800U && src_h <= TEST_UVC_PREVIEW_V_RES;
+}
+
 static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size)
 {
     uvc_preview_buffer_t *back = &s_preview_buffers[s_preview_back_index];
@@ -935,11 +940,15 @@ static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size
         return;
     }
 
-    uint32_t dst_w = TEST_UVC_PREVIEW_H_RES;
-    uint32_t dst_h = (uint32_t)(((uint64_t)src_h * dst_w) / src_w);
-    if (dst_h > TEST_UVC_PREVIEW_V_RES) {
-        dst_h = TEST_UVC_PREVIEW_V_RES;
-        dst_w = (uint32_t)(((uint64_t)src_w * dst_h) / src_h);
+    uint32_t dst_w = src_w;
+    uint32_t dst_h = src_h;
+    if (!uvc_preview_use_native_size(src_w, src_h)) {
+        dst_w = TEST_UVC_PREVIEW_H_RES;
+        dst_h = (uint32_t)(((uint64_t)src_h * dst_w) / src_w);
+        if (dst_h > TEST_UVC_PREVIEW_V_RES) {
+            dst_h = TEST_UVC_PREVIEW_V_RES;
+            dst_w = (uint32_t)(((uint64_t)src_w * dst_h) / src_h);
+        }
     }
     const uint32_t dst_x = (TEST_UVC_PREVIEW_H_RES - dst_w) / 2U;
     const uint32_t dst_y = (TEST_UVC_PREVIEW_V_RES - dst_h) / 2U;
@@ -2787,9 +2796,8 @@ esp_err_t test_uvc_recover(test_uvc_recovery_level_t level)
 
 esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size, test_uvc_preview_info_t *out_info)
 {
-    const size_t preview_size = TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U;
-    ESP_RETURN_ON_FALSE(out_rgb565 != NULL && out_size >= preview_size, ESP_ERR_INVALID_SIZE,
-                        TAG, "preview destination too small");
+    ESP_RETURN_ON_FALSE(out_rgb565 != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "preview destination is null");
     if (s_preview_lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -2806,13 +2814,28 @@ esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size, test_uvc_prev
         xSemaphoreGive(s_preview_lock);
         return ESP_ERR_NOT_FOUND;
     }
-    memcpy(out_rgb565, front, preview_size);
+    const uvc_preview_buffer_t *layout = &s_preview_buffers[s_preview_front_index];
+    const size_t row_size = (size_t)layout->dst_w * sizeof(uint16_t);
+    const size_t preview_size = row_size * layout->dst_h;
+    if (!layout->layout_valid || layout->dst_w == 0 || layout->dst_h == 0 ||
+        out_size < preview_size) {
+        xSemaphoreGive(s_preview_lock);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    uint8_t *dst = out_rgb565;
+    for (uint32_t y = 0; y < layout->dst_h; ++y) {
+        const uint8_t *src = front +
+            (((size_t)(layout->dst_y + y) * TEST_UVC_PREVIEW_H_RES + layout->dst_x) * sizeof(uint16_t));
+        memcpy(dst + (size_t)y * row_size, src, row_size);
+    }
     if (out_info != NULL) {
         *out_info = (test_uvc_preview_info_t) {
             .valid = true,
             .frame_id = s_preview_frame_id,
             .h_res = s_preview_source_w,
             .v_res = s_preview_source_h,
+            .preview_w = layout->dst_w,
+            .preview_h = layout->dst_h,
         };
     }
     xSemaphoreGive(s_preview_lock);

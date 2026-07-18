@@ -141,6 +141,20 @@ static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
 #define DEMO_UVC_PREVIEW_SIZE (TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U)
 #define DEMO_FONT_TOUCH_REFRESH_MS 16
 
+static void demo_uvc_set_preview_layout(uint32_t width, uint32_t height)
+{
+    if (s_uvc_preview_image == NULL || width == 0 || height == 0) {
+        return;
+    }
+    s_uvc_preview_dsc.header.w = width;
+    s_uvc_preview_dsc.header.h = height;
+    s_uvc_preview_dsc.header.stride = width * sizeof(uint16_t);
+    s_uvc_preview_dsc.data_size = width * height * sizeof(uint16_t);
+    lv_image_set_src(s_uvc_preview_image, &s_uvc_preview_dsc);
+    lv_obj_set_size(s_uvc_preview_image, width, height);
+    lv_obj_align(s_uvc_preview_image, LV_ALIGN_CENTER, 0, 0);
+}
+
 static demo_touch_state_t s_touch_state;
 #if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS
 static test_wireless_ap_record_t s_wifi_ap_records[TEST_WIRELESS_SCAN_RESULT_MAX];
@@ -1826,7 +1840,9 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
     if (test_uvc_copy_preview(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE, &preview) == ESP_OK &&
         preview.frame_id != s_uvc_preview_frame_id) {
         s_uvc_preview_frame_id = preview.frame_id;
-        esp_cache_msync(s_uvc_preview_image_buf, DEMO_UVC_PREVIEW_SIZE,
+        const size_t preview_size = (size_t)preview.preview_w * preview.preview_h * sizeof(uint16_t);
+        demo_uvc_set_preview_layout(preview.preview_w, preview.preview_h);
+        esp_cache_msync(s_uvc_preview_image_buf, preview_size,
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         lv_obj_invalidate(s_uvc_preview_image);
         s_uvc_preview_submit_count++;

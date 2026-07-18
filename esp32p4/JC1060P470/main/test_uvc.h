@@ -23,6 +23,8 @@ typedef struct {
     uint32_t frame_id;
     uint32_t h_res;
     uint32_t v_res;
+    uint32_t preview_w;
+    uint32_t preview_h;
 } test_uvc_preview_info_t;
 
 typedef enum {
@@ -164,9 +166,10 @@ void test_uvc_clear_resume_marker(void);
 /**
  * @brief Copy the newest scaled RGB565 preview into a caller-owned buffer.
  *
- * The buffer must be TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2
- * bytes. If out_info->frame_id is non-zero, the copy is skipped when that is
- * already the newest frame. Returns ESP_ERR_NOT_FOUND when no newer frame is ready.
+ * The destination must fit preview_w * preview_h * 2 bytes reported through
+ * out_info. If out_info->frame_id is non-zero, the copy is skipped when that
+ * is already the newest frame. Returns ESP_ERR_NOT_FOUND when no newer frame
+ * is ready.
  */
 esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size,
                                 test_uvc_preview_info_t *out_info);
