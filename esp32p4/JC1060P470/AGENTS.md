@@ -27,11 +27,11 @@
 每类外设独立成模块，遵循 `test_<外设>.c/.h` 命名约定，单一职责：
 
 - 已实现：SD 卡 `test_sdcard`、RTC `test_rtc`、音频 `test_audio`、电池 `test_battery`、USB CDC Device `test_usb`、USB UVC Host `test_uvc`、USB 角色管理 `test_usb_role`、WiFi/BLE `test_wireless`。
-- UVC 已包含设备能力枚举、动态分辨率切换、硬件 JPEG 解码、PPA/CPU 预览缩放和分级恢复；最新恢复与预览路径仍需上板验证。
+- UVC 已包含设备能力枚举、动态分辨率切换、硬件 JPEG 解码、PPA/CPU 预览缩放和分级恢复；当前 640x360 PPA 路径有运行日志，720p/1080p、切换和恢复仍需上板验证。
 - WiFi/BLE 依赖板载 ESP32-C6：WiFi 使用 `esp_hosted + esp_wifi_remote`，BLE 使用 hosted NimBLE VHCI，并实现广播及一个读写/通知测试特征。
 - 尚未实现：MIPI CSI 摄像头 `test_camera`、通用传感器 `test_sensor`。
 
-外设公共参数（引脚、I2C 总线等）集中在 `main/test_config.h`，与 `display_config.h` 风格一致。主入口通过 Kconfig 控制各模块能力，具体状态见 `docs/peripheral_tests.md`。
+外设公共参数（引脚、I2C 总线等）集中在 `main/test_config.h`，与 `display_config.h` 风格一致。主入口通过 Kconfig 控制各模块能力，具体实现见 `docs/peripheral_tests.md`，上板证据与待验收项见 `docs/validation_status.md`。
 
 ### USB 子系统约束
 
@@ -44,7 +44,7 @@ USB 子系统方案详见 `docs/usb_solution.md`。本工程有两个 USB Type-C
 
 - Kconfig 使用 `choice EXAMPLE_USB_ROLE` 在编译期互斥选择 CDC Device 或 UVC Host 能力；角色框架启动时保持 `None`，由 UI 按需占用 controller[0]。
 - 运行时角色切换由 `test_usb_role` worker task 串行执行 deinit 当前 → init 目标，不并发 install 两个 stack。重复 CDC/UVC 切换是否完整重置 DWC OTG 仍需上板循环验证。
-- UVC 在设备连接后枚举 MJPEG frame descriptor，优先匹配偏好分辨率并选择最高 FPS，不匹配时降级到设备实际能力；UI 可异步切换分辨率。
+- UVC 在设备连接后枚举 MJPEG frame descriptor，默认稳定偏好 1280x720 并选择最高 FPS，不匹配时选择设备实际稳定档；UI 可异步切换到其他枚举分辨率。
 - UVC 健康检查按 stream → root port → stack 三级恢复。板上 HIGH USB 没有 GPIO 控制的 VBUS load switch，root port power off 不等于摄像头真实断电，恢复耗尽后可能仍需重新插拔。
 - USB 模块对外接口仍收敛为 `init/run/deinit/get_status` capability 风格，UI 通过 `test_usb_role_switch` 触发切换，不直接操作底层 USB 句柄。
 

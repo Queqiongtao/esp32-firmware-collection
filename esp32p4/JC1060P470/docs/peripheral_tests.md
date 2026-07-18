@@ -17,10 +17,10 @@ GT911 与 RX8025T-UC 的 device handle 使用共享总线的 `400 kHz` 配置；
 | ES8311 音频 | `test_audio` | `y` | 音频卡片 | 已实现播放内置 PCM、录音和录音回放 |
 | 电池 ADC | `test_battery` | `y` | BAT 卡片 | 已实现；百分比只是线性演示值 |
 | USB CDC Device | `test_usb` | USB choice 可选项 | HIGH USB 卡片 | 单路径有上板记录；与 UVC 共享 HIGH USB |
-| USB UVC Host | `test_uvc` | USB choice 默认项 | UVC 独立页面 | 1080p 收流/硬解/PPA 预览已上板验证；按需解码对齐显示率，链路级坏帧约 15% 静默丢弃（见 usb_solution.md）；切换、恢复待上板验证 |
+| USB UVC Host | `test_uvc` | USB choice 默认项 | UVC 独立页面 | 默认稳定偏好 1280x720；当前 640x360 零错误发布有日志记录，切换与恢复待验证 |
 | USB 角色管理 | `test_usb_role` | 任一 USB choice 项启用 | USB 卡片和 UVC 页面 | 已实现异步切换；启动默认 None |
 | Hosted WiFi | `test_wireless` | `y`，WiFi 子项 `y` | WiFi 卡片和连接对话框 | 扫描/连接有既有上板记录 |
-| Hosted BLE | `test_wireless` | `y`，BLE 子项 `y` | BLE 卡片 | 广播、连接、GATT 测试已实现；最新路径未声明上板通过 |
+| Hosted BLE | `test_wireless` | `y`，BLE 子项 `y` | BLE 卡片 | 广播、连接、GATT 测试已实现；当前未声明上板通过 |
 | MIPI CSI 摄像头 | 未实现 | 无 | 无 | 只有硬件接口能力，尚无 `test_camera` |
 | 通用传感器 | 未实现 | 无 | 无 | 尚无 `test_sensor` |
 
@@ -80,7 +80,7 @@ USB `choice EXAMPLE_USB_ROLE` 保证两个配置符号不同时为 `y`，CMake �
 - role worker 的命令 queue 将耗时的 init/deinit、出流和分辨率切换移出 LVGL 任务。
 - CDC 状态包括 attach、DTR/RTS 与收发统计；UVC 状态包括枚举、协商、解码、预览、丢帧和恢复状态。
 - UVC 页面退出时异步请求 None，由 role worker 释放 Host、JPEG、PPA、task、queue 和 PSRAM buffer；热复位恢复是例外路径。
-- 完整生命周期、恢复等级、VBUS 限制和验收场景见 [usb_solution.md](./usb_solution.md)。
+- 完整生命周期、恢复等级和 VBUS 限制见 [usb_solution.md](./usb_solution.md)；实测与验收矩阵见 [validation_status.md](./validation_status.md)。
 
 ### Wireless
 
@@ -92,7 +92,7 @@ USB `choice EXAMPLE_USB_ROLE` 保证两个配置符号不同时为 `y`，CMake �
 - 停止 BLE 广告失败时保留 advertising 状态和资源所有权，供后续重试；`BLE_HS_EALREADY` 按已经停止处理。
 - BLE 头文件保留 `test_wireless_request_ble_scan()` 接口，但当前业务重点是 Peripheral 广播/GATT；文档不把该接口等同于已完成 Central 扫描产品能力。
 - `test_wireless_deinit()` 按依赖逆序停止 NimBLE 和 WiFi，注销 Hosted 事件并释放本模块对象；`esp_hosted` 实例由组件 constructor/destructor 持有，模块不直接销毁其全局生命周期。
-- 本轮已分别完成 WiFi-only 和 BLE-only 编译验证，但没有新增无线功能上板验证。
+- WiFi-only、BLE-only 和组合配置都应独立编译验证；当前上板状态以 [validation_status.md](./validation_status.md) 为准。
 
 ## UI 与数据边界
 
@@ -115,6 +115,6 @@ UI 定时器只调用 `get_status()`、读取快照或提交异步请求。以�
 - **编译验证通过**：`./dev.sh build` 通过，仅证明当前配置可编译链接。
 - **已上板验证**：必须有实际设备观测记录，并说明测试路径；不能由旧版本或相邻模块推断。
 
-本轮生命周期、状态快照、USB capability 裁剪和无线依赖改动截至当前只完成静态检查与多配置编译；没有串口/摄像头条件，尚未完成上板验证。显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz`，本轮不把外设编译结果宣称为显示链路的新上板结论。
+当前可读取 FULL USB 和摄像头运行日志，但本次审查不覆盖板上固件。修改后的结论只按静态检查和多配置编译记录；显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz`，外设结果不得扩大为显示链路的新上板结论。
 
 外设改动后至少执行 `./dev.sh build`。涉及共享 I2C、SDMMC Host、USB controller、DMA/PSRAM 或任务生命周期时，还应覆盖失败初始化、重复进入/退出、设备拔插和资源释放后的再次初始化。显示参数未变化时，不应把外设 UI 的编译结果扩大为显示链路重新完成上板验证。

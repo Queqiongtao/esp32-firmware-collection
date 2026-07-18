@@ -141,6 +141,7 @@ static test_uvc_resolution_t s_uvc_resolutions[TEST_UVC_FRAME_INFO_MAX];
 #define DEMO_UVC_PREVIEW_SIZE (TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U)
 #define DEMO_FONT_TOUCH_REFRESH_MS 16
 
+#if CONFIG_EXAMPLE_ENABLE_TEST_UVC
 static void demo_uvc_set_preview_layout(uint32_t width, uint32_t height)
 {
     if (s_uvc_preview_image == NULL || width == 0 || height == 0) {
@@ -154,6 +155,7 @@ static void demo_uvc_set_preview_layout(uint32_t width, uint32_t height)
     lv_obj_set_size(s_uvc_preview_image, width, height);
     lv_obj_align(s_uvc_preview_image, LV_ALIGN_CENTER, 0, 0);
 }
+#endif
 
 static demo_touch_state_t s_touch_state;
 #if CONFIG_EXAMPLE_ENABLE_TEST_WIRELESS

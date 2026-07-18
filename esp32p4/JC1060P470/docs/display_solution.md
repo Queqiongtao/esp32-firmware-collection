@@ -4,7 +4,7 @@
 
 本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合有既有上板记录，记录中未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
 
-本轮工作只收敛外设生命周期、USB capability 裁剪、状态快照和依赖配置；显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz (expect)` 不变。当前轮次只有静态检查和编译验证，没有新的显示上板验证，不能据此推断 UVC/无线等新增路径已稳定。
+当前显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz (expect)`。显示路径、外设路径和 UVC 预览的验证证据分别记录，不能由外设编译结果推断显示链路重新完成上板验证；统一状态见 [validation_status.md](./validation_status.md)。
 
 当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是面向板级联调的 **综合验证 Demo**。`app_main()` 先完成 `board -> panel -> LVGL` 初始化并创建 UI，再启动后台 FreeType 初始化任务和外设初始化任务。SD、RTC、Audio、Battery、USB role、Wireless 的初始化不会阻塞首屏创建；单个外设失败只记录错误，不阻断其他模块。
 
@@ -140,7 +140,7 @@ display_lvgl_init()
 - **配置**：引入 `espressif/esp_lvgl_adapter ^0.6.2`，默认 `EXAMPLE_LVGL_PORT_ESP_ADAPTER`，tear mode 为 `DOUBLE_DIRECT`，adapter PPA enabled。
 - **原因**：乐鑫 adapter 已覆盖 ESP32-P4/MIPI DSI/LVGL 9 的 display bridge、tear avoidance、touch 注册与 PPA helper，比继续维护自研 port 更接近官方路径。
 - **版本注意**：`esp_lvgl_adapter 0.1.4` 会在 IDF 6.0.1 下因 `esp_async_fbcpy_trans_desc_t` 字段变更编译失败，因此当前锁定到 `^0.6.2`。
-- **上板验证结果**：当前显示完美，未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
+- **既有上板记录**：该组合在记录对应版本中未观察到白条、花屏、闪烁、黑屏、撕裂或残影；后续改动是否重新上板以验证状态文档为准。
 
 ## 关键问题根因详解
 
@@ -209,7 +209,7 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 - 静态补丁字库已修正历史上的字形垂直度量问题；标题区已改为纵向 flex，避免两行 label 重叠。
 - FreeType 初始化失败时，诊断卡片显示静态 fallback，不影响其他外设卡片和触摸操作。
-- 当前显示链路的 DOUBLE_DIRECT 组合有既有上板验证记录；最近的 FreeType 动态字号、字体诊断卡片和 UVC 子页面只确认到编译验证，仍需单独上板确认内存占用、触摸缩放和长时间刷新行为。
+- 当前显示链路的 DOUBLE_DIRECT 组合有既有上板验证记录。FreeType 动态字号和 UVC 子页面必须按各自记录判断；当前 UVC 640x360 有运行日志，但不等价于 FreeType 手势、720p/1080p 或长期刷新全部通过。
 
 ## 后续优化方向
 
