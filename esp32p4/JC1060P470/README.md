@@ -194,7 +194,7 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
 
 ## Project Notes / 工程说明
 
-* This project is derived from the `mipi_dsi` project and tuned for `JD9165`, `1024x600`, `RGB565`, `2-lane DSI`, `750 Mbps lane rate`, `54 MHz DPI clock`, and `2` DPI frame buffers.
+* This project is derived from the `mipi_dsi` project and tuned for `JD9165`, `1024x600`, `RGB565`, `2-lane DSI`, `600 Mbps lane rate`, `54 MHz DPI clock`, and `2` DPI frame buffers. The previous board-verified lane rate was 750 Mbps and remains the fallback if 600 Mbps fails board validation.
 * The active display stack uses `lvgl/lvgl 9.4.0` and `espressif/esp_lvgl_adapter ^0.6.2`. Adapter PPA is enabled, ESP LCD DMA2D hook is enabled, and LVGL built-in `CONFIG_LV_USE_PPA` is disabled.
 * If the screen appears to "flicker", first use `Example Configuration -> Bypass PWM and force backlight always on` to determine whether the issue is PWM dimming or display pipeline/panel instability.
 * The display stack is split into board control, panel bring-up, and LVGL port layers:
@@ -202,7 +202,7 @@ See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/l
   * [main/display_panel.c](./main/display_panel.c): DSI bus, DBI IO, JD9165 panel creation, DMA2D hook
   * [main/display_lvgl.c](./main/display_lvgl.c): esp_lvgl_adapter display/touch registration, legacy LVGL port fallback
 
-* 本工程由 `mipi_dsi` 工程衍生，已按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`750 Mbps lane rate`、`54 MHz DPI clock`、`2` 个 DPI framebuffer 进行适配。
+* 本工程由 `mipi_dsi` 工程衍生，当前按 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`、`600 Mbps lane rate`、`54 MHz DPI clock`、`2` 个 DPI framebuffer 配置。此前完成上板验证的 lane rate 为 750 Mbps；若 600 Mbps 上板验证失败，应回退到 750 Mbps。
 * 当前显示栈使用 `lvgl/lvgl 9.4.0` 与 `espressif/esp_lvgl_adapter ^0.6.2`。已启用 adapter PPA 和 ESP LCD DMA2D hook，未启用 LVGL 内置 `CONFIG_LV_USE_PPA`。
 * 工程固定使用 ESP-IDF `6.0.1`，managed component 解析结果记录在 `dependencies.lock`。`esp_codec_dev`、TinyUSB、UVC Host、ESP-Hosted/WiFi Remote 等 managed dependency 按对应 Kconfig 条件解析；CMake 为 IDF 内置组件保留必要的发现依赖，不能把“裁剪”理解为所有可选 built-in 库都从依赖图消失。关闭 Audio 时不会向应用镜像嵌入 `canon.pcm`。
 * 如果你看到“背光闪”或者“屏幕闪”，优先启用 `Example Configuration -> Bypass PWM and force backlight always on`，先区分是 PWM 背光问题还是显示链路/时序不稳定。

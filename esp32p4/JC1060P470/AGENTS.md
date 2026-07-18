@@ -128,7 +128,7 @@ USB 子系统方案详见 `docs/usb_solution.md`。本工程有两个 USB Type-C
 
 ## 硬件与显示注意事项
 
-- 当前工程默认目标为 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`。
+- 当前工程默认目标为 `JD9165`、`1024x600`、`RGB565`、`2-lane DSI`，lane rate 为 `600 Mbps`；此前上板验证值 `750 Mbps` 作为回退参数保留。
 - 当前工程芯片版本为 ESP32-P4 **V1.0**（`CONFIG_ESP32P4_REV_MIN_FULL=100`，`CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`），IDF 使用 `register/hw_ver1/` 寄存器定义。
 - 当前默认 LVGL 渲染模式为 **esp_lvgl_adapter + DOUBLE_DIRECT 双 framebuffer**。legacy 回退路径为自研 DIRECT 双 fb，并在 flush_cb 中做整 fb `esp_cache_msync(DIR_C2M)`。
 - 当前板级控制引脚按工程实际定义为：

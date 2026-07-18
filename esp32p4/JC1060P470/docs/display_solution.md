@@ -2,9 +2,9 @@
 
 ## 概述
 
-本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该组合有既有上板记录，记录中未观察到白条、花屏、闪烁、黑屏、撕裂或残影。
+本工程显示链路基于 MIPI DSI 总线驱动 JD9165 面板控制器，输出 1024×600 RGB565 图像。当前使用 **LVGL 9.4.0 + espressif/esp_lvgl_adapter 0.6.2**，默认走 `esp_lvgl_adapter` 的 **DOUBLE_DIRECT + 双 framebuffer** 路径，并启用 ESP LCD DMA2D hook 与 adapter PPA 加速提示。该渲染组合在 750 Mbps lane rate 下有既有上板记录，记录中未观察到白条、花屏、闪烁、黑屏、撕裂或残影；当前 600 Mbps lane rate 尚待重新上板验证。
 
-当前显示参数保持 `num_fbs=2`、lane rate `750 Mbps`、DPI clock `54 MHz (expect)`。显示路径、外设路径和 UVC 预览的验证证据分别记录，不能由外设编译结果推断显示链路重新完成上板验证；统一状态见 [validation_status.md](./validation_status.md)。
+当前显示参数为 `num_fbs=2`、lane rate `600 Mbps`、DPI clock `54 MHz (expect)`。本次只降低 lane rate，显示时序、framebuffer 数量和 LVGL 渲染路径保持不变；750 Mbps 保留为上板异常时的回退值。显示路径、外设路径和 UVC 预览的验证证据分别记录，不能由外设编译结果推断显示链路重新完成上板验证；统一状态见 [validation_status.md](./validation_status.md)。
 
 当前 UI 已不是原始 `mipi_dsi` 示例的动画页，而是面向板级联调的 **综合验证 Demo**。`app_main()` 先完成 `board -> panel -> LVGL` 初始化并创建 UI，再启动后台 FreeType 初始化任务和外设初始化任务。SD、RTC、Audio、Battery、USB role、Wireless 的初始化不会阻塞首屏创建；单个外设失败只记录错误，不阻断其他模块。
 
@@ -18,7 +18,7 @@
 | 分辨率 | 1024×600 | |
 | 颜色格式 | RGB565 | 16bpp，framebuffer 行 stride = 2048 字节 |
 | DSI lane 数 | 2 | |
-| lane bit rate | 750 Mbps | DPHY 支持 80~1500 Mbps |
+| lane bit rate | 600 Mbps | DPHY 支持 80~1500 Mbps；750 Mbps 为已上板回退值 |
 | DPI clock | 54 MHz (expect) | 源时钟 PLL_F240M，div=4，real=60MHz，经 bridge HFP 补偿对齐到 60.49Hz |
 | framebuffer 数 | 2 | DPI 驱动内部分配于 PSRAM，ping-pong |
 | 刷新率 | ≈60.49 Hz | 54e6 / (1384 × 645) |
@@ -228,6 +228,6 @@ PARTIAL 模式整屏重绘需 600/80 = 8 次 render+flush 串行。滑动触发 
 
 当前 DPI 时钟源默认 PLL_F240M=240MHz，整分频 240/4=60MHz，与 expect 54MHz 差 11%，依赖 bridge HFP 补偿。可改用 APLL 108MHz（div=2，real=expect=54MHz）消除 HFP 补偿，使 HFP 回到面板 datasheet 标称值。代价是 APLL 资源被 DPI 独占。
 
-lane rate 理论下限约 432 Mbps（2 lane × 432 = 864 = 54×16），当前 750 Mbps 留约 1.7× 裕度。若需降功耗/EMI 可试 500~600 Mbps，需逐档上板验证。
+lane rate 的纯 RGB565 payload 理论下限约 432 Mbps/lane（2 lane × 432 = 54×16）。当前 600 Mbps 约为理论下限的 1.39 倍，扣除协议开销前保留约 39% 裕量；相比此前 750 Mbps 可降低 PHY 速率、功耗和 EMI，但必须重新上板验证。若 600 Mbps 出现白条、花屏、闪烁或黑屏，应回退到已有上板记录的 750 Mbps。500 Mbps 仅比纯 payload 下限高约 16%，不纳入本次调整，后续如需尝试应作为独立单变量实验。
 
 此类参数调整属高风险试验，按 AGENTS.md 要求须保留 git 回退路径并逐档验证。

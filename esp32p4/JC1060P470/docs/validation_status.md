@@ -18,7 +18,7 @@
 | 芯片 | ESP32-P4 V1.0，`CONFIG_ESP32P4_REV_MIN_FULL=100` |
 | ESP-IDF | 6.0.1 |
 | 面板 | JD9165，1024x600 RGB565，2-lane DSI |
-| 显示参数 | `num_fbs=2`，lane rate 750 Mbps，DPI clock 54 MHz expect |
+| 显示参数 | `num_fbs=2`，lane rate 600 Mbps，DPI clock 54 MHz expect；600 Mbps 待上板验证 |
 | LVGL | 9.4.0，esp_lvgl_adapter 0.6.2，DOUBLE_DIRECT |
 | HIGH USB 默认能力 | UVC Host，运行时初始角色 None |
 | UVC 默认分辨率 | 稳定偏好 1280x720，UI 可手动选择其他枚举档位 |
@@ -42,7 +42,7 @@
 
 | 路径 | 状态 | 证据边界 |
 |------|------|----------|
-| JD9165 显示 + GT911 触摸 | 已上板验证 | DOUBLE_DIRECT 双 framebuffer 组合未观察到白条、花屏、闪烁、黑屏、撕裂或残影 |
+| JD9165 显示 + GT911 触摸 | 750 Mbps 已上板验证 | DOUBLE_DIRECT 双 framebuffer 在 750 Mbps 下未观察到白条、花屏、闪烁、黑屏、撕裂或残影；不覆盖当前 600 Mbps 参数 |
 | SDMMC SD 卡 | 已上板验证 | Slot 0 与 Hosted Slot 1 共存，挂载及文件读写回环通过 |
 | RX8025T-UC RTC | 已上板验证 | 读取、无效时间同步和周期日志有记录 |
 | ES8311 音频 | 已上板验证 | 播放、录音与回放路径有既有记录 |
@@ -76,6 +76,7 @@
 
 | 路径 | 当前状态 | 验收内容 |
 |------|----------|----------|
+| MIPI DSI 600 Mbps lane rate | 待当前版本上板验证 | 冷启动、静态画面、滑动及持续刷新；检查白条、花屏、闪烁、黑屏、撕裂和残影，异常时回退 750 Mbps |
 | 默认 UVC 720p | 待当前版本上板复测 | 连续运行、帧率、错误/overflow/underflow、内存稳定性 |
 | 手动 1080p 与自动降级 | 待当前版本上板复测 | 错误阈值、就地切换 720p、UI 自动降级状态 |
 | 全部分辨率运行时切换 | 编译路径已实现 | 成功、不支持档位、切换中拔出 |

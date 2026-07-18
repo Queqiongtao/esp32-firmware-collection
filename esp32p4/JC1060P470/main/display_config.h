@@ -20,7 +20,7 @@
 /* Refresh rate ~= 54MHz / (1384 * 645) = 60.49Hz */
 #define DISPLAY_MIPI_DSI_DPI_CLK_MHZ            54
 #define DISPLAY_MIPI_DSI_LANE_NUM               2
-#define DISPLAY_MIPI_DSI_LANE_BITRATE_MBPS      750
+#define DISPLAY_MIPI_DSI_LANE_BITRATE_MBPS      600
 #define DISPLAY_MIPI_DSI_FRAME_BUFFER_NUM       2
 
 #define DISPLAY_PANEL_HSYNC_PULSE_WIDTH         40

@@ -121,7 +121,7 @@
 
 | 接口 | 说明 |
 |------|------|
-| MIPI DSI | 2-lane，750 Mbps lane rate，54 MHz DPI clock，2 个 framebuffer → JD9165 1024x600 RGB565 LCD |
+| MIPI DSI | 2-lane，600 Mbps lane rate（750 Mbps 回退），54 MHz DPI clock，2 个 framebuffer → JD9165 1024x600 RGB565 LCD |
 | MIPI CSI | 摄像头输入（`SOC_MIPI_CSI_SUPPORTED=1`），当前未用 |
 
 ### 3.2 USB 口（当前板级实物连接）
