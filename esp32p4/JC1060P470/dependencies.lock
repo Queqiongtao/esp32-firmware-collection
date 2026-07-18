@@ -277,13 +277,13 @@ dependencies:
       type: service
     version: 1.6.58
   espressif/usb:
-    component_hash: 1d90d7c7b0682dbfcc36f47cf5acf224a5cfb850a62f39cd86d3159cfec12a81
+    component_hash: 6c2cff118141dbbca181d0d27d71801fdddfc78f7ac03ae43f6e5a8cbd89cb99
     dependencies:
     - name: idf
       require: private
-      version: '>=5.4'
+      version: '>=5.5.3'
     source:
-      registry_url: https://components.espressif.com
+      registry_url: https://components.espressif.com/
       type: service
     targets:
     - esp32s2
@@ -292,7 +292,7 @@ dependencies:
     - esp32p4
     - esp32h4
     - linux
-    version: 1.4.1
+    version: 1.5.0
   espressif/usb_host_uvc:
     component_hash: 3dde9c89980212de1e394a29d3fe782a2988a08fd2a16af34eee6f642aab6ebe
     dependencies:
@@ -358,9 +358,10 @@ direct_dependencies:
 - espressif/esp_lcd_touch_gt911
 - espressif/esp_lvgl_adapter
 - espressif/esp_wifi_remote
+- espressif/usb
 - espressif/usb_host_uvc
 - idf
 - lvgl/lvgl
-manifest_hash: ecdaf05a74e8cce9233a046c4ed49d18763f97c36d6f62b7422c7bd8caa42760
+manifest_hash: 851dfd774973a27d1d362f929b259269c974f463f02e3c35ae9199eea1ca41ed
 target: esp32p4
 version: 3.0.0

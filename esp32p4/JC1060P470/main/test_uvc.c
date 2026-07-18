@@ -56,8 +56,9 @@ void test_uvc_clear_resume_marker(void)
 #define UVC_USBLIB_EXITED_BIT    BIT3
 #define UVC_DEVICE_GONE_BIT      BIT4
 #define UVC_TASK_STOP_TIMEOUT_MS 2000
-/* Retired slots are not reused until uvc_host_uninstall() joins all callbacks.
- * Exhaustion is reported so the role recovery state machine escalates to STACK. */
+/* A context remains stable while its stream is open. uvc_host_stream_close()
+ * removes and frees the stream before returning ESP_OK, so the slot can only be
+ * reused after a successful close. Failed closes retain both handle and slot. */
 #define UVC_STREAM_CONTEXT_POOL_SIZE 8
 #define UVC_HELD_FRAME_SLOT_INVALID UINT8_MAX
 
@@ -79,7 +80,6 @@ typedef enum {
     UVC_STREAM_CONTEXT_FREE = 0,
     UVC_STREAM_CONTEXT_RESERVED,
     UVC_STREAM_CONTEXT_ACTIVE,
-    UVC_STREAM_CONTEXT_RETIRED,
 } uvc_stream_context_state_t;
 
 typedef struct {
@@ -168,6 +168,7 @@ static uvc_host_stream_hdl_t s_disconnect_stream_hdl;
 static uint32_t s_disconnect_stream_generation;
 
 static uint32_t s_frames_received;
+static uint32_t s_frames_ingress;
 static uint32_t s_frames_decoded;
 static uint32_t s_frames_published;
 static uint32_t s_decode_errors;
@@ -180,13 +181,18 @@ static uint32_t s_last_decode_us;
 static uint32_t s_last_preview_us;
 static uint32_t s_last_frame_w;
 static uint32_t s_last_frame_h;
+static int64_t s_last_ingress_time_us;
 static int64_t s_last_frame_time_us;
-static int64_t s_last_1080p_decode_attempt_us;
+static int64_t s_last_worker_progress_us;
+static int64_t s_last_decode_attempt_us;
+static test_uvc_worker_stage_t s_worker_stage = TEST_UVC_WORKER_STAGE_IDLE;
 static uint32_t s_consecutive_decode_errors;
 static test_uvc_state_t s_state = TEST_UVC_STATE_IDLE;
 static test_uvc_recovery_level_t s_recovery_level = TEST_UVC_RECOVERY_NONE;
 static uint32_t s_recovery_attempts;
 static bool s_recovery_required;
+static test_uvc_recovery_cause_t s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_NONE;
+static bool s_control_transport_broken;
 static bool s_stable_fallback_required;
 static bool s_auto_downgraded;
 static uint32_t s_auto_downgrade_count;
@@ -202,6 +208,7 @@ static test_module_meta_t s_module = {
     .last_error = ESP_OK,
 };
 static int64_t s_stats_window_start_us;
+static uint32_t s_stats_window_ingress;
 static uint32_t s_stats_window_received;
 static uint32_t s_stats_window_decoded;
 static uint32_t s_stats_window_published;
@@ -213,23 +220,96 @@ static uint32_t s_stats_window_transfer_errors;
 static uint32_t s_stats_window_overflows;
 static uint32_t s_stats_window_underflows;
 
+static void uvc_reset_stats_window_locked(int64_t now_us)
+{
+    s_stats_window_start_us = now_us;
+    s_stats_window_ingress = s_frames_ingress;
+    s_stats_window_received = s_frames_received;
+    s_stats_window_decoded = s_frames_decoded;
+    s_stats_window_published = s_frames_published;
+    s_stats_window_errors = s_decode_errors;
+    s_stats_window_truncated = s_frames_truncated;
+    s_stats_window_skipped = s_frames_skipped;
+    s_stats_window_dropped = s_frames_dropped;
+    s_stats_window_transfer_errors = s_transfer_errors;
+    s_stats_window_overflows = s_frame_overflows;
+    s_stats_window_underflows = s_frame_underflows;
+}
+
+static void uvc_reset_stream_progress_locked(int64_t now_us)
+{
+    s_last_ingress_time_us = now_us;
+    s_last_frame_time_us = now_us;
+    s_last_worker_progress_us = now_us;
+    s_last_decode_attempt_us = 0;
+    s_worker_stage = TEST_UVC_WORKER_STAGE_IDLE;
+    s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_NONE;
+    s_control_transport_broken = false;
+    s_recovery_required = false;
+    uvc_reset_stats_window_locked(now_us);
+}
+
+static const char *uvc_worker_stage_name(test_uvc_worker_stage_t stage)
+{
+    switch (stage) {
+    case TEST_UVC_WORKER_STAGE_IDLE: return "idle";
+    case TEST_UVC_WORKER_STAGE_QUEUE: return "queue";
+    case TEST_UVC_WORKER_STAGE_JPEG: return "jpeg";
+    case TEST_UVC_WORKER_STAGE_PREVIEW: return "preview";
+    case TEST_UVC_WORKER_STAGE_PUBLISH: return "publish";
+    default: return "unknown";
+    }
+}
+
+static const char *uvc_recovery_cause_name(test_uvc_recovery_cause_t cause)
+{
+    switch (cause) {
+    case TEST_UVC_RECOVERY_CAUSE_NONE: return "none";
+    case TEST_UVC_RECOVERY_CAUSE_TRANSPORT_STALL: return "transport-stall";
+    case TEST_UVC_RECOVERY_CAUSE_WORKER_STALL: return "worker-stall";
+    case TEST_UVC_RECOVERY_CAUSE_CONTROL_TIMEOUT: return "control-timeout";
+    case TEST_UVC_RECOVERY_CAUSE_DECODE_DEGRADED: return "decode-degraded";
+    default: return "unknown";
+    }
+}
+
+static void uvc_set_worker_stage_locked(test_uvc_worker_stage_t stage, int64_t now_us)
+{
+    s_worker_stage = stage;
+    s_last_worker_progress_us = now_us;
+}
+
+static void uvc_mark_control_error_locked(esp_err_t error)
+{
+    if (error == ESP_ERR_TIMEOUT) {
+        s_control_transport_broken = true;
+        s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_CONTROL_TIMEOUT;
+        s_recovery_required = true;
+    }
+}
+
 static bool uvc_skip_throttled_decode(uint32_t width, uint32_t height)
 {
-    if (width != 1920U || height != 1080U) {
+    uint32_t interval_ms = 0;
+    if (width >= 1920U && height >= 1080U) {
+        interval_ms = TEST_UVC_1080P_DECODE_INTERVAL_MS;
+    } else if (width >= 1280U && height >= 720U) {
+        interval_ms = TEST_UVC_720P_DECODE_INTERVAL_MS;
+    }
+    if (interval_ms == 0) {
         return false;
     }
 
     const int64_t now_us = esp_timer_get_time();
     bool skip = false;
     portENTER_CRITICAL(&s_frame_lock);
-    if (s_last_1080p_decode_attempt_us > 0 &&
-        now_us - s_last_1080p_decode_attempt_us <
-            (int64_t)TEST_UVC_1080P_DECODE_INTERVAL_MS * 1000LL) {
+    if (s_last_decode_attempt_us > 0 &&
+        now_us - s_last_decode_attempt_us < (int64_t)interval_ms * 1000LL) {
         s_frames_skipped++;
         skip = true;
     } else {
         /* Failed hardware decode attempts also consume this window. */
-        s_last_1080p_decode_attempt_us = now_us;
+        s_last_decode_attempt_us = now_us;
     }
     portEXIT_CRITICAL(&s_frame_lock);
     return skip;
@@ -355,7 +435,7 @@ static bool uvc_active_stream_matches_locked(uvc_host_stream_hdl_t stream_hdl,
            s_stream_context->generation == generation;
 }
 
-static void uvc_retire_stream_context(uvc_stream_context_t *context)
+static void uvc_release_closed_stream_context(uvc_stream_context_t *context)
 {
     if (context == NULL) {
         return;
@@ -369,7 +449,7 @@ static void uvc_retire_stream_context(uvc_stream_context_t *context)
             s_disconnect_stream_generation = 0;
         }
         s_stream_context = NULL;
-        context->state = UVC_STREAM_CONTEXT_RETIRED;
+        *context = (uvc_stream_context_t) {0};
     }
     portEXIT_CRITICAL(&s_frame_lock);
 }
@@ -515,12 +595,19 @@ static const char *uvc_state_name(test_uvc_state_t state)
 static void uvc_log_memory(const char *stage)
 {
     ESP_LOGI(TAG,
-             "%s memory: dma_internal_free=%zu dma_internal_biggest=%zu internal_free=%zu spiram_free=%zu",
+             "%s memory: dma_internal_free=%zu dma_internal_biggest=%zu internal_free=%zu "
+             "spiram_free=%zu spiram_biggest=%zu",
              stage,
              heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
              heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL),
              heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
-             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+             heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+             heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
+
+static bool uvc_stream_open_error_retryable(esp_err_t error)
+{
+    return error == ESP_ERR_NOT_FINISHED || error == ESP_ERR_INVALID_RESPONSE;
 }
 
 static void uvc_log_stats_if_due(void)
@@ -535,38 +622,69 @@ static void uvc_log_stats_if_due(void)
         return;
     }
 
-    ESP_LOGI(TAG, "UVC stats: state=%s received=%" PRIu32 " decoded=%" PRIu32
+    portENTER_CRITICAL(&s_frame_lock);
+    const uint32_t window_received = s_frames_received - s_stats_window_received;
+    const uint32_t window_ingress = s_frames_ingress - s_stats_window_ingress;
+    const uint32_t window_decoded = s_frames_decoded - s_stats_window_decoded;
+    const uint32_t window_published = s_frames_published - s_stats_window_published;
+    const uint32_t window_errors = s_decode_errors - s_stats_window_errors;
+    const uint32_t window_truncated = s_frames_truncated - s_stats_window_truncated;
+    const uint32_t window_skipped = s_frames_skipped - s_stats_window_skipped;
+    const uint32_t window_dropped = s_frames_dropped - s_stats_window_dropped;
+    const uint32_t window_transfer_errors = s_transfer_errors - s_stats_window_transfer_errors;
+    const uint32_t window_overflows = s_frame_overflows - s_stats_window_overflows;
+    const uint32_t window_underflows = s_frame_underflows - s_stats_window_underflows;
+    const test_uvc_worker_stage_t worker_stage = s_worker_stage;
+    const uint32_t decode_attempts = window_decoded + window_errors;
+    const bool high_load_format = s_format_negotiated &&
+                                  (s_negotiated_format.h_res > TEST_UVC_STABLE_MAX_H_RES ||
+                                   s_negotiated_format.v_res > TEST_UVC_STABLE_MAX_V_RES);
+    const bool trigger_error_rate_fallback = s_stream_started && high_load_format &&
+        !s_stable_fallback_required &&
+        decode_attempts >= TEST_UVC_1080P_ERROR_RATE_MIN_ATTEMPTS &&
+        (uint64_t)window_errors * 100U >=
+            (uint64_t)decode_attempts * TEST_UVC_1080P_ERROR_RATE_PERCENT;
+    if (trigger_error_rate_fallback) {
+        s_stable_fallback_required = true;
+        s_recovery_required = true;
+        s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_DECODE_DEGRADED;
+        s_accept_frames = false;
+    }
+
+    uvc_reset_stats_window_locked(now_us);
+    portEXIT_CRITICAL(&s_frame_lock);
+
+    ESP_LOGI(TAG, "UVC stats: state=%s ingress=%" PRIu32 " received=%" PRIu32
+             " decoded=%" PRIu32
              " published=%" PRIu32 " errors=%" PRIu32
              " truncated=%" PRIu32 " skipped=%" PRIu32 " dropped=%" PRIu32
              " transfer=%" PRIu32 " overflow=%" PRIu32 " underflow=%" PRIu32
              " last=%" PRIu32 "x%" PRIu32 " len=%" PRIu32
-             " decode=%" PRIu32 "us preview=%" PRIu32 "us backend=%s",
+             " decode=%" PRIu32 "us preview=%" PRIu32 "us backend=%s stage=%s",
              uvc_state_name(s_state),
-             s_frames_received - s_stats_window_received,
-             s_frames_decoded - s_stats_window_decoded,
-             s_frames_published - s_stats_window_published,
-             s_decode_errors - s_stats_window_errors,
-             s_frames_truncated - s_stats_window_truncated,
-             s_frames_skipped - s_stats_window_skipped,
-             s_frames_dropped - s_stats_window_dropped,
-             s_transfer_errors - s_stats_window_transfer_errors,
-             s_frame_overflows - s_stats_window_overflows,
-             s_frame_underflows - s_stats_window_underflows,
+             window_ingress,
+             window_received,
+             window_decoded,
+             window_published,
+             window_errors,
+             window_truncated,
+             window_skipped,
+             window_dropped,
+             window_transfer_errors,
+             window_overflows,
+             window_underflows,
              s_last_frame_w, s_last_frame_h, s_last_frame_bytes,
              s_last_decode_us, s_last_preview_us,
-             s_preview_backend == TEST_UVC_PREVIEW_BACKEND_PPA ? "PPA" : "CPU");
+             s_preview_backend == TEST_UVC_PREVIEW_BACKEND_PPA ? "PPA" : "CPU",
+             uvc_worker_stage_name(worker_stage));
 
-    s_stats_window_start_us = now_us;
-    s_stats_window_received = s_frames_received;
-    s_stats_window_decoded = s_frames_decoded;
-    s_stats_window_published = s_frames_published;
-    s_stats_window_errors = s_decode_errors;
-    s_stats_window_truncated = s_frames_truncated;
-    s_stats_window_skipped = s_frames_skipped;
-    s_stats_window_dropped = s_frames_dropped;
-    s_stats_window_transfer_errors = s_transfer_errors;
-    s_stats_window_overflows = s_frame_overflows;
-    s_stats_window_underflows = s_frame_underflows;
+    if (trigger_error_rate_fallback) {
+        ESP_LOGW(TAG, "1080p decode error rate %" PRIu32 "/%" PRIu32
+                 " reached %u%% threshold; requesting stable-resolution recovery",
+                 window_errors, decode_attempts,
+                 (unsigned)TEST_UVC_1080P_ERROR_RATE_PERCENT);
+        uvc_set_state(TEST_UVC_STATE_FAILED, ESP_ERR_INVALID_STATE);
+    }
 }
 
 /* Convert a UVC frame interval (100ns units) to frames-per-second. */
@@ -1018,6 +1136,8 @@ static bool uvc_frame_callback(const uvc_host_frame_t *frame, void *user_ctx)
         portEXIT_CRITICAL(&s_frame_lock);
         return true;
     }
+    s_frames_ingress++;
+    s_last_ingress_time_us = esp_timer_get_time();
     uvc_app_queue_msg_t msg = {0};
     if (!uvc_hold_frame_locked(context->stream_hdl, context->generation,
                                (uvc_host_frame_t *)frame, &msg)) {
@@ -1242,21 +1362,6 @@ static void uvc_worker_task(void *arg)
             if (s_worker_stop) {
                 break;
             }
-            portENTER_CRITICAL(&s_frame_lock);
-            const bool stream_started = s_stream_started;
-            const int64_t last_frame_time_us = s_last_frame_time_us;
-            const bool high_load_format = s_format_negotiated &&
-                                          (s_negotiated_format.h_res > TEST_UVC_STABLE_MAX_H_RES ||
-                                           s_negotiated_format.v_res > TEST_UVC_STABLE_MAX_V_RES);
-            portEXIT_CRITICAL(&s_frame_lock);
-            if (stream_started && last_frame_time_us > 0 &&
-                esp_timer_get_time() - last_frame_time_us >= TEST_UVC_STREAM_STALL_TIMEOUT_MS * 1000LL) {
-                portENTER_CRITICAL(&s_frame_lock);
-                s_recovery_required = true;
-                s_stable_fallback_required = high_load_format;
-                portEXIT_CRITICAL(&s_frame_lock);
-                uvc_set_state(TEST_UVC_STATE_FAILED, ESP_ERR_TIMEOUT);
-            }
             continue;
         }
 
@@ -1277,6 +1382,10 @@ static void uvc_worker_task(void *arg)
             ESP_LOGW(TAG, "discarding UVC queue message without matching held-frame ownership");
             continue;
         }
+
+        portENTER_CRITICAL(&s_frame_lock);
+        uvc_set_worker_stage_locked(TEST_UVC_WORKER_STAGE_QUEUE, esp_timer_get_time());
+        portEXIT_CRITICAL(&s_frame_lock);
 
         uvc_host_frame_t *frame = msg.frame;
         portENTER_CRITICAL(&s_frame_lock);
@@ -1332,7 +1441,10 @@ static void uvc_worker_task(void *arg)
         portENTER_CRITICAL(&s_frame_lock);
         s_frames_received++;
         s_last_frame_time_us = esp_timer_get_time();
-        s_recovery_required = false;
+        if (!s_stable_fallback_required &&
+            s_recovery_cause == TEST_UVC_RECOVERY_CAUSE_NONE) {
+            s_recovery_required = false;
+        }
         s_last_frame_bytes = (uint32_t)frame->data_len;
         portEXIT_CRITICAL(&s_frame_lock);
 
@@ -1430,6 +1542,9 @@ static void uvc_worker_task(void *arg)
 
         int64_t start_us = esp_timer_get_time();
         uint32_t out_size = 0;
+        portENTER_CRITICAL(&s_frame_lock);
+        uvc_set_worker_stage_locked(TEST_UVC_WORKER_STAGE_JPEG, start_us);
+        portEXIT_CRITICAL(&s_frame_lock);
         ret = jpeg_decoder_process(s_jpeg_decoder, &decode_cfg,
                                    frame->data, (uint32_t)frame->data_len,
                                    s_rgb565_buf, (uint32_t)s_rgb565_buf_size, &out_size);
@@ -1446,6 +1561,7 @@ static void uvc_worker_task(void *arg)
                     !s_stable_fallback_required) {
                     s_stable_fallback_required = true;
                     s_recovery_required = true;
+                    s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_DECODE_DEGRADED;
                     s_accept_frames = false;
                     trigger_stable_fallback = true;
                 }
@@ -1467,7 +1583,13 @@ static void uvc_worker_task(void *arg)
 
         uvc_return_frame_or_retry(&msg);
         if (ret == ESP_OK) {
+            portENTER_CRITICAL(&s_frame_lock);
+            uvc_set_worker_stage_locked(TEST_UVC_WORKER_STAGE_PREVIEW, esp_timer_get_time());
+            portEXIT_CRITICAL(&s_frame_lock);
             uvc_update_preview(info.width, info.height, out_size);
+            portENTER_CRITICAL(&s_frame_lock);
+            uvc_set_worker_stage_locked(TEST_UVC_WORKER_STAGE_PUBLISH, esp_timer_get_time());
+            portEXIT_CRITICAL(&s_frame_lock);
         }
         xSemaphoreGive(s_decode_lock);
         if (trigger_stable_fallback) {
@@ -1476,6 +1598,9 @@ static void uvc_worker_task(void *arg)
             uvc_set_state(TEST_UVC_STATE_FAILED, ret);
         }
         uvc_log_stats_if_due();
+        portENTER_CRITICAL(&s_frame_lock);
+        uvc_set_worker_stage_locked(TEST_UVC_WORKER_STAGE_IDLE, esp_timer_get_time());
+        portEXIT_CRITICAL(&s_frame_lock);
     }
 
     if (s_device_event_group != NULL) {
@@ -1732,6 +1857,7 @@ static esp_err_t uvc_init_locked(void)
     s_stream_started = false;
     s_device_connected = false;
     s_format_negotiated = false;
+    s_frames_ingress = 0;
     s_frames_received = 0;
     s_frames_decoded = 0;
     s_frames_published = 0;
@@ -1745,12 +1871,17 @@ static esp_err_t uvc_init_locked(void)
     s_last_preview_us = 0;
     s_last_frame_w = 0;
     s_last_frame_h = 0;
+    s_last_ingress_time_us = 0;
     s_last_frame_time_us = 0;
-    s_last_1080p_decode_attempt_us = 0;
+    s_last_worker_progress_us = 0;
+    s_last_decode_attempt_us = 0;
+    s_worker_stage = TEST_UVC_WORKER_STAGE_IDLE;
     s_consecutive_decode_errors = 0;
     s_recovery_level = TEST_UVC_RECOVERY_NONE;
     s_recovery_attempts = 0;
     s_recovery_required = false;
+    s_recovery_cause = TEST_UVC_RECOVERY_CAUSE_NONE;
+    s_control_transport_broken = false;
     s_stable_fallback_required = false;
     s_auto_downgraded = false;
     s_auto_downgrade_count = 0;
@@ -1764,6 +1895,7 @@ static esp_err_t uvc_init_locked(void)
     s_last_error = ESP_OK;
     portEXIT_CRITICAL(&s_frame_lock);
     s_stats_window_start_us = 0;
+    s_stats_window_ingress = 0;
     s_stats_window_received = 0;
     s_stats_window_decoded = 0;
     s_stats_window_published = 0;
@@ -1885,6 +2017,7 @@ static esp_err_t uvc_run_locked(void)
         if (start_ret != ESP_OK) {
             portENTER_CRITICAL(&s_frame_lock);
             s_recovery_required = true;
+            uvc_mark_control_error_locked(start_ret);
             portEXIT_CRITICAL(&s_frame_lock);
             uvc_set_state(TEST_UVC_STATE_FAILED, start_ret);
             return start_ret;
@@ -1892,10 +2025,9 @@ static esp_err_t uvc_run_locked(void)
         portENTER_CRITICAL(&s_frame_lock);
         s_stream_started = true;
         s_accept_frames = true;
-        s_last_frame_time_us = esp_timer_get_time();
-        s_last_1080p_decode_attempt_us = 0;
+        const int64_t now_us = esp_timer_get_time();
+        uvc_reset_stream_progress_locked(now_us);
         s_consecutive_decode_errors = 0;
-        s_recovery_required = false;
         portEXIT_CRITICAL(&s_frame_lock);
         s_uvc_streaming_marker = UVC_STREAMING_MARKER;
         uvc_set_state(TEST_UVC_STATE_STREAMING, ESP_OK);
@@ -2022,11 +2154,16 @@ static esp_err_t uvc_run_locked(void)
         },
     };
 
-    ESP_LOGI(TAG, "Opening UVC stream %ux%u@%.1fFPS format=%d on High-Speed USB OTG...",
+    ESP_LOGI(TAG, "Opening UVC stream %ux%u@%.1fFPS format=%d on High-Speed USB OTG; "
+             "frame_size=%u count=%u total=%u...",
              (unsigned)stream_config.vs_format.h_res,
              (unsigned)stream_config.vs_format.v_res,
              stream_config.vs_format.fps,
-             (int)stream_config.vs_format.format);
+             (int)stream_config.vs_format.format,
+             (unsigned)TEST_UVC_FRAME_SIZE,
+             (unsigned)TEST_UVC_FRAME_BUF_COUNT,
+             (unsigned)(TEST_UVC_FRAME_SIZE * TEST_UVC_FRAME_BUF_COUNT));
+    uvc_log_memory("before stream open");
 
     ret = ESP_FAIL;
     uvc_host_stream_hdl_t new_stream_hdl = NULL;
@@ -2037,18 +2174,23 @@ static esp_err_t uvc_run_locked(void)
         }
 
         new_stream_hdl = NULL;
-        if (ret != ESP_ERR_INVALID_RESPONSE || attempt == TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS) {
+        uvc_log_memory("stream open failed");
+        if (!uvc_stream_open_error_retryable(ret) ||
+            attempt == TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS) {
             uvc_release_reserved_stream_context(stream_context);
             portENTER_CRITICAL(&s_frame_lock);
             s_last_error = ret;
+            s_recovery_required = true;
+            uvc_mark_control_error_locked(ret);
             portEXIT_CRITICAL(&s_frame_lock);
             ESP_LOGE(TAG, "uvc_host_stream_open failed: %s", esp_err_to_name(ret));
             uvc_set_state(TEST_UVC_STATE_FAILED, ret);
             return ret;
         }
 
-        ESP_LOGW(TAG, "UVC stream negotiation failed (attempt %u/%u), retrying",
-                 (unsigned)attempt, (unsigned)TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS);
+        ESP_LOGW(TAG, "UVC stream open transient failure (attempt %u/%u): %s; retrying",
+                 (unsigned)attempt, (unsigned)TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS,
+                 esp_err_to_name(ret));
         vTaskDelay(pdMS_TO_TICKS(TEST_UVC_STREAM_OPEN_RETRY_DELAY_MS));
     }
 
@@ -2068,10 +2210,11 @@ static esp_err_t uvc_run_locked(void)
         portENTER_CRITICAL(&s_frame_lock);
         s_last_error = start_error;
         s_recovery_required = true;
+        uvc_mark_control_error_locked(start_error);
         portEXIT_CRITICAL(&s_frame_lock);
         esp_err_t close_ret = uvc_host_stream_close(new_stream_hdl);
         if (close_ret == ESP_OK) {
-            uvc_retire_stream_context(stream_context);
+            uvc_release_closed_stream_context(stream_context);
             portENTER_CRITICAL(&s_frame_lock);
             s_stream_hdl = NULL;
             s_stream_opened = false;
@@ -2087,10 +2230,9 @@ static esp_err_t uvc_run_locked(void)
     s_stream_started = true;
     s_accept_frames = true;
     s_uvc_streaming_marker = UVC_STREAMING_MARKER;
-    s_last_frame_time_us = esp_timer_get_time();
-    s_last_1080p_decode_attempt_us = 0;
+    const int64_t now_us = esp_timer_get_time();
+    uvc_reset_stream_progress_locked(now_us);
     s_consecutive_decode_errors = 0;
-    s_recovery_required = false;
     s_last_error = ESP_OK;
     portEXIT_CRITICAL(&s_frame_lock);
     uvc_set_state(TEST_UVC_STATE_STREAMING, ESP_OK);
@@ -2125,6 +2267,7 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .negotiated_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0,
         .negotiated_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0,
         .negotiated_fps = s_format_negotiated ? s_negotiated_format.fps : 0.0f,
+        .frames_ingress = s_frames_ingress,
         .frames_received = s_frames_received,
         .frames_decoded = s_frames_decoded,
         .frames_published = s_frames_published,
@@ -2136,8 +2279,12 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .last_preview_us = s_last_preview_us,
         .last_frame_w = s_last_frame_w,
         .last_frame_h = s_last_frame_h,
+        .last_ingress_time_us = s_last_ingress_time_us,
         .last_frame_time_us = s_last_frame_time_us,
+        .last_worker_progress_us = s_last_worker_progress_us,
+        .worker_stage = s_worker_stage,
         .recovery_level = s_recovery_level,
+        .recovery_cause = s_recovery_cause,
         .recovery_attempts = s_recovery_attempts,
         .recovery_required = s_recovery_required,
         .warm_recovery_expected = s_uvc_streaming_marker == UVC_STREAMING_MARKER,
@@ -2151,6 +2298,52 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .last_error = s_last_error,
     };
     portEXIT_CRITICAL(&s_frame_lock);
+    return ESP_OK;
+}
+
+esp_err_t test_uvc_poll_health(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    test_uvc_recovery_cause_t cause = TEST_UVC_RECOVERY_CAUSE_NONE;
+    uint32_t frames_ingress = 0;
+    uint32_t frames_received = 0;
+    uint32_t frames_published = 0;
+    int64_t ingress_age_us = 0;
+    int64_t worker_age_us = 0;
+    test_uvc_worker_stage_t worker_stage = TEST_UVC_WORKER_STAGE_IDLE;
+
+    portENTER_CRITICAL(&s_frame_lock);
+    if (s_initialized && s_stream_started && !s_recovery_required) {
+        ingress_age_us = now_us - s_last_ingress_time_us;
+        worker_age_us = now_us - s_last_worker_progress_us;
+        if (s_last_ingress_time_us > 0 &&
+            ingress_age_us >= TEST_UVC_STREAM_STALL_TIMEOUT_MS * 1000LL) {
+            cause = TEST_UVC_RECOVERY_CAUSE_TRANSPORT_STALL;
+        } else if (s_last_ingress_time_us > s_last_worker_progress_us &&
+                   worker_age_us >= TEST_UVC_STREAM_STALL_TIMEOUT_MS * 1000LL) {
+            cause = TEST_UVC_RECOVERY_CAUSE_WORKER_STALL;
+        }
+        if (cause != TEST_UVC_RECOVERY_CAUSE_NONE) {
+            s_recovery_cause = cause;
+            s_recovery_required = true;
+            s_accept_frames = false;
+        }
+    }
+    frames_ingress = s_frames_ingress;
+    frames_received = s_frames_received;
+    frames_published = s_frames_published;
+    worker_stage = s_worker_stage;
+    portEXIT_CRITICAL(&s_frame_lock);
+
+    if (cause != TEST_UVC_RECOVERY_CAUSE_NONE) {
+        ESP_LOGW(TAG, "UVC health failure: cause=%s ingress_age=%" PRId64
+                 "ms worker_age=%" PRId64 "ms stage=%s ingress=%" PRIu32
+                 " received=%" PRIu32 " published=%" PRIu32,
+                 uvc_recovery_cause_name(cause), ingress_age_us / 1000,
+                 worker_age_us / 1000, uvc_worker_stage_name(worker_stage),
+                 frames_ingress, frames_received, frames_published);
+        uvc_set_state(TEST_UVC_STATE_FAILED, ESP_ERR_TIMEOUT);
+    }
     return ESP_OK;
 }
 
@@ -2296,10 +2489,9 @@ static esp_err_t uvc_change_resolution_locked(uint32_t h_res, uint32_t v_res)
     s_stream_started = true;
     s_accept_frames = true;
     s_uvc_streaming_marker = UVC_STREAMING_MARKER;
-    s_last_frame_time_us = esp_timer_get_time();
-    s_last_1080p_decode_attempt_us = 0;
+    const int64_t now_us = esp_timer_get_time();
+    uvc_reset_stream_progress_locked(now_us);
     s_consecutive_decode_errors = 0;
-    s_recovery_required = false;
     s_last_error = ESP_OK;
     portEXIT_CRITICAL(&s_frame_lock);
     uvc_set_state(TEST_UVC_STATE_STREAMING, ESP_OK);
@@ -2311,6 +2503,7 @@ recovery_required:
     portENTER_CRITICAL(&s_frame_lock);
     s_last_error = ret;
     s_recovery_required = true;
+    uvc_mark_control_error_locked(ret);
     portEXIT_CRITICAL(&s_frame_lock);
     uvc_set_state(TEST_UVC_STATE_FAILED, ret);
     ESP_LOGE(TAG, "change UVC resolution failed, recovery required: %s", esp_err_to_name(ret));
@@ -2342,6 +2535,9 @@ static esp_err_t uvc_close_active_stream(void)
         esp_err_t ret = uvc_host_stream_stop(stream_hdl);
         if (ret != ESP_OK && first_error == ESP_OK) {
             first_error = ret;
+            portENTER_CRITICAL(&s_frame_lock);
+            uvc_mark_control_error_locked(ret);
+            portEXIT_CRITICAL(&s_frame_lock);
         } else if (ret == ESP_OK) {
             portENTER_CRITICAL(&s_frame_lock);
             s_stream_started = false;
@@ -2376,7 +2572,7 @@ static esp_err_t uvc_close_active_stream(void)
             first_error = ret;
         }
         if (ret == ESP_OK) {
-            uvc_retire_stream_context(stream_context);
+            uvc_release_closed_stream_context(stream_context);
             portENTER_CRITICAL(&s_frame_lock);
             s_stream_hdl = NULL;
             s_stream_opened = false;
@@ -2388,6 +2584,7 @@ static esp_err_t uvc_close_active_stream(void)
                 s_disconnect_stream_generation = 0;
             }
             portEXIT_CRITICAL(&s_frame_lock);
+            uvc_log_memory("after stream close");
         }
     }
     return first_error;
@@ -2424,6 +2621,32 @@ static esp_err_t uvc_root_port_quiesce_and_close_stream(void)
     return uvc_close_active_stream();
 }
 
+static void uvc_finish_stable_fallback(uint32_t previous_h_res, uint32_t previous_v_res,
+                                       const char *mode)
+{
+    portENTER_CRITICAL(&s_frame_lock);
+    const uint32_t fallback_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0;
+    const uint32_t fallback_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0;
+    const bool resolution_reduced = fallback_h_res > 0 && fallback_v_res > 0 &&
+                                    (uint64_t)fallback_h_res * fallback_v_res <
+                                        (uint64_t)previous_h_res * previous_v_res;
+    s_stable_fallback_required = false;
+    s_auto_downgraded = resolution_reduced;
+    if (resolution_reduced) {
+        s_auto_downgrade_count++;
+    }
+    portEXIT_CRITICAL(&s_frame_lock);
+
+    if (resolution_reduced) {
+        ESP_LOGW(TAG, "UVC automatically downgraded from %ux%u to %ux%u via %s",
+                 (unsigned)previous_h_res, (unsigned)previous_v_res,
+                 (unsigned)fallback_h_res, (unsigned)fallback_v_res, mode);
+    } else {
+        ESP_LOGW(TAG, "camera has no lower stable MJPEG resolution; reopened %ux%u via %s",
+                 (unsigned)fallback_h_res, (unsigned)fallback_v_res, mode);
+    }
+}
+
 static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
 {
     ESP_RETURN_ON_FALSE(s_initialized, ESP_ERR_INVALID_STATE, TAG, "UVC is not initialized");
@@ -2432,24 +2655,72 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
 
     portENTER_CRITICAL(&s_frame_lock);
     const bool stable_fallback = s_stable_fallback_required;
+    const test_uvc_recovery_cause_t recovery_cause = s_recovery_cause;
+    const bool force_stack_recovery = s_control_transport_broken ||
+        recovery_cause == TEST_UVC_RECOVERY_CAUSE_TRANSPORT_STALL ||
+        recovery_cause == TEST_UVC_RECOVERY_CAUSE_WORKER_STALL ||
+        recovery_cause == TEST_UVC_RECOVERY_CAUSE_CONTROL_TIMEOUT;
     const uint32_t previous_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0;
     const uint32_t previous_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0;
+    const bool can_fallback_in_place = stable_fallback && !force_stack_recovery &&
+        s_format_negotiated &&
+        s_stream_context != NULL && s_stream_context->state == UVC_STREAM_CONTEXT_ACTIVE &&
+        s_stream_context->stream_hdl != NULL && s_stream_opened && s_stream_started &&
+        (uint64_t)previous_h_res * previous_v_res >
+            (uint64_t)TEST_UVC_PREFER_H_RES * TEST_UVC_PREFER_V_RES;
     if (stable_fallback) {
         s_requested_h_res = TEST_UVC_PREFER_H_RES;
         s_requested_v_res = TEST_UVC_PREFER_V_RES;
         s_requested_resolution_valid = true;
-        level = TEST_UVC_RECOVERY_ROOT_PORT;
     }
     portEXIT_CRITICAL(&s_frame_lock);
+
+    if (force_stack_recovery) {
+        level = TEST_UVC_RECOVERY_STACK;
+    }
 
     s_recovery_level = level;
     s_recovery_attempts++;
     s_recovery_required = false;
     uvc_set_state(TEST_UVC_STATE_RECOVERING, ESP_OK);
-    ESP_LOGW(TAG, "UVC recovery level=%d attempt=%" PRIu32 "%s", (int)level,
-             s_recovery_attempts, stable_fallback ? " stable-fallback=1280x720" : "");
+    ESP_LOGW(TAG, "UVC recovery level=%d attempt=%" PRIu32 " cause=%s%s", (int)level,
+             s_recovery_attempts, uvc_recovery_cause_name(recovery_cause),
+             stable_fallback ? " stable-fallback=1280x720" : "");
 
-    esp_err_t ret = uvc_close_active_stream();
+    esp_err_t ret = ESP_OK;
+    if (can_fallback_in_place) {
+        ESP_LOGW(TAG, "UVC stable fallback: trying in-place %ux%u -> %ux%u",
+                 (unsigned)previous_h_res, (unsigned)previous_v_res,
+                 (unsigned)TEST_UVC_PREFER_H_RES, (unsigned)TEST_UVC_PREFER_V_RES);
+        ret = uvc_change_resolution_locked(TEST_UVC_PREFER_H_RES, TEST_UVC_PREFER_V_RES);
+        if (ret == ESP_OK) {
+            uvc_finish_stable_fallback(previous_h_res, previous_v_res, "in-place format switch");
+            return ESP_OK;
+        }
+
+        portENTER_CRITICAL(&s_frame_lock);
+        s_stable_fallback_required = true;
+        s_recovery_required = false;
+        portEXIT_CRITICAL(&s_frame_lock);
+        level = TEST_UVC_RECOVERY_ROOT_PORT;
+        s_recovery_level = level;
+        uvc_set_state(TEST_UVC_STATE_RECOVERING, ESP_OK);
+        ESP_LOGW(TAG, "UVC in-place stable fallback failed: %s; escalating to root-port recovery",
+                 esp_err_to_name(ret));
+    } else if (stable_fallback && !force_stack_recovery) {
+        level = TEST_UVC_RECOVERY_ROOT_PORT;
+        s_recovery_level = level;
+        ESP_LOGW(TAG, "UVC stable fallback has no active high-resolution stream; "
+                 "skip in-place switch and continue root-port recovery");
+    }
+
+    if (level == TEST_UVC_RECOVERY_STACK && force_stack_recovery) {
+        ESP_LOGW(TAG, "UVC %s: quiesce root port before rebuilding Host Stack",
+                 uvc_recovery_cause_name(recovery_cause));
+        ret = uvc_root_port_quiesce_and_close_stream();
+    } else {
+        ret = uvc_close_active_stream();
+    }
     if (level == TEST_UVC_RECOVERY_STREAM) {
         if (ret == ESP_OK) {
             ret = test_uvc_run();
@@ -2470,7 +2741,9 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
         }
     } else {
         const uint32_t attempts = s_recovery_attempts;
-        ret = test_uvc_deinit();
+        if (ret == ESP_OK) {
+            ret = test_uvc_deinit();
+        }
         if (ret == ESP_OK) {
             ret = test_uvc_init();
         }
@@ -2482,26 +2755,7 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
     }
 
     if (ret == ESP_OK && stable_fallback) {
-        portENTER_CRITICAL(&s_frame_lock);
-        const uint32_t fallback_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0;
-        const uint32_t fallback_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0;
-        const bool resolution_reduced = fallback_h_res > 0 && fallback_v_res > 0 &&
-                                        (uint64_t)fallback_h_res * fallback_v_res <
-                                            (uint64_t)previous_h_res * previous_v_res;
-        s_stable_fallback_required = false;
-        s_auto_downgraded = resolution_reduced;
-        if (resolution_reduced) {
-            s_auto_downgrade_count++;
-        }
-        portEXIT_CRITICAL(&s_frame_lock);
-        if (resolution_reduced) {
-            ESP_LOGW(TAG, "UVC automatically downgraded from %ux%u to %ux%u",
-                     (unsigned)previous_h_res, (unsigned)previous_v_res,
-                     (unsigned)fallback_h_res, (unsigned)fallback_v_res);
-        } else {
-            ESP_LOGW(TAG, "camera has no lower stable MJPEG resolution; reopened %ux%u",
-                     (unsigned)fallback_h_res, (unsigned)fallback_v_res);
-        }
+        uvc_finish_stable_fallback(previous_h_res, previous_v_res, "root-port recovery");
     } else if (ret != ESP_OK) {
         uvc_set_state(TEST_UVC_STATE_FAILED, ret);
     }

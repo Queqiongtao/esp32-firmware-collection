@@ -225,7 +225,9 @@
 #define TEST_UVC_FRAME_INFO_MAX                 24
 
 #define TEST_UVC_FRAME_BUF_COUNT                3
-#define TEST_UVC_FRAME_SIZE                     0          /* 0: use dwMaxVideoFrameSize from negotiation */
+/* 该摄像头正常 probe 报告 dwMaxVideoFrameSize=1MiB。固定此值避免 EP0
+ * 短传输后驱动拿到 frame_size=0 并误报 ESP_ERR_NO_MEM。 */
+#define TEST_UVC_FRAME_SIZE                     (1024U * 1024U)
 #define TEST_UVC_FRAME_HEAP_CAPS                MALLOC_CAP_SPIRAM
 /* ISOC URB 缓冲: 每个 URB 容纳 urb_size/MPS(1024) 个等时包, 每包对应一个
  * 125us microframe。4 x 20KB = 80 个包 = 10ms 缓冲(占内部 DMA RAM 80KB)。
@@ -269,10 +271,13 @@
 #define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */
-/* 1080p 全速解码会连续触发 JPEG/DMA2D 错误并拖垮 UVC 收流。限制的是
- * 解码尝试而非成功预览，因此坏帧也会占用当前 200ms 时间窗口。 */
+/* 相机仍按协商帧率传输，应用只限制 JPEG/PPA 预览处理频率。坏帧同样占用
+ * 当前处理窗口，避免损坏帧连续冲击共享 DMA2D/PSRAM。 */
+#define TEST_UVC_720P_DECODE_INTERVAL_MS        100        /* 1280x720: 预览最高 10fps */
 #define TEST_UVC_1080P_DECODE_INTERVAL_MS       200        /* 1920x1080: 最多 5 次解码尝试/秒 */
 #define TEST_UVC_1080P_CONSECUTIVE_ERRORS       4          /* 连续硬解失败后自动降到稳定档 */
+#define TEST_UVC_1080P_ERROR_RATE_MIN_ATTEMPTS  12         /* 5 秒窗口内样本不足时不判定 */
+#define TEST_UVC_1080P_ERROR_RATE_PERCENT       25         /* 5 秒窗口错误率达到 25% 时预防性降级 */
 
 /* 固定大小的 RGB565 预览帧。UVC worker 将已解码的原始画面等比缩放并居中
  * 到 front/back 双缓冲；UI 通过受控拷贝取得已发布的 front 快照，避免

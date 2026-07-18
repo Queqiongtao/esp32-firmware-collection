@@ -46,6 +46,22 @@ typedef enum {
     TEST_UVC_PREVIEW_BACKEND_PPA,
 } test_uvc_preview_backend_t;
 
+typedef enum {
+    TEST_UVC_WORKER_STAGE_IDLE = 0,
+    TEST_UVC_WORKER_STAGE_QUEUE,
+    TEST_UVC_WORKER_STAGE_JPEG,
+    TEST_UVC_WORKER_STAGE_PREVIEW,
+    TEST_UVC_WORKER_STAGE_PUBLISH,
+} test_uvc_worker_stage_t;
+
+typedef enum {
+    TEST_UVC_RECOVERY_CAUSE_NONE = 0,
+    TEST_UVC_RECOVERY_CAUSE_TRANSPORT_STALL,
+    TEST_UVC_RECOVERY_CAUSE_WORKER_STALL,
+    TEST_UVC_RECOVERY_CAUSE_CONTROL_TIMEOUT,
+    TEST_UVC_RECOVERY_CAUSE_DECODE_DEGRADED,
+} test_uvc_recovery_cause_t;
+
 typedef struct {
     test_module_meta_t module;
     test_uvc_state_t state;
@@ -58,6 +74,7 @@ typedef struct {
     uint32_t negotiated_h_res;
     uint32_t negotiated_v_res;
     float negotiated_fps;
+    uint32_t frames_ingress;
     uint32_t frames_received;
     uint32_t frames_decoded;
     uint32_t frames_published;
@@ -69,8 +86,12 @@ typedef struct {
     uint32_t last_preview_us;
     uint32_t last_frame_w;
     uint32_t last_frame_h;
+    int64_t last_ingress_time_us;
     int64_t last_frame_time_us;
+    int64_t last_worker_progress_us;
+    test_uvc_worker_stage_t worker_stage;
     test_uvc_recovery_level_t recovery_level;
+    test_uvc_recovery_cause_t recovery_cause;
     uint32_t recovery_attempts;
     bool recovery_required;
     bool warm_recovery_expected;
@@ -113,6 +134,9 @@ esp_err_t test_uvc_run(void);
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out_status is NULL.
  */
 esp_err_t test_uvc_get_status(test_uvc_status_t *out_status);
+
+/** @brief Poll transport/worker progress and latch a recovery request on stall. */
+esp_err_t test_uvc_poll_health(void);
 
 /**
  * @brief Get MJPEG resolutions reported by the current UVC device.

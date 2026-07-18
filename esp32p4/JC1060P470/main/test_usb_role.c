@@ -351,6 +351,7 @@ static void usb_role_check_health(void)
         return;
     }
 
+    (void)test_uvc_poll_health();
     test_uvc_status_t status = {0};
     if (test_uvc_get_status(&status) != ESP_OK || !status.initialized) {
         return;
@@ -380,8 +381,12 @@ static void usb_role_check_health(void)
         return;
     }
     if (s_auto_recovery_level == TEST_UVC_RECOVERY_NONE) {
-        s_auto_recovery_level = status.device_connected ? TEST_UVC_RECOVERY_STREAM
-                                                        : TEST_UVC_RECOVERY_ROOT_PORT;
+        const bool stack_required =
+            status.recovery_cause == TEST_UVC_RECOVERY_CAUSE_TRANSPORT_STALL ||
+            status.recovery_cause == TEST_UVC_RECOVERY_CAUSE_WORKER_STALL ||
+            status.recovery_cause == TEST_UVC_RECOVERY_CAUSE_CONTROL_TIMEOUT;
+        s_auto_recovery_level = stack_required ? TEST_UVC_RECOVERY_STACK :
+            (status.device_connected ? TEST_UVC_RECOVERY_STREAM : TEST_UVC_RECOVERY_ROOT_PORT);
     }
 
     usb_role_begin_operation(TEST_USB_ROLE_UVC_HOST);
@@ -403,10 +408,10 @@ static void usb_role_check_health(void)
     }
 
     if (s_auto_recovery_level == TEST_UVC_RECOVERY_STREAM && ret == ESP_ERR_TIMEOUT) {
-        s_auto_recovery_level = TEST_UVC_RECOVERY_ROOT_PORT;
+        s_auto_recovery_level = TEST_UVC_RECOVERY_STACK;
         s_auto_recovery_attempt = 0;
         s_next_recovery_us = now_us + 500U * 1000LL;
-        ESP_LOGW(TAG, "UVC stream recovery timed out; escalate directly to root-port recovery");
+        ESP_LOGW(TAG, "UVC stream recovery timed out; rebuild Host Stack on next attempt");
         return;
     }
 

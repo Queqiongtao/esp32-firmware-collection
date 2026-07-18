@@ -93,13 +93,14 @@ UVC 不再硬编码 FPS：
 ### 解码与预览
 
 - USB UVC 帧使用 PSRAM 缓冲，格式为 MJPEG；ESP32-P4 硬件 JPEG decoder 输出 RGB565。
+- UVC 使用 3 块固定 `1 MiB` MJPEG frame buffer。该摄像头正常 probe 的 `dwMaxVideoFrameSize` 为 `1048576`；若 EP0 短传输导致 probe 结果中的 frame size 变为 0，继续采用驱动协商值会执行零字节分配并误报 `ESP_ERR_NO_MEM`，因此应用不再把 buffer 大小交给该字段决定。
 - 默认协商稳定档 `1280x720` 的最高可用 FPS；若摄像头没有该档，优先选择不超过 `1280x720` 的最大 MJPEG 分辨率，若所有档位都超过上限则选择设备的最小 MJPEG 档。UI 仍保留 1080p 手动选择能力。
 - 两块固定预览缓冲均为面板全屏 `1024x600 RGB565`，合计约 2.34 MiB PSRAM。worker 在不持有预览锁时将画面等比缩放到 back buffer，完成 cache 同步后短暂加锁交换 front/back；UI 只复制稳定的 front buffer。每块缓冲独立记录有效画面区域，仅在首次使用或宽高比变化时清零空白区域。
-- 除 `1920x1080` 外，worker 不设置固定解码间隔，每个收到的完整 MJPEG 帧都会尝试进入硬件 JPEG/PPA 串行管线。1080p 全速尝试上板出现连续 `ESP_ERR_INVALID_STATE`、`dma2d_force_end` 和 UVC stream stall，因此对硬件解码尝试设置 `200 ms` 最小间隔（最高 5 次/秒）；失败尝试同样占用时间窗口，避免坏帧连续冲击 DMA2D。被限流的帧计入 `skipped` 并立即归还。
+- 摄像头仍按协商帧率传输，应用侧限制 JPEG/PPA 预览处理频率：`1280x720` 最小间隔 `100 ms`（最高 10 次/秒），`1920x1080` 最小间隔 `200 ms`（最高 5 次/秒），更低分辨率不限制。失败尝试同样占用时间窗口，被限流的完整帧计入 `skipped` 并立即归还，避免损坏帧连续冲击 JPEG、PPA、PSRAM 和共享 DMA2D。
 - 处理速度低于相机输入时由既有有界队列丢弃旧帧，不累积历史画面。UI 以 `33 ms` 周期查询最新 `frame_id`，没有新帧时不复制、不触发 LVGL 重绘。
 - `1920x1080`、`1280x720`、`640x360` 等比输出为 `1024x576`；`1280x960`、`800x600`、`640x480` 等比输出为 `800x600`。所有分辨率使用同一路径，由 JPEG、PPA、PSRAM 和显示实际吞吐决定帧率，不硬编码目标值。
 - 上板基线（2026-07-17，双缓冲改动前）：1920×1080 解码约 21~34 ms、PPA 约 84~103 ms、屏幕约 3 fps；640×360 解码约 1.5~5.6 ms、PPA 约 15~19 ms、屏幕约 7~8 fps。旧路径的 worker 与 UI 均受 `100 ms` 周期限制，且 PPA 全程持有预览锁；双缓冲及解除限流后的结果仍需重新上板验证。
-- 双缓冲解除限流实测（2026-07-17）：1080p 启动后硬件解码错误快速增长至 16 次，并出现 `dma2d_force_end`；随后收流超时进入 root-port 恢复，重开流时出现 frame buffer `ESP_ERR_NO_MEM`。本次仅恢复 1080p 解码尝试限频，其余分辨率继续跑满，结果仍需上板复测。
+- 双缓冲解除限流实测（2026-07-17）：1080p 启动后硬件解码错误快速增长至 16 次，并出现 `dma2d_force_end`；随后收流超时进入 root-port 恢复。后续日志确认重开流时的 `ESP_ERR_NO_MEM` 实际伴随 `Not enough memory for frame buffers 0`，根因是失败 probe 提供零尺寸，并非已证明 PSRAM 总量耗尽。固定 1 MiB frame buffer 后仍需上板循环复测。
 - 解码前先做 MJPEG 完整性校验：头部 SOI（FFD8）+ 尾部 `TEST_UVC_MJPEG_EOI_SEARCH_WINDOW=512` 字节窗口内存在 EOI（FFD9）。尾部截断帧计入 `truncated` 并直接归还，不进硬件解码器。
 - PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。1080p 源经 PPA SRM 缩放实测约 90 ms/次，受 PPA 引擎吞吐（约 23 MPix/s）限制，属常数开销，不能靠减少总线争用优化。
 - `test_uvc_copy_preview()` 在预览锁内将稳定的 front buffer 复制到调用方缓冲；生产者只能在复制结束后把旧 front 作为下一块 back 使用。调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
@@ -142,10 +143,11 @@ UVC 初始化成功但暂时没有摄像头时，Host 角色可以保持就绪�
 ### 健康检查与分级恢复
 
 role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视频帧会置位恢复请求，恢复不会从 UVC callback 或 frame worker 内直接卸载自身。
-1080p 下 `jpeg_decoder_process()` 连续失败 4 次也会置位恢复请求并暂停接收；这两类 1080p 故障都直接采用 `ROOT_PORT` 恢复，将目标改为 `1280x720` 后重新枚举。成功降级后状态和 UI 记录自动降级次数；用户手动选择分辨率会清除此状态。
+1080p 下 `jpeg_decoder_process()` 连续失败 4 次也会置位恢复请求并暂停接收。另有 5 秒统计窗口保护：窗口内至少完成 12 次硬解尝试且错误率达到 25% 时预防性降级，避免零散成功帧不断清零连续错误计数，最后拖到 EP0 已失去响应才处理。稳定降级首先复用仍在运行的高分辨率 stream handle，就地停止 1080p、选择 `1280x720` 并重新启动；成功时不关闭设备、不重新枚举。只有就地切换失败才进入 `ROOT_PORT` 恢复；已经关闭或已经协商到稳定档的 stream 不再重复执行 `1280x720 -> 1280x720`。成功降级后状态和 UI 记录自动降级次数；用户手动选择分辨率会清除此状态。
 
-自动恢复按以下等级升级，每级最多尝试 3 次。同一级前两次失败后分别等待
-500/1000 ms；第 3 次失败升级到下一级，并在 500 ms 后开始该级尝试：
+稳定降级的就地格式切换是恢复前置步骤，不单独占用恢复等级；失败后直接进入
+`ROOT_PORT`。其余自动恢复按以下等级升级，每级最多尝试 3 次。同一级前两次
+失败后分别等待 500/1000 ms；第 3 次失败升级到下一级，并在 500 ms 后开始该级尝试：
 
 1. `STREAM`：停止并重新打开 UVC stream。
 2. `ROOT_PORT`：逻辑关闭/开启 DWC root port 后重新枚举和出流。
@@ -154,6 +156,29 @@ role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视�
 若 `STREAM` 级停止操作返回 control timeout，则不重复执行危险关闭，直接升级到
 `ROOT_PORT`。该级在最多 `2000 ms` 内等待 device-gone；超时则保留句柄和 controller
 所有权并报告失败，不强行卸载 USB Host。
+
+打开 stream 时，`ESP_ERR_NOT_FINISHED`、`ESP_ERR_TIMEOUT` 和 `ESP_ERR_INVALID_RESPONSE`
+按控制端点瞬时错误处理，在同一枚举代次内最多重试 3 次、间隔 500 ms；真实
+`ESP_ERR_NO_MEM` 不在原 stream 上重复分配。日志同时记录 frame buffer 配置和
+PSRAM free/biggest，区分总量不足、连续块不足与 probe 零尺寸。
+
+应用传给 UVC 回调的 stream context 在 `uvc_host_stream_close()` 成功前保持固定；close
+失败时同时保留 stream handle 和 context，成功时驱动已从内部链表移除并释放 stream，
+此后才回收 context 槽位。这样既不让旧回调引用被提前复用的上下文，也避免多次恢复后
+永久耗尽固定 context pool。
+
+健康检查分别记录 frame callback 的 `ingress` 时间与 worker 的处理阶段/推进时间：
+`ingress` 停止为 transport stall；`ingress` 继续但 worker 超过 5 秒不推进为
+JPEG/PPA worker stall。该判断由 USB role worker 执行，不依赖可能已经停止的 UVC worker。
+720p 上板日志中，1 MiB frame buffer 仍出现 overflow，同时伴随 `invalid MJPEG SOI`
+和约 19%~36% 的 JPEG 错误率，说明异常来自 ISOC 包/EOF/FID 丢失后的错误拼帧，
+不是 PSRAM 不足；`dma2d_force_end` 是损坏 JPEG 进入硬解后的结果。
+
+transport/worker stall 会先逻辑关闭 root port、等待 device-gone 并关闭 stream，再完整
+重建 UVC/USB Host Stack。任何 stream stop、格式切换或打开过程返回
+`ESP_ERR_TIMEOUT` 后，当前共享 EP0 control transfer 被视为不可信，不再执行同一实例的
+STREAM/ROOT_PORT 重试。完整 Stack 重建会重新创建 control transfer 及其完成信号量，
+避免旧完成状态造成后续 PROBE/COMMIT 连锁失败。
 
 成功出流后在 RTC no-init 内存写入标记；有意退出 UVC 时清除。热复位中断出流会保留标记，下一次启动自动请求 UVC，并在没有设备对象时从 root-port 级别开始恢复。所有等级耗尽后停止自动重试，UI 显示错误并提示重新插拔。
 
@@ -176,6 +201,7 @@ JC1060P470 原理图没有给 HIGH USB VBUS load switch 提供 ESP32-P4 GPIO ena
 | 当前 capability/None 重复切换 | 已实现，编译验证通过 | CDC 和 UVC 分别在各自构建中循环验证 DWC、PHY、task 和 buffer 是否完整释放 |
 | 分辨率运行时切换 | 已实现，编译验证通过 | 需覆盖成功、设备不支持和切换中拔出设备 |
 | stall 与三级恢复 | 已实现，编译验证通过 | 需注入停帧、拔插和恢复耗尽场景 |
+| USB Host 1.5.0 单变量试验 | 已升级，编译验证通过 | `usb_host_uvc` 保持 2.5.1；官方 1.5.0 changelog 未声明 ISOC 修复，需用 720p 连续运行数据判断是否有效 |
 | UVC 热复位自动恢复 | 已实现，编译验证通过 | 需验证 RTC no-init 标记和无真实 VBUS 断电边界 |
 
 上板验收至少应分两套固件进行：CDC 构建覆盖 CDC → None 循环、枚举、回显和重复启停；默认 UVC 构建覆盖 UVC → None 循环、页面反复进出、所有摄像头分辨率逐项切换、流中拔插、流中热复位、停帧恢复和恢复耗尽提示。两套构建都应确认运行期间 `FULL USB` 日志不受影响。本轮文档对应的新增生命周期路径仅完成静态检查和编译验证，尚未完成上述上板回归。
