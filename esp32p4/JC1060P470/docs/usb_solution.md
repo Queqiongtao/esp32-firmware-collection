@@ -67,7 +67,7 @@ FULL USB 的 USJ 串口始终承担烧录和 IDF 日志；CDC 测试枚举出的
 1. 以 `root_port_unpowered=true` 安装 controller[0] USB Host。
 2. 创建 USB Host library event task 和 UVC driver task。
 3. 安装 UVC client，随后开启 root port。
-4. 申请 ESP32-P4 JPEG decoder、帧队列、解码缓冲和固定预览缓冲。
+4. 申请 ESP32-P4 JPEG decoder、帧队列、解码缓冲和 front/back 预览双缓冲。
 5. 优先申请 PPA SRM 缩放资源；失败时保留 CPU 缩放回退。
 
 `test_uvc_run()` 是有界阻塞调用，等待设备、枚举能力并打开流。frame callback 只把带有 `stream_hdl` 和 stream `generation` 的消息投递给 worker；worker 完成 JPEG 解码、预览缩放和统计。stream callback 只记录断连事件，不在 USB callback 中直接关闭句柄；worker 在 stream mutex 下验证 generation、停止/关闭对应 stream，并归还该代次的全部帧。旧代次事件不能修改新 stream 的状态。`test_uvc_deinit()` 先停止接收、排空并归还所有应用持有帧，确认句柄和 held-frame 计数归零后，才卸载 UVC client/Host 并释放 JPEG、PPA、queue、task 和 buffer；归还或关闭失败时保留资源并报告错误，不能继续卸载 controller。
@@ -93,13 +93,17 @@ UVC 不再硬编码 FPS：
 ### 解码与预览
 
 - USB UVC 帧使用 PSRAM 缓冲，格式为 MJPEG；ESP32-P4 硬件 JPEG decoder 输出 RGB565。
-- 固定预览缓冲为面板全屏 `1024x600`，保持源画面宽高比并居中，空白区域清零。
-- 按需解码：worker 对 1080p 使用 `100 ms` 最小间隔挑帧解码，目标预览帧率为 8~10 fps；窗口未到期的帧直接归还并计入 `skipped`。解码率对齐显示率而非相机帧率，避免 1080p@30fps 全量解码（每帧写约 4 MB RGB565）耗尽 PSRAM 带宽。解码失败不前移预览时间戳，下一帧立即重试，预览不会因坏帧卡住。该值由原来的 `200 ms` 单变量下调，PPA 约 90 ms 的既有实测仍是当前串行路径的主要上限。
-- 上板实测（2026-07-17）：间隔下调后 1920×1080 预览仍约 3 fps，未观察到改善；640×360 约 7~8 fps，受后台与 UI 均为 `100 ms` 周期的 10 fps 上限及坏帧影响。该实验保留用于后续结合 `UVC stats` 区分 JPEG、PPA、坏帧和整帧搬运耗时，不将目标帧率表述为已达成。
+- 默认协商稳定档 `1280x720` 的最高可用 FPS；若摄像头没有该档，优先选择不超过 `1280x720` 的最大 MJPEG 分辨率，若所有档位都超过上限则选择设备的最小 MJPEG 档。UI 仍保留 1080p 手动选择能力。
+- 两块固定预览缓冲均为面板全屏 `1024x600 RGB565`，合计约 2.34 MiB PSRAM。worker 在不持有预览锁时将画面等比缩放到 back buffer，完成 cache 同步后短暂加锁交换 front/back；UI 只复制稳定的 front buffer。每块缓冲独立记录有效画面区域，仅在首次使用或宽高比变化时清零空白区域。
+- 除 `1920x1080` 外，worker 不设置固定解码间隔，每个收到的完整 MJPEG 帧都会尝试进入硬件 JPEG/PPA 串行管线。1080p 全速尝试上板出现连续 `ESP_ERR_INVALID_STATE`、`dma2d_force_end` 和 UVC stream stall，因此对硬件解码尝试设置 `200 ms` 最小间隔（最高 5 次/秒）；失败尝试同样占用时间窗口，避免坏帧连续冲击 DMA2D。被限流的帧计入 `skipped` 并立即归还。
+- 处理速度低于相机输入时由既有有界队列丢弃旧帧，不累积历史画面。UI 以 `33 ms` 周期查询最新 `frame_id`，没有新帧时不复制、不触发 LVGL 重绘。
+- `1920x1080`、`1280x720`、`640x360` 等比输出为 `1024x576`；`1280x960`、`800x600`、`640x480` 等比输出为 `800x600`。所有分辨率使用同一路径，由 JPEG、PPA、PSRAM 和显示实际吞吐决定帧率，不硬编码目标值。
+- 上板基线（2026-07-17，双缓冲改动前）：1920×1080 解码约 21~34 ms、PPA 约 84~103 ms、屏幕约 3 fps；640×360 解码约 1.5~5.6 ms、PPA 约 15~19 ms、屏幕约 7~8 fps。旧路径的 worker 与 UI 均受 `100 ms` 周期限制，且 PPA 全程持有预览锁；双缓冲及解除限流后的结果仍需重新上板验证。
+- 双缓冲解除限流实测（2026-07-17）：1080p 启动后硬件解码错误快速增长至 16 次，并出现 `dma2d_force_end`；随后收流超时进入 root-port 恢复，重开流时出现 frame buffer `ESP_ERR_NO_MEM`。本次仅恢复 1080p 解码尝试限频，其余分辨率继续跑满，结果仍需上板复测。
 - 解码前先做 MJPEG 完整性校验：头部 SOI（FFD8）+ 尾部 `TEST_UVC_MJPEG_EOI_SEARCH_WINDOW=512` 字节窗口内存在 EOI（FFD9）。尾部截断帧计入 `truncated` 并直接归还，不进硬件解码器。
 - PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。1080p 源经 PPA SRM 缩放实测约 90 ms/次，受 PPA 引擎吞吐（约 23 MPix/s）限制，属常数开销，不能靠减少总线争用优化。
-- `test_uvc_copy_preview()` 将最新预览复制到调用方缓冲；调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
-- 状态中保留接收、解码、错误、截断、按需跳帧、丢帧、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
+- `test_uvc_copy_preview()` 在预览锁内将稳定的 front buffer 复制到调用方缓冲；生产者只能在复制结束后把旧 front 作为下一块 back 使用。调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
+- 状态中保留接收、解码、发布、错误、截断、丢帧、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数；五秒统计的全部流量/错误计数均输出窗口增量，通过 `received/decoded/published` 区分输入、解码和预览生产速度，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
 
 ### ISOC 丢包与已知残余坏帧
 
@@ -138,6 +142,7 @@ UVC 初始化成功但暂时没有摄像头时，Host 角色可以保持就绪�
 ### 健康检查与分级恢复
 
 role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视频帧会置位恢复请求，恢复不会从 UVC callback 或 frame worker 内直接卸载自身。
+1080p 下 `jpeg_decoder_process()` 连续失败 4 次也会置位恢复请求并暂停接收；这两类 1080p 故障都直接采用 `ROOT_PORT` 恢复，将目标改为 `1280x720` 后重新枚举。成功降级后状态和 UI 记录自动降级次数；用户手动选择分辨率会清除此状态。
 
 自动恢复按以下等级升级，每级最多尝试 3 次。同一级前两次失败后分别等待
 500/1000 ms；第 3 次失败升级到下一级，并在 500 ms 后开始该级尝试：

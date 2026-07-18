@@ -100,6 +100,15 @@ typedef struct {
     uvc_app_queue_msg_t msg;
 } uvc_held_frame_slot_t;
 
+typedef struct {
+    uint8_t *data;
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t dst_x;
+    uint32_t dst_y;
+    bool layout_valid;
+} uvc_preview_buffer_t;
+
 static QueueHandle_t s_event_queue;
 static EventGroupHandle_t s_device_event_group;
 static TaskHandle_t s_usblib_task_handle;
@@ -110,35 +119,18 @@ static bool s_ppa_runtime_disabled;
 static uvc_host_stream_hdl_t s_stream_hdl;
 static uint8_t *s_rgb565_buf;
 static size_t s_rgb565_buf_size;
-static uint8_t *s_preview_buf;
+static uvc_preview_buffer_t s_preview_buffers[TEST_UVC_PREVIEW_BUFFER_COUNT];
+static uint8_t s_preview_front_index;
+static uint8_t s_preview_back_index = 1;
 static SemaphoreHandle_t s_preview_lock;
 static SemaphoreHandle_t s_decode_lock;
 static SemaphoreHandle_t s_stream_lock;
 static uint32_t s_preview_frame_id;
 static uint32_t s_preview_source_w;
 static uint32_t s_preview_source_h;
-static uint32_t s_preview_dst_w;
-static uint32_t s_preview_dst_h;
-static uint32_t s_preview_dst_x;
-static uint32_t s_preview_dst_y;
-static int64_t s_preview_last_update_us;
 
-/* worker 预览节流间隔(ms), 按协商的源分辨率分级(见 test_config.h)。
- * 协商/切换分辨率时在 s_frame_lock 内更新; worker 以对齐 32 位读取,
- * 本平台为原子, 无需加锁。 */
-static volatile uint32_t s_preview_update_interval_ms = TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS;
-
-static uint32_t uvc_preview_interval_ms_for(uint32_t h_res, uint32_t v_res)
-{
-    const uint32_t pixels = h_res * v_res;
-    if (pixels <= 640U * 480U) {
-        return TEST_UVC_PREVIEW_UPDATE_INTERVAL_SMALL_MS;
-    }
-    if (pixels <= 1280U * 720U) {
-        return TEST_UVC_PREVIEW_UPDATE_INTERVAL_MEDIUM_MS;
-    }
-    return TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS;
-}
+_Static_assert(TEST_UVC_PREVIEW_BUFFER_COUNT == 2,
+               "UVC preview front/back ownership requires two buffers");
 
 /* Device capability enumeration result, filled in the DEVICE_CONNECTED
  * callback and consumed by test_uvc_run() when opening the stream. */
@@ -177,6 +169,7 @@ static uint32_t s_disconnect_stream_generation;
 
 static uint32_t s_frames_received;
 static uint32_t s_frames_decoded;
+static uint32_t s_frames_published;
 static uint32_t s_decode_errors;
 static uint32_t s_frames_truncated;
 static uint32_t s_frames_skipped;
@@ -188,10 +181,15 @@ static uint32_t s_last_preview_us;
 static uint32_t s_last_frame_w;
 static uint32_t s_last_frame_h;
 static int64_t s_last_frame_time_us;
+static int64_t s_last_1080p_decode_attempt_us;
+static uint32_t s_consecutive_decode_errors;
 static test_uvc_state_t s_state = TEST_UVC_STATE_IDLE;
 static test_uvc_recovery_level_t s_recovery_level = TEST_UVC_RECOVERY_NONE;
 static uint32_t s_recovery_attempts;
 static bool s_recovery_required;
+static bool s_stable_fallback_required;
+static bool s_auto_downgraded;
+static uint32_t s_auto_downgrade_count;
 static test_uvc_preview_backend_t s_preview_backend = TEST_UVC_PREVIEW_BACKEND_CPU;
 static uint32_t s_preview_fallbacks;
 static uint32_t s_transfer_errors;
@@ -206,7 +204,36 @@ static test_module_meta_t s_module = {
 static int64_t s_stats_window_start_us;
 static uint32_t s_stats_window_received;
 static uint32_t s_stats_window_decoded;
+static uint32_t s_stats_window_published;
 static uint32_t s_stats_window_errors;
+static uint32_t s_stats_window_truncated;
+static uint32_t s_stats_window_skipped;
+static uint32_t s_stats_window_dropped;
+static uint32_t s_stats_window_transfer_errors;
+static uint32_t s_stats_window_overflows;
+static uint32_t s_stats_window_underflows;
+
+static bool uvc_skip_throttled_decode(uint32_t width, uint32_t height)
+{
+    if (width != 1920U || height != 1080U) {
+        return false;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    bool skip = false;
+    portENTER_CRITICAL(&s_frame_lock);
+    if (s_last_1080p_decode_attempt_us > 0 &&
+        now_us - s_last_1080p_decode_attempt_us <
+            (int64_t)TEST_UVC_1080P_DECODE_INTERVAL_MS * 1000LL) {
+        s_frames_skipped++;
+        skip = true;
+    } else {
+        /* Failed hardware decode attempts also consume this window. */
+        s_last_1080p_decode_attempt_us = now_us;
+    }
+    portEXIT_CRITICAL(&s_frame_lock);
+    return skip;
+}
 
 static bool uvc_stream_lock_take(TickType_t ticks)
 {
@@ -508,15 +535,23 @@ static void uvc_log_stats_if_due(void)
         return;
     }
 
-    ESP_LOGI(TAG, "UVC stats: state=%s received=%" PRIu32 " decoded=%" PRIu32 " errors=%" PRIu32
+    ESP_LOGI(TAG, "UVC stats: state=%s received=%" PRIu32 " decoded=%" PRIu32
+             " published=%" PRIu32 " errors=%" PRIu32
              " truncated=%" PRIu32 " skipped=%" PRIu32 " dropped=%" PRIu32
+             " transfer=%" PRIu32 " overflow=%" PRIu32 " underflow=%" PRIu32
              " last=%" PRIu32 "x%" PRIu32 " len=%" PRIu32
              " decode=%" PRIu32 "us preview=%" PRIu32 "us backend=%s",
              uvc_state_name(s_state),
              s_frames_received - s_stats_window_received,
              s_frames_decoded - s_stats_window_decoded,
+             s_frames_published - s_stats_window_published,
              s_decode_errors - s_stats_window_errors,
-             s_frames_truncated, s_frames_skipped, s_frames_dropped,
+             s_frames_truncated - s_stats_window_truncated,
+             s_frames_skipped - s_stats_window_skipped,
+             s_frames_dropped - s_stats_window_dropped,
+             s_transfer_errors - s_stats_window_transfer_errors,
+             s_frame_overflows - s_stats_window_overflows,
+             s_frame_underflows - s_stats_window_underflows,
              s_last_frame_w, s_last_frame_h, s_last_frame_bytes,
              s_last_decode_us, s_last_preview_us,
              s_preview_backend == TEST_UVC_PREVIEW_BACKEND_PPA ? "PPA" : "CPU");
@@ -524,7 +559,14 @@ static void uvc_log_stats_if_due(void)
     s_stats_window_start_us = now_us;
     s_stats_window_received = s_frames_received;
     s_stats_window_decoded = s_frames_decoded;
+    s_stats_window_published = s_frames_published;
     s_stats_window_errors = s_decode_errors;
+    s_stats_window_truncated = s_frames_truncated;
+    s_stats_window_skipped = s_frames_skipped;
+    s_stats_window_dropped = s_frames_dropped;
+    s_stats_window_transfer_errors = s_transfer_errors;
+    s_stats_window_overflows = s_frame_overflows;
+    s_stats_window_underflows = s_frame_underflows;
 }
 
 /* Convert a UVC frame interval (100ns units) to frames-per-second. */
@@ -551,6 +593,47 @@ static uint32_t uvc_pick_best_interval(const uvc_host_frame_info_t *info)
         }
     }
     return best;
+}
+
+static const uvc_host_frame_info_t *uvc_pick_stable_format(
+    const uvc_host_frame_info_t *frame_info_list, size_t frame_info_count,
+    uint32_t *out_interval)
+{
+    const uvc_host_frame_info_t *best_bounded = NULL;
+    const uvc_host_frame_info_t *smallest = NULL;
+    uint32_t best_bounded_pixels = 0;
+    uint32_t smallest_pixels = UINT32_MAX;
+    uint32_t best_bounded_interval = 0;
+    uint32_t smallest_interval = 0;
+
+    for (size_t i = 0; i < frame_info_count; ++i) {
+        const uvc_host_frame_info_t *info = &frame_info_list[i];
+        if (info->format != TEST_UVC_FORMAT) {
+            continue;
+        }
+        const uint32_t pixels = info->h_res * info->v_res;
+        const uint32_t interval = uvc_pick_best_interval(info);
+        if (info->h_res <= TEST_UVC_STABLE_MAX_H_RES &&
+            info->v_res <= TEST_UVC_STABLE_MAX_V_RES &&
+            (best_bounded == NULL || pixels > best_bounded_pixels ||
+             (pixels == best_bounded_pixels && interval < best_bounded_interval))) {
+            best_bounded = info;
+            best_bounded_pixels = pixels;
+            best_bounded_interval = interval;
+        }
+        if (smallest == NULL || pixels < smallest_pixels ||
+            (pixels == smallest_pixels && interval < smallest_interval)) {
+            smallest = info;
+            smallest_pixels = pixels;
+            smallest_interval = interval;
+        }
+    }
+
+    const uvc_host_frame_info_t *chosen = best_bounded != NULL ? best_bounded : smallest;
+    if (chosen != NULL && out_interval != NULL) {
+        *out_interval = best_bounded != NULL ? best_bounded_interval : smallest_interval;
+    }
+    return chosen;
 }
 
 static esp_err_t uvc_ensure_rgb565_buf(uint32_t width, uint32_t height);
@@ -607,11 +690,6 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
     /* Pass 1: MJPEG + preferred resolution + highest fps */
     const uvc_host_frame_info_t *best_preferred = NULL;
     uint32_t best_preferred_interval = 0;
-    /* Pass 2: MJPEG + largest resolution + highest fps (fallback) */
-    const uvc_host_frame_info_t *best_mjpeg = NULL;
-    uint32_t best_mjpeg_interval = 0;
-    uint32_t best_mjpeg_pixels = 0;
-
     for (size_t i = 0; i < list_size; ++i) {
         const uvc_host_frame_info_t *f = &frame_info_list[i];
         if (f->format != TEST_UVC_FORMAT) {
@@ -619,8 +697,6 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
         }
 
         uint32_t interval = uvc_pick_best_interval(f);
-        uint32_t pixels = f->h_res * f->v_res;
-
         uint32_t preferred_h_res = requested_resolution_valid ? requested_h_res : TEST_UVC_PREFER_H_RES;
         uint32_t preferred_v_res = requested_resolution_valid ? requested_v_res : TEST_UVC_PREFER_V_RES;
         if (f->h_res == preferred_h_res && f->v_res == preferred_v_res) {
@@ -630,19 +706,12 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
             }
         }
 
-        if (best_mjpeg == NULL || pixels > best_mjpeg_pixels ||
-            (pixels == best_mjpeg_pixels && interval < best_mjpeg_interval)) {
-            best_mjpeg = f;
-            best_mjpeg_interval = interval;
-            best_mjpeg_pixels = pixels;
-        }
     }
 
     const uvc_host_frame_info_t *chosen = best_preferred;
     uint32_t chosen_interval = best_preferred_interval;
     if (chosen == NULL) {
-        chosen = best_mjpeg;
-        chosen_interval = best_mjpeg_interval;
+        chosen = uvc_pick_stable_format(frame_info_list, list_size, &chosen_interval);
     }
 
     if (chosen == NULL) {
@@ -670,8 +739,6 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
     s_frame_info_count = list_size;
     s_negotiated_format = negotiated_format;
     s_format_negotiated = true;
-    s_preview_update_interval_ms =
-        uvc_preview_interval_ms_for(negotiated_format.h_res, negotiated_format.v_res);
     portEXIT_CRITICAL(&s_frame_lock);
 
     ESP_LOGI(TAG, "negotiated format: %ux%u@%.1ffps format=%d%s",
@@ -683,7 +750,8 @@ static esp_err_t uvc_negotiate_format(uint8_t dev_addr, uint8_t uvc_stream_index
 
 static esp_err_t uvc_update_preview_ppa(uint32_t src_w, uint32_t src_h, size_t source_stride,
                                         uint32_t dst_w, uint32_t dst_h,
-                                        uint32_t dst_x, uint32_t dst_y)
+                                        uint32_t dst_x, uint32_t dst_y,
+                                        uint8_t *preview_buf)
 {
     const ppa_srm_oper_config_t config = {
         .in = {
@@ -697,7 +765,7 @@ static esp_err_t uvc_update_preview_ppa(uint32_t src_w, uint32_t src_h, size_t s
             .srm_cm = PPA_SRM_COLOR_MODE_RGB565,
         },
         .out = {
-            .buffer = s_preview_buf,
+            .buffer = preview_buf,
             .buffer_size = TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * sizeof(uint16_t),
             .pic_w = TEST_UVC_PREVIEW_H_RES,
             .pic_h = TEST_UVC_PREVIEW_V_RES,
@@ -716,10 +784,11 @@ static esp_err_t uvc_update_preview_ppa(uint32_t src_w, uint32_t src_h, size_t s
 
 static void uvc_update_preview_cpu(uint32_t src_w, uint32_t src_h, size_t source_stride,
                                    uint32_t dst_w, uint32_t dst_h,
-                                   uint32_t dst_x, uint32_t dst_y)
+                                   uint32_t dst_x, uint32_t dst_y,
+                                   uint8_t *preview_buf)
 {
     const uint16_t *src = (const uint16_t *)s_rgb565_buf;
-    uint16_t *dst = (uint16_t *)s_preview_buf;
+    uint16_t *dst = (uint16_t *)preview_buf;
     for (uint32_t y = 0; y < dst_h; ++y) {
         const uint32_t src_y = (uint32_t)(((uint64_t)y * src_h) / dst_h);
         uint16_t *dst_row = dst + ((dst_y + y) * TEST_UVC_PREVIEW_H_RES) + dst_x;
@@ -732,7 +801,8 @@ static void uvc_update_preview_cpu(uint32_t src_w, uint32_t src_h, size_t source
 
 static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size)
 {
-    if (s_preview_buf == NULL || s_preview_lock == NULL || src_w == 0 || src_h == 0) {
+    uvc_preview_buffer_t *back = &s_preview_buffers[s_preview_back_index];
+    if (back->data == NULL || s_preview_lock == NULL || src_w == 0 || src_h == 0) {
         return;
     }
 
@@ -756,19 +826,16 @@ static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size
     const uint32_t dst_x = (TEST_UVC_PREVIEW_H_RES - dst_w) / 2U;
     const uint32_t dst_y = (TEST_UVC_PREVIEW_V_RES - dst_h) / 2U;
 
-    if (xSemaphoreTake(s_preview_lock, 0) != pdTRUE) {
-        return;
-    }
-
     bool preview_cleared = false;
-    if (s_preview_frame_id == 0 || dst_w != s_preview_dst_w || dst_h != s_preview_dst_h ||
-        dst_x != s_preview_dst_x || dst_y != s_preview_dst_y) {
-        memset(s_preview_buf, 0, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U);
+    if (!back->layout_valid || dst_w != back->dst_w || dst_h != back->dst_h ||
+        dst_x != back->dst_x || dst_y != back->dst_y) {
+        memset(back->data, 0, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U);
         preview_cleared = true;
-        s_preview_dst_w = dst_w;
-        s_preview_dst_h = dst_h;
-        s_preview_dst_x = dst_x;
-        s_preview_dst_y = dst_y;
+        back->dst_w = dst_w;
+        back->dst_h = dst_h;
+        back->dst_x = dst_x;
+        back->dst_y = dst_y;
+        back->layout_valid = true;
     }
     const int64_t start_us = esp_timer_get_time();
     esp_err_t ret = ESP_ERR_NOT_SUPPORTED;
@@ -776,11 +843,11 @@ static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size
         if (preview_cleared) {
             /* The PPA driver invalidates its output window before DMA. Commit
              * CPU-written black bars first so that invalidation cannot discard them. */
-            esp_cache_msync(s_preview_buf, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U,
+            esp_cache_msync(back->data, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U,
                             ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
         }
         ret = uvc_update_preview_ppa(src_w, src_h, source_stride,
-                                     dst_w, dst_h, dst_x, dst_y);
+                                     dst_w, dst_h, dst_x, dst_y, back->data);
     }
     if (ret == ESP_OK) {
         portENTER_CRITICAL(&s_frame_lock);
@@ -798,15 +865,25 @@ static void uvc_update_preview(uint32_t src_w, uint32_t src_h, uint32_t out_size
         } else {
             portEXIT_CRITICAL(&s_frame_lock);
         }
-        uvc_update_preview_cpu(src_w, src_h, source_stride, dst_w, dst_h, dst_x, dst_y);
+        uvc_update_preview_cpu(src_w, src_h, source_stride,
+                               dst_w, dst_h, dst_x, dst_y, back->data);
     }
-    esp_cache_msync(s_preview_buf, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U,
+    esp_cache_msync(back->data, TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES * 2U,
                     ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    const uint32_t preview_us = (uint32_t)(esp_timer_get_time() - start_us);
+
+    if (xSemaphoreTake(s_preview_lock, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+    const uint8_t old_front_index = s_preview_front_index;
+    s_preview_front_index = s_preview_back_index;
+    s_preview_back_index = old_front_index;
     portENTER_CRITICAL(&s_frame_lock);
-    s_last_preview_us = (uint32_t)(esp_timer_get_time() - start_us);
+    s_last_preview_us = preview_us;
     s_preview_source_w = src_w;
     s_preview_source_h = src_h;
     s_preview_frame_id++;
+    s_frames_published++;
     portEXIT_CRITICAL(&s_frame_lock);
     xSemaphoreGive(s_preview_lock);
 }
@@ -1168,11 +1245,15 @@ static void uvc_worker_task(void *arg)
             portENTER_CRITICAL(&s_frame_lock);
             const bool stream_started = s_stream_started;
             const int64_t last_frame_time_us = s_last_frame_time_us;
+            const bool high_load_format = s_format_negotiated &&
+                                          (s_negotiated_format.h_res > TEST_UVC_STABLE_MAX_H_RES ||
+                                           s_negotiated_format.v_res > TEST_UVC_STABLE_MAX_V_RES);
             portEXIT_CRITICAL(&s_frame_lock);
             if (stream_started && last_frame_time_us > 0 &&
                 esp_timer_get_time() - last_frame_time_us >= TEST_UVC_STREAM_STALL_TIMEOUT_MS * 1000LL) {
                 portENTER_CRITICAL(&s_frame_lock);
                 s_recovery_required = true;
+                s_stable_fallback_required = high_load_format;
                 portEXIT_CRITICAL(&s_frame_lock);
                 uvc_set_state(TEST_UVC_STATE_FAILED, ESP_ERR_TIMEOUT);
             }
@@ -1282,20 +1363,6 @@ static void uvc_worker_task(void *arg)
             continue;
         }
 
-        /* 按需解码: 预览窗口未到期就直接归还帧, 不占用 JPEG 引擎和
-         * PSRAM 带宽(1080p 每帧解码要写 ~4MB)。解码率对齐显示率而非
-         * 相机帧率; 解码失败时 s_preview_last_update_us 不会前移, 下一
-         * 帧会立即重试, 预览不会因坏帧而卡住。 */
-        if (esp_timer_get_time() - s_preview_last_update_us <
-                (int64_t)s_preview_update_interval_ms * 1000LL) {
-            portENTER_CRITICAL(&s_frame_lock);
-            s_frames_skipped++;
-            portEXIT_CRITICAL(&s_frame_lock);
-            uvc_return_frame_or_retry(&msg);
-            uvc_log_stats_if_due();
-            continue;
-        }
-
         if (s_jpeg_decoder == NULL) {
             portENTER_CRITICAL(&s_frame_lock);
             s_decode_errors++;
@@ -1321,6 +1388,12 @@ static void uvc_worker_task(void *arg)
                 ESP_LOGW(TAG, "UVC decode errors=%" PRIu32 ": get_info=%s len=%u",
                          decode_errors, esp_err_to_name(ret), (unsigned)frame->data_len);
             }
+            uvc_return_frame_or_retry(&msg);
+            uvc_log_stats_if_due();
+            continue;
+        }
+
+        if (uvc_skip_throttled_decode(info.width, info.height)) {
             uvc_return_frame_or_retry(&msg);
             uvc_log_stats_if_due();
             continue;
@@ -1360,12 +1433,25 @@ static void uvc_worker_task(void *arg)
         ret = jpeg_decoder_process(s_jpeg_decoder, &decode_cfg,
                                    frame->data, (uint32_t)frame->data_len,
                                    s_rgb565_buf, (uint32_t)s_rgb565_buf_size, &out_size);
+        bool trigger_stable_fallback = false;
         portENTER_CRITICAL(&s_frame_lock);
         s_last_decode_us = (uint32_t)(esp_timer_get_time() - start_us);
 
         if (ret != ESP_OK) {
             s_decode_errors++;
             s_last_error = ret;
+            if (info.width == 1920U && info.height == 1080U) {
+                s_consecutive_decode_errors++;
+                if (s_consecutive_decode_errors >= TEST_UVC_1080P_CONSECUTIVE_ERRORS &&
+                    !s_stable_fallback_required) {
+                    s_stable_fallback_required = true;
+                    s_recovery_required = true;
+                    s_accept_frames = false;
+                    trigger_stable_fallback = true;
+                }
+            } else {
+                s_consecutive_decode_errors = 0;
+            }
             const uint32_t decode_errors = s_decode_errors;
             portEXIT_CRITICAL(&s_frame_lock);
             if (uvc_should_sample_error(decode_errors)) {
@@ -1375,18 +1461,20 @@ static void uvc_worker_task(void *arg)
             }
         } else {
             s_frames_decoded++;
+            s_consecutive_decode_errors = 0;
             portEXIT_CRITICAL(&s_frame_lock);
         }
 
         uvc_return_frame_or_retry(&msg);
         if (ret == ESP_OK) {
-            int64_t now_us = esp_timer_get_time();
-            if (now_us - s_preview_last_update_us >= (int64_t)s_preview_update_interval_ms * 1000LL) {
-                s_preview_last_update_us = now_us;
-                uvc_update_preview(info.width, info.height, out_size);
-            }
+            uvc_update_preview(info.width, info.height, out_size);
         }
         xSemaphoreGive(s_decode_lock);
+        if (trigger_stable_fallback) {
+            ESP_LOGW(TAG, "1080p hardware decode failed %u consecutive times; requesting stable-resolution recovery",
+                     (unsigned)TEST_UVC_1080P_CONSECUTIVE_ERRORS);
+            uvc_set_state(TEST_UVC_STATE_FAILED, ret);
+        }
         uvc_log_stats_if_due();
     }
 
@@ -1496,11 +1584,15 @@ static void uvc_free_app_resources(void)
     }
 
     if (s_preview_lock != NULL && xSemaphoreTake(s_preview_lock, portMAX_DELAY) == pdTRUE) {
-        if (s_preview_buf != NULL) {
-            heap_caps_free(s_preview_buf);
-            s_preview_buf = NULL;
+        for (size_t i = 0; i < TEST_UVC_PREVIEW_BUFFER_COUNT; ++i) {
+            heap_caps_free(s_preview_buffers[i].data);
+            s_preview_buffers[i] = (uvc_preview_buffer_t) {0};
         }
+        s_preview_front_index = 0;
+        s_preview_back_index = 1;
         s_preview_frame_id = 0;
+        s_preview_source_w = 0;
+        s_preview_source_h = 0;
         xSemaphoreGive(s_preview_lock);
     }
 
@@ -1605,20 +1697,20 @@ static esp_err_t uvc_init_locked(void)
     }
     ESP_GOTO_ON_FALSE(s_decode_lock != NULL, ESP_ERR_NO_MEM, fail,
                       TAG, "create permanent UVC decode lock failed");
-    s_preview_buf = heap_caps_aligned_calloc(TEST_UVC_PPA_BUFFER_ALIGNMENT,
-                                             TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES,
-                                             sizeof(uint16_t),
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_GOTO_ON_FALSE(s_preview_buf != NULL, ESP_ERR_NO_MEM, fail,
-                      TAG, "allocate UVC preview buffer failed");
+    for (size_t i = 0; i < TEST_UVC_PREVIEW_BUFFER_COUNT; ++i) {
+        s_preview_buffers[i].data =
+            heap_caps_aligned_calloc(TEST_UVC_PPA_BUFFER_ALIGNMENT,
+                                     TEST_UVC_PREVIEW_H_RES * TEST_UVC_PREVIEW_V_RES,
+                                     sizeof(uint16_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ESP_GOTO_ON_FALSE(s_preview_buffers[i].data != NULL, ESP_ERR_NO_MEM, fail,
+                          TAG, "allocate UVC preview buffer %u failed", (unsigned)i);
+    }
+    s_preview_front_index = 0;
+    s_preview_back_index = 1;
     s_preview_frame_id = 0;
     s_preview_source_w = 0;
     s_preview_source_h = 0;
-    s_preview_dst_w = 0;
-    s_preview_dst_h = 0;
-    s_preview_dst_x = 0;
-    s_preview_dst_y = 0;
-    s_preview_last_update_us = 0;
     const ppa_client_config_t ppa_config = {
         .oper_type = PPA_OPERATION_SRM,
         .max_pending_trans_num = 1,
@@ -1642,6 +1734,7 @@ static esp_err_t uvc_init_locked(void)
     s_format_negotiated = false;
     s_frames_received = 0;
     s_frames_decoded = 0;
+    s_frames_published = 0;
     s_decode_errors = 0;
     s_frames_truncated = 0;
     s_frames_skipped = 0;
@@ -1653,9 +1746,14 @@ static esp_err_t uvc_init_locked(void)
     s_last_frame_w = 0;
     s_last_frame_h = 0;
     s_last_frame_time_us = 0;
+    s_last_1080p_decode_attempt_us = 0;
+    s_consecutive_decode_errors = 0;
     s_recovery_level = TEST_UVC_RECOVERY_NONE;
     s_recovery_attempts = 0;
     s_recovery_required = false;
+    s_stable_fallback_required = false;
+    s_auto_downgraded = false;
+    s_auto_downgrade_count = 0;
     s_preview_backend = s_ppa_srm != NULL ? TEST_UVC_PREVIEW_BACKEND_PPA : TEST_UVC_PREVIEW_BACKEND_CPU;
     s_ppa_runtime_disabled = false;
     s_preview_fallbacks = 0;
@@ -1668,7 +1766,14 @@ static esp_err_t uvc_init_locked(void)
     s_stats_window_start_us = 0;
     s_stats_window_received = 0;
     s_stats_window_decoded = 0;
+    s_stats_window_published = 0;
     s_stats_window_errors = 0;
+    s_stats_window_truncated = 0;
+    s_stats_window_skipped = 0;
+    s_stats_window_dropped = 0;
+    s_stats_window_transfer_errors = 0;
+    s_stats_window_overflows = 0;
+    s_stats_window_underflows = 0;
 
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
@@ -1788,6 +1893,8 @@ static esp_err_t uvc_run_locked(void)
         s_stream_started = true;
         s_accept_frames = true;
         s_last_frame_time_us = esp_timer_get_time();
+        s_last_1080p_decode_attempt_us = 0;
+        s_consecutive_decode_errors = 0;
         s_recovery_required = false;
         portEXIT_CRITICAL(&s_frame_lock);
         s_uvc_streaming_marker = UVC_STREAMING_MARKER;
@@ -1981,6 +2088,8 @@ static esp_err_t uvc_run_locked(void)
     s_accept_frames = true;
     s_uvc_streaming_marker = UVC_STREAMING_MARKER;
     s_last_frame_time_us = esp_timer_get_time();
+    s_last_1080p_decode_attempt_us = 0;
+    s_consecutive_decode_errors = 0;
     s_recovery_required = false;
     s_last_error = ESP_OK;
     portEXIT_CRITICAL(&s_frame_lock);
@@ -2018,6 +2127,7 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .negotiated_fps = s_format_negotiated ? s_negotiated_format.fps : 0.0f,
         .frames_received = s_frames_received,
         .frames_decoded = s_frames_decoded,
+        .frames_published = s_frames_published,
         .decode_errors = s_decode_errors,
         .frames_dropped = s_frames_dropped,
         .frame_queue_high_water = s_frame_queue_high_water,
@@ -2031,6 +2141,8 @@ esp_err_t test_uvc_get_status(test_uvc_status_t *out_status)
         .recovery_attempts = s_recovery_attempts,
         .recovery_required = s_recovery_required,
         .warm_recovery_expected = s_uvc_streaming_marker == UVC_STREAMING_MARKER,
+        .auto_downgraded = s_auto_downgraded,
+        .auto_downgrade_count = s_auto_downgrade_count,
         .preview_backend = s_preview_backend,
         .preview_fallbacks = s_preview_fallbacks,
         .transfer_errors = s_transfer_errors,
@@ -2094,6 +2206,9 @@ esp_err_t test_uvc_set_preferred_resolution(uint32_t h_res, uint32_t v_res)
     s_requested_h_res = h_res;
     s_requested_v_res = v_res;
     s_requested_resolution_valid = true;
+    s_stable_fallback_required = false;
+    s_auto_downgraded = false;
+    s_consecutive_decode_errors = 0;
     portEXIT_CRITICAL(&s_frame_lock);
     return ESP_OK;
 }
@@ -2178,12 +2293,12 @@ static esp_err_t uvc_change_resolution_locked(uint32_t h_res, uint32_t v_res)
     portENTER_CRITICAL(&s_frame_lock);
     s_negotiated_format = format;
     s_format_negotiated = true;
-    s_preview_update_interval_ms =
-        uvc_preview_interval_ms_for(format.h_res, format.v_res);
     s_stream_started = true;
     s_accept_frames = true;
     s_uvc_streaming_marker = UVC_STREAMING_MARKER;
     s_last_frame_time_us = esp_timer_get_time();
+    s_last_1080p_decode_attempt_us = 0;
+    s_consecutive_decode_errors = 0;
     s_recovery_required = false;
     s_last_error = ESP_OK;
     portEXIT_CRITICAL(&s_frame_lock);
@@ -2315,11 +2430,24 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
     ESP_RETURN_ON_FALSE(level >= TEST_UVC_RECOVERY_STREAM && level <= TEST_UVC_RECOVERY_STACK,
                         ESP_ERR_INVALID_ARG, TAG, "invalid recovery level");
 
+    portENTER_CRITICAL(&s_frame_lock);
+    const bool stable_fallback = s_stable_fallback_required;
+    const uint32_t previous_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0;
+    const uint32_t previous_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0;
+    if (stable_fallback) {
+        s_requested_h_res = TEST_UVC_PREFER_H_RES;
+        s_requested_v_res = TEST_UVC_PREFER_V_RES;
+        s_requested_resolution_valid = true;
+        level = TEST_UVC_RECOVERY_ROOT_PORT;
+    }
+    portEXIT_CRITICAL(&s_frame_lock);
+
     s_recovery_level = level;
     s_recovery_attempts++;
     s_recovery_required = false;
     uvc_set_state(TEST_UVC_STATE_RECOVERING, ESP_OK);
-    ESP_LOGW(TAG, "UVC recovery level=%d attempt=%" PRIu32, (int)level, s_recovery_attempts);
+    ESP_LOGW(TAG, "UVC recovery level=%d attempt=%" PRIu32 "%s", (int)level,
+             s_recovery_attempts, stable_fallback ? " stable-fallback=1280x720" : "");
 
     esp_err_t ret = uvc_close_active_stream();
     if (level == TEST_UVC_RECOVERY_STREAM) {
@@ -2353,7 +2481,28 @@ static esp_err_t uvc_recover_locked(test_uvc_recovery_level_t level)
         }
     }
 
-    if (ret != ESP_OK) {
+    if (ret == ESP_OK && stable_fallback) {
+        portENTER_CRITICAL(&s_frame_lock);
+        const uint32_t fallback_h_res = s_format_negotiated ? s_negotiated_format.h_res : 0;
+        const uint32_t fallback_v_res = s_format_negotiated ? s_negotiated_format.v_res : 0;
+        const bool resolution_reduced = fallback_h_res > 0 && fallback_v_res > 0 &&
+                                        (uint64_t)fallback_h_res * fallback_v_res <
+                                            (uint64_t)previous_h_res * previous_v_res;
+        s_stable_fallback_required = false;
+        s_auto_downgraded = resolution_reduced;
+        if (resolution_reduced) {
+            s_auto_downgrade_count++;
+        }
+        portEXIT_CRITICAL(&s_frame_lock);
+        if (resolution_reduced) {
+            ESP_LOGW(TAG, "UVC automatically downgraded from %ux%u to %ux%u",
+                     (unsigned)previous_h_res, (unsigned)previous_v_res,
+                     (unsigned)fallback_h_res, (unsigned)fallback_v_res);
+        } else {
+            ESP_LOGW(TAG, "camera has no lower stable MJPEG resolution; reopened %ux%u",
+                     (unsigned)fallback_h_res, (unsigned)fallback_v_res);
+        }
+    } else if (ret != ESP_OK) {
         uvc_set_state(TEST_UVC_STATE_FAILED, ret);
     }
     return ret;
@@ -2380,7 +2529,8 @@ esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size, test_uvc_prev
     if (xSemaphoreTake(s_preview_lock, 0) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    if (s_preview_buf == NULL) {
+    uint8_t *front = s_preview_buffers[s_preview_front_index].data;
+    if (front == NULL) {
         xSemaphoreGive(s_preview_lock);
         return ESP_ERR_INVALID_STATE;
     }
@@ -2389,7 +2539,7 @@ esp_err_t test_uvc_copy_preview(void *out_rgb565, size_t out_size, test_uvc_prev
         xSemaphoreGive(s_preview_lock);
         return ESP_ERR_NOT_FOUND;
     }
-    memcpy(out_rgb565, s_preview_buf, preview_size);
+    memcpy(out_rgb565, front, preview_size);
     if (out_info != NULL) {
         *out_info = (test_uvc_preview_info_t) {
             .valid = true,

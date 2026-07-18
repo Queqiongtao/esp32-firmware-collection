@@ -60,6 +60,7 @@ typedef struct {
     float negotiated_fps;
     uint32_t frames_received;
     uint32_t frames_decoded;
+    uint32_t frames_published;
     uint32_t decode_errors;
     uint32_t frames_dropped;
     uint32_t frame_queue_high_water;
@@ -73,6 +74,8 @@ typedef struct {
     uint32_t recovery_attempts;
     bool recovery_required;
     bool warm_recovery_expected;
+    bool auto_downgraded;
+    uint32_t auto_downgrade_count;
     test_uvc_preview_backend_t preview_backend;
     uint32_t preview_fallbacks;
     uint32_t transfer_errors;

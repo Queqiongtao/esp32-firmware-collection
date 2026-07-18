@@ -50,6 +50,8 @@ typedef struct {
     uint32_t uvc_recovery_attempts;    /**< Recovery attempts since role start */
     bool uvc_recovery_required;        /**< Stream health monitor requested recovery */
     bool uvc_warm_recovery_expected;   /**< A camera streamed before the latest warm reset */
+    bool uvc_auto_downgraded;          /**< 1080p instability forced the stable resolution */
+    uint32_t uvc_auto_downgrade_count; /**< Successful automatic stable-resolution fallbacks */
     esp_err_t uvc_last_error;          /**< Last UVC module error */
     uint32_t cdc_rx_packets;           /**< CDC Device: total RX packets */
     uint32_t cdc_tx_packets;           /**< CDC Device: total TX packets */

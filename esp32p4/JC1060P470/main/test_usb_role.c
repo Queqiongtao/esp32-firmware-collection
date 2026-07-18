@@ -715,6 +715,8 @@ esp_err_t test_usb_role_get_status(test_usb_role_status_t *out_status)
         status.uvc_recovery_attempts = uvc_status.recovery_attempts;
         status.uvc_recovery_required = uvc_status.recovery_required;
         status.uvc_warm_recovery_expected = uvc_status.warm_recovery_expected;
+        status.uvc_auto_downgraded = uvc_status.auto_downgraded;
+        status.uvc_auto_downgrade_count = uvc_status.auto_downgrade_count;
         status.uvc_last_error = uvc_status.last_error;
     }
 #endif

@@ -192,7 +192,8 @@
  *   快照，不直接持有 USB、JPEG 或 PPA 的内部缓冲。
  *   流格式（分辨率/FPS）在设备连接时从描述符枚举后动态协商，优先
  *   匹配 TEST_UVC_PREFER_H_RES × TEST_UVC_PREFER_V_RES 的 MJPEG +
- *   最高 fps，不匹配时降级到设备实际支持的最大 MJPEG 格式。
+ *   最高 fps；不匹配时选不超过稳定上限的最大 MJPEG 档，若设备只
+ *   提供更高分辨率，则选择其最小 MJPEG 档。
  *
  * Cache 一致性：
  *   - UVC 帧缓冲在 PSRAM，由 USB-DWC DMA 写入，应用 CPU 读 frame->data；
@@ -210,11 +211,12 @@
 
 #define TEST_UVC_FORMAT                         UVC_VS_FORMAT_MJPEG
 
-/* Preferred resolution for stream negotiation. Not enforced: if the device
- * does not support this exact resolution, the module falls back to the
- * device's actual maximum supported MJPEG resolution. */
-#define TEST_UVC_PREFER_H_RES                   1920
-#define TEST_UVC_PREFER_V_RES                   1080
+/* Stable default for stream negotiation. A user may still explicitly select
+ * a higher descriptor from the UI. */
+#define TEST_UVC_PREFER_H_RES                   1280
+#define TEST_UVC_PREFER_V_RES                   720
+#define TEST_UVC_STABLE_MAX_H_RES               1280
+#define TEST_UVC_STABLE_MAX_V_RES               720
 
 /* Maximum number of frame descriptors the module will enumerate from a single
  * UVC device via uvc_host_get_frame_list(). Must be >= the device's
@@ -267,19 +269,18 @@
 #define TEST_UVC_JPEG_ENGINE_TIMEOUT_MS         200        /* > 33ms (30fps 上限), 给硬件解码容限 */
 #define TEST_UVC_JPEG_DECODE_TIMEOUT_MS         500
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */
+/* 1080p 全速解码会连续触发 JPEG/DMA2D 错误并拖垮 UVC 收流。限制的是
+ * 解码尝试而非成功预览，因此坏帧也会占用当前 200ms 时间窗口。 */
+#define TEST_UVC_1080P_DECODE_INTERVAL_MS       200        /* 1920x1080: 最多 5 次解码尝试/秒 */
+#define TEST_UVC_1080P_CONSECUTIVE_ERRORS       4          /* 连续硬解失败后自动降到稳定档 */
 
 /* 固定大小的 RGB565 预览帧。UVC worker 将已解码的原始画面等比缩放并居中
- * 到此缓冲；UI 通过受控拷贝取得快照，避免直接持有 JPEG DMA 输出缓冲。
+ * 到 front/back 双缓冲；UI 通过受控拷贝取得已发布的 front 快照，避免
+ * 直接持有 JPEG/PPA DMA 缓冲，也避免缩放期间长期占用 UI 预览锁。
  * 全屏预览: 与 MIPI-DSI 面板同尺寸, 非同比例源等比缩放后
  * 上下/左右留黑边。 */
 #define TEST_UVC_PREVIEW_H_RES                  DISPLAY_PANEL_H_RES
 #define TEST_UVC_PREVIEW_V_RES                  DISPLAY_PANEL_V_RES
-#define TEST_UVC_PREVIEW_REFRESH_MS             100
-/* worker 更新预览的最小间隔, 按协商的源分辨率自适应。1080p 下 PPA 缩放
- * 需整读 ~4MB PSRAM 源 (实测 preview 耗时 90ms), 与 JPEG 解码/显示刷新
- * 争用 PSRAM 带宽。1080p 间隔由 200ms 单变量下调到 100ms, 目标
- * 8~10fps; 上板仍约 3fps, 保留该值用于后续分段耗时诊断。 */
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_SMALL_MS  100  /* 源 <= 640x480, ~10fps */
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_MEDIUM_MS 100  /* 源 <= 1280x720, ~10fps */
-#define TEST_UVC_PREVIEW_UPDATE_INTERVAL_LARGE_MS  100  /* 更大源 (1080p), 目标 8~10fps */
+#define TEST_UVC_PREVIEW_BUFFER_COUNT           2
+#define TEST_UVC_PREVIEW_REFRESH_MS             33
 #define TEST_UVC_PPA_BUFFER_ALIGNMENT           128

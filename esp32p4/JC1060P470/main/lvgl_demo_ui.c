@@ -1680,7 +1680,9 @@ static void demo_update_font_card(void)
                                        diag->first_error[0] != '\0' ? diag->first_error : "");
 }
 
-static void demo_uvc_update_resolution_options(void)
+static void demo_uvc_update_resolution_options(uint32_t current_h_res,
+                                               uint32_t current_v_res,
+                                               bool format_negotiated)
 {
     if (s_uvc_resolution_dropdown == NULL) {
         return;
@@ -1722,6 +1724,16 @@ static void demo_uvc_update_resolution_options(void)
                 used += (size_t)written;
             }
             lv_dropdown_set_options(s_uvc_resolution_dropdown, options);
+        }
+    }
+    if (format_negotiated) {
+        for (size_t i = 0; i < s_uvc_resolution_count; ++i) {
+            if (s_uvc_resolutions[i].h_res == current_h_res &&
+                s_uvc_resolutions[i].v_res == current_v_res &&
+                lv_dropdown_get_selected(s_uvc_resolution_dropdown) != i) {
+                lv_dropdown_set_selected(s_uvc_resolution_dropdown, i);
+                break;
+            }
         }
     }
 #else
@@ -1781,19 +1793,26 @@ static void demo_uvc_timer_cb(lv_timer_t *timer)
     } else if (!role_status.uvc_stream_started) {
         demo_label_set_text_if_changed(s_uvc_status_label, "摄像头已连接，正在打开视频流");
     } else {
-        demo_label_set_text_fmt_if_changed(s_uvc_status_label, "实时预览: %ux%u @ %.1f FPS",
+        demo_label_set_text_fmt_if_changed(s_uvc_status_label,
+                                           role_status.uvc_auto_downgraded ?
+                                           "实时预览: %ux%u @ %.1f FPS（已自动降至稳定档）" :
+                                           "实时预览: %ux%u @ %.1f FPS",
                                            (unsigned)role_status.uvc_negotiated_h_res,
                                            (unsigned)role_status.uvc_negotiated_v_res,
                                            role_status.uvc_negotiated_fps);
     }
     demo_label_set_text_fmt_if_changed(s_uvc_detail_label,
-                                       "解码 %" PRIu32 "  丢帧 %" PRIu32 "  错误 %" PRIu32 "  恢复 %" PRIu32,
+                                       "解码 %" PRIu32 "  丢帧 %" PRIu32 "  错误 %" PRIu32
+                                       "  恢复 %" PRIu32 "  降级 %" PRIu32,
                                        role_status.uvc_frames_decoded,
                                        role_status.uvc_frames_dropped,
                                        role_status.uvc_decode_errors,
-                                       role_status.uvc_recovery_attempts);
+                                       role_status.uvc_recovery_attempts,
+                                       role_status.uvc_auto_downgrade_count);
 
-    demo_uvc_update_resolution_options();
+    demo_uvc_update_resolution_options(role_status.uvc_negotiated_h_res,
+                                       role_status.uvc_negotiated_v_res,
+                                       role_status.uvc_format_negotiated);
     bool resolution_change_ready = role_status.current_role == TEST_USB_ROLE_UVC_HOST &&
                                    role_status.uvc_stream_started &&
                                    !role_status.switch_in_progress &&
