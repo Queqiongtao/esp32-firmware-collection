@@ -262,6 +262,7 @@
 #define TEST_UVC_DEVICE_READY_DELAY_MS          1000
 #define TEST_UVC_DEVICE_GONE_TIMEOUT_MS         2000
 #define TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS       3
+#define TEST_UVC_STREAM_OPEN_TIMEOUT_MS          5000
 #define TEST_UVC_STREAM_OPEN_RETRY_DELAY_MS     500
 #define TEST_UVC_FRAME_RECV_TIMEOUT_MS          5000
 #define TEST_UVC_STREAM_STALL_TIMEOUT_MS         5000
@@ -278,6 +279,12 @@
 #define TEST_UVC_1080P_CONSECUTIVE_ERRORS       4          /* 连续硬解失败后自动降到稳定档 */
 #define TEST_UVC_1080P_ERROR_RATE_MIN_ATTEMPTS  12         /* 5 秒窗口内样本不足时不判定 */
 #define TEST_UVC_1080P_ERROR_RATE_PERCENT       25         /* 5 秒窗口错误率达到 25% 时预防性降级 */
+
+#ifdef CONFIG_EXAMPLE_UVC_ENABLE_PPA_PREVIEW
+#define TEST_UVC_ENABLE_PPA_PREVIEW             CONFIG_EXAMPLE_UVC_ENABLE_PPA_PREVIEW
+#else
+#define TEST_UVC_ENABLE_PPA_PREVIEW             0
+#endif
 
 /* 固定大小的 RGB565 预览帧。UVC worker 将已解码的原始画面等比缩放并居中
  * 到 front/back 双缓冲；UI 通过受控拷贝取得已发布的 front 快照，避免

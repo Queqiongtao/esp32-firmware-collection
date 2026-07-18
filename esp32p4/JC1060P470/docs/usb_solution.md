@@ -102,7 +102,7 @@ UVC 不再硬编码 FPS：
 - 上板基线（2026-07-17，双缓冲改动前）：1920×1080 解码约 21~34 ms、PPA 约 84~103 ms、屏幕约 3 fps；640×360 解码约 1.5~5.6 ms、PPA 约 15~19 ms、屏幕约 7~8 fps。旧路径的 worker 与 UI 均受 `100 ms` 周期限制，且 PPA 全程持有预览锁；双缓冲及解除限流后的结果仍需重新上板验证。
 - 双缓冲解除限流实测（2026-07-17）：1080p 启动后硬件解码错误快速增长至 16 次，并出现 `dma2d_force_end`；随后收流超时进入 root-port 恢复。后续日志确认重开流时的 `ESP_ERR_NO_MEM` 实际伴随 `Not enough memory for frame buffers 0`，根因是失败 probe 提供零尺寸，并非已证明 PSRAM 总量耗尽。固定 1 MiB frame buffer 后仍需上板循环复测。
 - 解码前先做 MJPEG 完整性校验：头部 SOI（FFD8）+ 尾部 `TEST_UVC_MJPEG_EOI_SEARCH_WINDOW=512` 字节窗口内存在 EOI（FFD9）。尾部截断帧计入 `truncated` 并直接归还，不进硬件解码器。
-- PPA 可用时走 PPA 缩放，否则走 CPU RGB565 缩放。1080p 源经 PPA SRM 缩放实测约 90 ms/次，受 PPA 引擎吞吐（约 23 MPix/s）限制，属常数开销，不能靠减少总线争用优化。
+- 当前默认使用 CPU RGB565 缩放；`EXAMPLE_UVC_ENABLE_PPA_PREVIEW` 保留 PPA SRM 缩放作为单变量试验开关。720p 持续预览时观测到 `dma2d_force_end` 与 PPA 预览并存，因此先隔离 UVC 预览对共享 DMA2D/PPA 域的使用；这只是待上板验证的假设，不代表已证明该错误由 PPA 引起。1080p 源经 PPA SRM 缩放的既有实测约 90 ms/次。
 - `test_uvc_copy_preview()` 在预览锁内将稳定的 front buffer 复制到调用方缓冲；生产者只能在复制结束后把旧 front 作为下一块 back 使用。调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
 - 状态中保留接收、解码、发布、错误、截断、丢帧、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数；五秒统计的全部流量/错误计数均输出窗口增量，通过 `received/decoded/published` 区分输入、解码和预览生产速度，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
 
@@ -157,7 +157,7 @@ role worker 每 `250 ms` 检查一次 UVC 状态。连续 `5 s` 没有收到视�
 `ROOT_PORT`。该级在最多 `2000 ms` 内等待 device-gone；超时则保留句柄和 controller
 所有权并报告失败，不强行卸载 USB Host。
 
-打开 stream 时，`ESP_ERR_NOT_FINISHED`、`ESP_ERR_TIMEOUT` 和 `ESP_ERR_INVALID_RESPONSE`
+打开 stream 使用显式 `5000 ms` 的设备等待超时，并记录每次调用耗时。返回 `ESP_ERR_NOT_FINISHED`、`ESP_ERR_TIMEOUT` 和 `ESP_ERR_INVALID_RESPONSE`
 按控制端点瞬时错误处理，在同一枚举代次内最多重试 3 次、间隔 500 ms；真实
 `ESP_ERR_NO_MEM` 不在原 stream 上重复分配。日志同时记录 frame buffer 配置和
 PSRAM free/biggest，区分总量不足、连续块不足与 probe 零尺寸。

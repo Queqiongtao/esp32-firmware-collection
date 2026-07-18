@@ -208,6 +208,16 @@ menu "Example Configuration"
             returning to the main page releases the UVC Host resources.
     endchoice
 
+    config EXAMPLE_UVC_ENABLE_PPA_PREVIEW
+        bool "Enable UVC PPA preview scaling"
+        depends on EXAMPLE_ENABLE_TEST_UVC
+        default n
+        help
+            Use the PPA SRM client to scale decoded UVC frames into the preview
+            buffer. Keep this disabled while validating UVC stability because
+            the display pipeline also uses DMA2D/PPA resources. The CPU scaler
+            is slower but isolates the UVC preview path from that shared engine.
+
     config EXAMPLE_ENABLE_TEST_WIRELESS
         bool "Enable WiFi/BLE test module"
         default y

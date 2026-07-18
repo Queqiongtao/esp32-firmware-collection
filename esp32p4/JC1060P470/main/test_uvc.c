@@ -1836,6 +1836,7 @@ static esp_err_t uvc_init_locked(void)
     s_preview_frame_id = 0;
     s_preview_source_w = 0;
     s_preview_source_h = 0;
+#if TEST_UVC_ENABLE_PPA_PREVIEW
     const ppa_client_config_t ppa_config = {
         .oper_type = PPA_OPERATION_SRM,
         .max_pending_trans_num = 1,
@@ -1846,6 +1847,9 @@ static esp_err_t uvc_init_locked(void)
         s_ppa_srm = NULL;
         ret = ESP_OK;
     }
+#else
+    ESP_LOGI(TAG, "UVC preview backend: CPU (PPA experiment disabled)");
+#endif
     portENTER_CRITICAL(&s_frame_lock);
     s_frame_info_count = 0;
     s_accept_frames = false;
@@ -2168,7 +2172,16 @@ static esp_err_t uvc_run_locked(void)
     ret = ESP_FAIL;
     uvc_host_stream_hdl_t new_stream_hdl = NULL;
     for (uint32_t attempt = 1; attempt <= TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS; ++attempt) {
-        ret = uvc_host_stream_open(&stream_config, 0, &new_stream_hdl);
+        const int64_t open_start_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "UVC stream open attempt %u/%u (device wait=%ums)",
+                 (unsigned)attempt, (unsigned)TEST_UVC_STREAM_OPEN_MAX_ATTEMPTS,
+                 (unsigned)TEST_UVC_STREAM_OPEN_TIMEOUT_MS);
+        ret = uvc_host_stream_open(&stream_config,
+                                   pdMS_TO_TICKS(TEST_UVC_STREAM_OPEN_TIMEOUT_MS),
+                                   &new_stream_hdl);
+        ESP_LOGI(TAG, "UVC stream open attempt %u returned %s after %" PRIi64 "ms",
+                 (unsigned)attempt, esp_err_to_name(ret),
+                 (esp_timer_get_time() - open_start_us) / 1000LL);
         if (ret == ESP_OK) {
             break;
         }
