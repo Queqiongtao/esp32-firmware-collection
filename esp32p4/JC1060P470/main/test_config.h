@@ -274,7 +274,7 @@
 #define TEST_UVC_JPEG_QUEUE_LIMIT              0          /* 0: 不限制连续解码错误日志频率, 由计数器自行管控 */
 /* 相机仍按协商帧率传输，应用只限制 JPEG/PPA 预览处理频率。坏帧同样占用
  * 当前处理窗口，避免损坏帧连续冲击共享 DMA2D/PSRAM。 */
-#define TEST_UVC_720P_DECODE_INTERVAL_MS        100        /* 1280x720: 预览最高 10fps */
+#define TEST_UVC_720P_DECODE_INTERVAL_MS        200        /* 1280x720: 预览最高 5fps */
 #define TEST_UVC_1080P_DECODE_INTERVAL_MS       200        /* 1920x1080: 最多 5 次解码尝试/秒 */
 #define TEST_UVC_1080P_CONSECUTIVE_ERRORS       4          /* 连续硬解失败后自动降到稳定档 */
 #define TEST_UVC_1080P_ERROR_RATE_MIN_ATTEMPTS  12         /* 5 秒窗口内样本不足时不判定 */

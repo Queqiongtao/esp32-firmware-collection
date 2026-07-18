@@ -96,13 +96,13 @@ UVC 不再硬编码 FPS：
 - UVC 使用 3 块固定 `1 MiB` MJPEG frame buffer。该摄像头正常 probe 的 `dwMaxVideoFrameSize` 为 `1048576`；若 EP0 短传输导致 probe 结果中的 frame size 变为 0，继续采用驱动协商值会执行零字节分配并误报 `ESP_ERR_NO_MEM`，因此应用不再把 buffer 大小交给该字段决定。
 - 默认协商稳定档 `1280x720` 的最高可用 FPS；若摄像头没有该档，优先选择不超过 `1280x720` 的最大 MJPEG 分辨率，若所有档位都超过上限则选择设备的最小 MJPEG 档。UI 仍保留 1080p 手动选择能力。
 - 两块固定预览缓冲均为面板全屏 `1024x600 RGB565`，合计约 2.34 MiB PSRAM。worker 在不持有预览锁时将画面等比缩放到 back buffer，完成 cache 同步后短暂加锁交换 front/back；UI 只复制稳定的 front buffer。每块缓冲独立记录有效画面区域，仅在首次使用或宽高比变化时清零空白区域。
-- 摄像头仍按协商帧率传输，应用侧限制 JPEG/PPA 预览处理频率：`1280x720` 最小间隔 `100 ms`（最高 10 次/秒），`1920x1080` 最小间隔 `200 ms`（最高 5 次/秒），更低分辨率不限制。失败尝试同样占用时间窗口，被限流的完整帧计入 `skipped` 并立即归还，避免损坏帧连续冲击 JPEG、PPA、PSRAM 和共享 DMA2D。
+- 摄像头仍按协商帧率传输，应用侧限制 JPEG/PPA 预览处理频率：`1280x720` 与 `1920x1080` 最小间隔均为 `200 ms`（最高 5 次/秒），更低分辨率不限制。失败尝试同样占用时间窗口，被限流的完整帧计入 `skipped` 并立即归还，避免损坏帧连续冲击 JPEG、PPA、PSRAM 和共享 DMA2D。
 - 处理速度低于相机输入时由既有有界队列丢弃旧帧，不累积历史画面。UI 以 `33 ms` 周期查询最新 `frame_id`，没有新帧时不复制、不触发 LVGL 重绘。
 - `1920x1080`、`1280x720`、`640x360` 等比输出为 `1024x576`；`1280x960`、`800x600`、`640x480` 等比输出为 `800x600`。所有分辨率使用同一路径，由 JPEG、PPA、PSRAM 和显示实际吞吐决定帧率，不硬编码目标值。
 - 上板基线（2026-07-17，双缓冲改动前）：1920×1080 解码约 21~34 ms、PPA 约 84~103 ms、屏幕约 3 fps；640×360 解码约 1.5~5.6 ms、PPA 约 15~19 ms、屏幕约 7~8 fps。旧路径的 worker 与 UI 均受 `100 ms` 周期限制，且 PPA 全程持有预览锁；双缓冲及解除限流后的结果仍需重新上板验证。
 - 双缓冲解除限流实测（2026-07-17）：1080p 启动后硬件解码错误快速增长至 16 次，并出现 `dma2d_force_end`；随后收流超时进入 root-port 恢复。后续日志确认重开流时的 `ESP_ERR_NO_MEM` 实际伴随 `Not enough memory for frame buffers 0`，根因是失败 probe 提供零尺寸，并非已证明 PSRAM 总量耗尽。固定 1 MiB frame buffer 后仍需上板循环复测。
 - 解码前先做 MJPEG 完整性校验：头部 SOI（FFD8）+ 尾部 `TEST_UVC_MJPEG_EOI_SEARCH_WINDOW=512` 字节窗口内存在 EOI（FFD9）。尾部截断帧计入 `truncated` 并直接归还，不进硬件解码器。
-- 当前默认使用 CPU RGB565 缩放；`EXAMPLE_UVC_ENABLE_PPA_PREVIEW` 保留 PPA SRM 缩放作为单变量试验开关。720p 持续预览时观测到 `dma2d_force_end` 与 PPA 预览并存，因此先隔离 UVC 预览对共享 DMA2D/PPA 域的使用；这只是待上板验证的假设，不代表已证明该错误由 PPA 引起。1080p 源经 PPA SRM 缩放的既有实测约 90 ms/次。
+- 默认使用 PPA SRM 缩放；`EXAMPLE_UVC_ENABLE_PPA_PREVIEW` 可关闭以做单变量诊断。CPU 缩放 720p 实测约 `225~231 ms/帧`，造成大量 UVC underflow 和主动丢帧，不能作为默认路径。IDF JPEG 驱动源码确认，`dma2d_force_end` 是 `jpeg_decoder_process()` 在 JPEG 状态错误后的清理调用；CPU 试验中该日志仍出现，不能归因于 UVC PPA。1080p 源经 PPA SRM 缩放的既有实测约 90 ms/次。
 - `test_uvc_copy_preview()` 在预览锁内将稳定的 front buffer 复制到调用方缓冲；生产者只能在复制结束后把旧 front 作为下一块 back 使用。调用方带入上一帧 `frame_id` 时，没有新帧会返回 `ESP_ERR_NOT_FOUND`，避免重复整帧复制。
 - 状态中保留接收、解码、发布、错误、截断、丢帧、queue 高水位、解码耗时、预览耗时、缩放后端和 fallback 次数；五秒统计的全部流量/错误计数均输出窗口增量，通过 `received/decoded/published` 区分输入、解码和预览生产速度，UI 只读取摘要，不持有 JPEG 或 USB 内部缓冲。
 
