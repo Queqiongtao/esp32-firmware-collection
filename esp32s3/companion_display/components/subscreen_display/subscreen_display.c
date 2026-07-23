@@ -29,27 +29,21 @@ static const char *TAG = "subscreen_display";
  */
 #define SH8601_RGB565(logical_rgb565) __builtin_bswap16((uint16_t)(logical_rgb565))
 
-#define COLOR_BG SH8601_RGB565(0x18E3)
-#define COLOR_SURFACE SH8601_RGB565(0x3906)
-#define COLOR_TRACK SH8601_RGB565(0x42C8)
-#define COLOR_TEXT SH8601_RGB565(0xEF7D)
-#define COLOR_MUTED SH8601_RGB565(0x9552)
-#define COLOR_ACCENT SH8601_RGB565(0x36FB)
-#define COLOR_INFO SH8601_RGB565(0x36FB)
-#define COLOR_SUCCESS SH8601_RGB565(0x36C0)
-#define COLOR_WARNING SH8601_RGB565(0xFB60)
-#define COLOR_DANGER SH8601_RGB565(0xEA00)
-#define COLOR_MAGENTA SH8601_RGB565(0xF817)
-#define COLOR_CARD COLOR_SURFACE
+#define COLOR_BG SH8601_RGB565(0x0000)
+#define COLOR_TRACK SH8601_RGB565(0x2104)
+#define COLOR_TEXT SH8601_RGB565(0xFFFF)
+#define COLOR_MUTED SH8601_RGB565(0x7BEF)
+#define COLOR_ACCENT SH8601_RGB565(0x07FF)
+#define COLOR_INFO SH8601_RGB565(0x07FF)
+#define COLOR_SUCCESS SH8601_RGB565(0x07E0)
+#define COLOR_WARNING SH8601_RGB565(0xFD20)
+#define COLOR_DANGER SH8601_RGB565(0xF800)
+#define COLOR_MAGENTA SH8601_RGB565(0xF81F)
 
-#define LAYOUT_FOOTER_HEIGHT 32
-#define LAYOUT_MARGIN 20
-#define LAYOUT_CARD_RADIUS 8
-#define LAYOUT_CARD_BORDER 2
-#define LAYOUT_TITLE_Y 16
-#define LAYOUT_TITLE_UNDERLINE_Y 40
-#define LAYOUT_TITLE_UNDERLINE_H 2
-#define LAYOUT_TITLE_UNDERLINE_W 96
+#define LAYOUT_MARGIN 24
+#define LAYOUT_HEADER_Y 20
+#define LAYOUT_HEADER_DIVIDER_Y 54
+#define LAYOUT_FOOTER_HEIGHT 34
 
 struct subscreen_display {
     esp_lcd_panel_handle_t panel;
@@ -200,125 +194,159 @@ static void fill_rect(uint16_t *pixels, int width, int height, int x, int y,
     }
 }
 
-static void set_pixel(uint16_t *pixels, int width, int height, int x, int y, uint16_t color)
+#define FONT_GLYPH_HEIGHT 7
+
+static void draw_text_right(uint16_t *pixels, int width, int height, int right, int y,
+                            int scale, const char *text, uint16_t color)
 {
-    if (x < 0 || x >= width || y < 0 || y >= height) return;
-    pixels[y * width + x] = color;
+    draw_text(pixels, width, height, right - text_width(text, scale), y, scale, text, color);
 }
 
-static void fill_rounded_rect(uint16_t *pixels, int width, int height, int x, int y,
-                              int rect_width, int rect_height, int radius, uint16_t color)
+static void fill_circle(uint16_t *pixels, int width, int height, int center_x, int center_y,
+                        int radius, uint16_t color)
 {
-    if (radius < 0) radius = 0;
-    if (radius > rect_width / 2) radius = rect_width / 2;
-    if (radius > rect_height / 2) radius = rect_height / 2;
-    fill_rect(pixels, width, height, x, y, rect_width, rect_height, color);
-    if (radius == 0) return;
-    const int center = 2 * radius - 1;
-    const int r2 = center * center;
-    for (int cy = 0; cy < radius; ++cy) {
-        const int dy = 2 * cy - center;
-        for (int cx = 0; cx < radius; ++cx) {
-            const int dx = 2 * cx - center;
-            if (dx * dx + dy * dy > r2) {
-                set_pixel(pixels, width, height, x + cx, y + cy, COLOR_BG);
-                set_pixel(pixels, width, height, x + rect_width - 1 - cx, y + cy, COLOR_BG);
-                set_pixel(pixels, width, height, x + cx, y + rect_height - 1 - cy, COLOR_BG);
-                set_pixel(pixels, width, height, x + rect_width - 1 - cx, y + rect_height - 1 - cy, COLOR_BG);
+    const int radius_squared = radius * radius;
+    for (int y = -radius; y <= radius; ++y) {
+        for (int x = -radius; x <= radius; ++x) {
+            if (x * x + y * y <= radius_squared) {
+                const int px = center_x + x;
+                const int py = center_y + y;
+                if (px >= 0 && px < width && py >= 0 && py < height) pixels[py * width + px] = color;
             }
         }
     }
 }
 
-static void draw_card(uint16_t *pixels, int width, int height, int y, int card_height)
+static void draw_header(uint16_t *pixels, int width, int height)
 {
-    const int x = LAYOUT_MARGIN;
-    const int card_width = width - 2 * LAYOUT_MARGIN;
-    fill_rounded_rect(pixels, width, height, x, y, card_width, card_height,
-                      LAYOUT_CARD_RADIUS, COLOR_TRACK);
-    fill_rounded_rect(pixels, width, height, x + LAYOUT_CARD_BORDER, y + LAYOUT_CARD_BORDER,
-                      card_width - 2 * LAYOUT_CARD_BORDER, card_height - 2 * LAYOUT_CARD_BORDER,
-                      LAYOUT_CARD_RADIUS - LAYOUT_CARD_BORDER, COLOR_CARD);
+    draw_text(pixels, width, height, LAYOUT_MARGIN, LAYOUT_HEADER_Y, 2, "COMPANION", COLOR_TEXT);
+    draw_text_right(pixels, width, height, width - LAYOUT_MARGIN, LAYOUT_HEADER_Y, 2, "DISPLAY", COLOR_MUTED);
+    fill_rect(pixels, width, height, LAYOUT_MARGIN, LAYOUT_HEADER_DIVIDER_Y,
+              width - 2 * LAYOUT_MARGIN, 1, COLOR_TRACK);
 }
 
-typedef struct {
-    const char *text;
-    int scale;
-    uint16_t color;
-    int gap_before;
-} card_line_t;
-
-#define FONT_GLYPH_HEIGHT 7
-
-static void draw_card_with_lines(uint16_t *pixels, int width, int height, int y,
-                                 int card_height, const card_line_t *lines, int line_count)
-{
-    draw_card(pixels, width, height, y, card_height);
-    int content_height = 0;
-    for (int i = 0; i < line_count; ++i) {
-        content_height += lines[i].gap_before + FONT_GLYPH_HEIGHT * lines[i].scale;
-    }
-    int text_y = y + (card_height - content_height) / 2;
-    for (int i = 0; i < line_count; ++i) {
-        text_y += lines[i].gap_before;
-        draw_centered_text(pixels, width, height, text_y, lines[i].scale, lines[i].text, lines[i].color);
-        text_y += FONT_GLYPH_HEIGHT * lines[i].scale;
-    }
-}
-
-static void draw_section_label(uint16_t *pixels, int width, int height, int y,
-                               const char *text)
+static void draw_status_line(uint16_t *pixels, int width, int height, int y,
+                             const char *text, uint16_t color)
 {
     const int scale = 2;
-    const int x = LAYOUT_MARGIN + 6;
-    draw_text(pixels, width, height, x, y, scale, text, COLOR_MUTED);
-    const int label_w = text_width(text, scale);
-    const int bar_y = y + (FONT_GLYPH_HEIGHT * scale) / 2;
-    fill_rect(pixels, width, height, x + label_w + 8, bar_y,
-              width - LAYOUT_MARGIN - (x + label_w + 8), 1, COLOR_TRACK);
+    const int text_width_px = text_width(text, scale);
+    const int total_width = 10 + text_width_px;
+    const int x = (width - total_width) / 2;
+    fill_circle(pixels, width, height, x + 4, y + 7, 4, color);
+    draw_text(pixels, width, height, x + 10, y, scale, text, color);
+}
+
+static void draw_section_label(uint16_t *pixels, int width, int height, int y, const char *text)
+{
+    draw_centered_text(pixels, width, height, y, 2, text, COLOR_MUTED);
+}
+
+enum {
+    SEGMENT_A = 1 << 0,
+    SEGMENT_B = 1 << 1,
+    SEGMENT_C = 1 << 2,
+    SEGMENT_D = 1 << 3,
+    SEGMENT_E = 1 << 4,
+    SEGMENT_F = 1 << 5,
+    SEGMENT_G = 1 << 6,
+};
+
+static const uint8_t s_digit_segments[10] = {
+    SEGMENT_A | SEGMENT_B | SEGMENT_C | SEGMENT_D | SEGMENT_E | SEGMENT_F,
+    SEGMENT_B | SEGMENT_C,
+    SEGMENT_A | SEGMENT_B | SEGMENT_D | SEGMENT_E | SEGMENT_G,
+    SEGMENT_A | SEGMENT_B | SEGMENT_C | SEGMENT_D | SEGMENT_G,
+    SEGMENT_B | SEGMENT_C | SEGMENT_F | SEGMENT_G,
+    SEGMENT_A | SEGMENT_C | SEGMENT_D | SEGMENT_F | SEGMENT_G,
+    SEGMENT_A | SEGMENT_C | SEGMENT_D | SEGMENT_E | SEGMENT_F | SEGMENT_G,
+    SEGMENT_A | SEGMENT_B | SEGMENT_C,
+    SEGMENT_A | SEGMENT_B | SEGMENT_C | SEGMENT_D | SEGMENT_E | SEGMENT_F | SEGMENT_G,
+    SEGMENT_A | SEGMENT_B | SEGMENT_C | SEGMENT_D | SEGMENT_F | SEGMENT_G,
+};
+
+static void draw_seven_segment_digit(uint16_t *pixels, int width, int height, int x, int y,
+                                     char digit, uint16_t color)
+{
+    if (digit < '0' || digit > '9') return;
+
+    const int digit_width = 32;
+    const int digit_height = 62;
+    const int thickness = 4;
+    const int middle_y = y + digit_height / 2 - thickness / 2;
+    const uint8_t segments = s_digit_segments[digit - '0'];
+    if (segments & SEGMENT_A) fill_rect(pixels, width, height, x + thickness, y, digit_width - 2 * thickness, thickness, color);
+    if (segments & SEGMENT_B) fill_rect(pixels, width, height, x + digit_width - thickness, y + thickness, thickness, digit_height / 2 - thickness, color);
+    if (segments & SEGMENT_C) fill_rect(pixels, width, height, x + digit_width - thickness, middle_y + thickness, thickness, digit_height / 2 - thickness, color);
+    if (segments & SEGMENT_D) fill_rect(pixels, width, height, x + thickness, y + digit_height - thickness, digit_width - 2 * thickness, thickness, color);
+    if (segments & SEGMENT_E) fill_rect(pixels, width, height, x, middle_y + thickness, thickness, digit_height / 2 - thickness, color);
+    if (segments & SEGMENT_F) fill_rect(pixels, width, height, x, y + thickness, thickness, digit_height / 2 - thickness, color);
+    if (segments & SEGMENT_G) fill_rect(pixels, width, height, x + thickness, middle_y, digit_width - 2 * thickness, thickness, color);
+}
+
+static void draw_pairing_code(uint16_t *pixels, int width, int height, int y, const char *code)
+{
+    const int digit_width = 32;
+    const int gap = 8;
+    const int code_width = 6 * digit_width + 5 * gap;
+    int x = (width - code_width) / 2;
+    for (int i = 0; i < 6; ++i) {
+        draw_seven_segment_digit(pixels, width, height, x, y, code[i], COLOR_TEXT);
+        x += digit_width + gap;
+    }
+}
+
+static void draw_connected_status(uint16_t *pixels, int width, int height,
+                                  const subscreen_display_t *display)
+{
+    draw_status_line(pixels, width, height, 74, "ONLINE", COLOR_SUCCESS);
+    if (strlen(display->pairing_token) == 6) {
+        draw_section_label(pixels, width, height, 112, "PAIR CODE");
+        draw_pairing_code(pixels, width, height, 138, display->pairing_token);
+        fill_rect(pixels, width, height, LAYOUT_MARGIN, 224, width - 2 * LAYOUT_MARGIN, 1, COLOR_TRACK);
+        draw_section_label(pixels, width, height, 246, "DEVICE IP");
+        draw_centered_text(pixels, width, height, 272, 3, display->network_ipv4, COLOR_TEXT);
+        draw_centered_text(pixels, width, height, 322, 2, "ENTER IP + CODE ON PC", COLOR_MUTED);
+    } else {
+        draw_section_label(pixels, width, height, 154, "DEVICE IP");
+        draw_centered_text(pixels, width, height, 182, 3, display->network_ipv4, COLOR_TEXT);
+        draw_centered_text(pixels, width, height, 240, 2, "WAITING FOR PAIR CODE", COLOR_MUTED);
+    }
+}
+
+static void draw_connecting_status(uint16_t *pixels, int width, int height)
+{
+    draw_status_line(pixels, width, height, 136, "CONNECTING", COLOR_INFO);
+    draw_centered_text(pixels, width, height, 184, 3, "WIFI", COLOR_TEXT);
+    fill_circle(pixels, width, height, width / 2 - 16, 236, 4, COLOR_INFO);
+    fill_circle(pixels, width, height, width / 2, 236, 4, COLOR_INFO);
+    fill_circle(pixels, width, height, width / 2 + 16, 236, 4, COLOR_INFO);
+    draw_centered_text(pixels, width, height, 274, 2, "WAITING FOR IP", COLOR_MUTED);
+}
+
+static void draw_setup_status(uint16_t *pixels, int width, int height)
+{
+    draw_status_line(pixels, width, height, 104, "SETUP REQUIRED", COLOR_WARNING);
+    draw_section_label(pixels, width, height, 158, "JOIN WIFI NETWORK");
+    draw_centered_text(pixels, width, height, 188, 3, "COMPANION AP", COLOR_TEXT);
+    fill_rect(pixels, width, height, LAYOUT_MARGIN, 236, width - 2 * LAYOUT_MARGIN, 1, COLOR_TRACK);
+    draw_section_label(pixels, width, height, 260, "OPEN IN BROWSER");
+    draw_centered_text(pixels, width, height, 290, 4, "192.168.4.1", COLOR_ACCENT);
 }
 
 static void draw_network_status(uint16_t *pixels, int width, int height,
                                 const subscreen_display_t *display)
 {
     switch (display->network_status) {
-    case SUBSCREEN_NETWORK_CONNECTED: {
-        draw_section_label(pixels, width, height, 64, "NETWORK");
-        const card_line_t network_lines[] = {
-            {"WIFI CONNECTED", 3, COLOR_SUCCESS, 0},
-            {display->network_ipv4, 4, COLOR_TEXT, 18},
-        };
-        draw_card_with_lines(pixels, width, height, 76, 120, network_lines, 2);
-        if (strlen(display->pairing_token) == 6) {
-            draw_section_label(pixels, width, height, 210, "PAIRING");
-            const card_line_t pairing_lines[] = {
-                {"PAIRING CODE", 3, COLOR_ACCENT, 0},
-                {display->pairing_token, 8, COLOR_TEXT, 22},
-            };
-            draw_card_with_lines(pixels, width, height, 222, 150, pairing_lines, 2);
-        }
-        draw_centered_text(pixels, width, height, 388, 2, "ENTER IP AND CODE ON PC", COLOR_MUTED);
+    case SUBSCREEN_NETWORK_CONNECTED:
+        draw_connected_status(pixels, width, height, display);
         break;
-    }
-    case SUBSCREEN_NETWORK_CONNECTING: {
-        const card_line_t lines[] = {
-            {"WIFI CONNECTING", 3, COLOR_WARNING, 0},
-            {"WAITING FOR IP", 3, COLOR_TEXT, 22},
-        };
-        draw_card_with_lines(pixels, width, height, 140, 110, lines, 2);
+    case SUBSCREEN_NETWORK_CONNECTING:
+        draw_connecting_status(pixels, width, height);
         break;
-    }
     case SUBSCREEN_NETWORK_SETUP_REQUIRED:
-    default: {
-        const card_line_t lines[] = {
-            {"WIFI SETUP REQUIRED", 3, COLOR_WARNING, 0},
-            {"CONNECT TO", 3, COLOR_TEXT, 22},
-            {"COMPANION AP", 3, COLOR_TEXT, 6},
-            {"OPEN 192.168.4.1", 3, COLOR_ACCENT, 22},
-        };
-        draw_card_with_lines(pixels, width, height, 116, 220, lines, 4);
+    default:
+        draw_setup_status(pixels, width, height);
         break;
-    }
     }
 }
 
@@ -416,19 +444,15 @@ static esp_err_t draw_placeholder_locked(subscreen_display_t *display)
     ESP_RETURN_ON_FALSE(pixels != NULL, ESP_ERR_NO_MEM, TAG, "placeholder buffer alloc failed");
 
     fill_rect(pixels, width, height, 0, 0, width, height, COLOR_BG);
-    draw_centered_text(pixels, width, height, LAYOUT_TITLE_Y, 3,
-                       "COMPANION DISPLAY", COLOR_ACCENT);
-    fill_rect(pixels, width, height,
-              (width - LAYOUT_TITLE_UNDERLINE_W) / 2, LAYOUT_TITLE_UNDERLINE_Y,
-              LAYOUT_TITLE_UNDERLINE_W, LAYOUT_TITLE_UNDERLINE_H, COLOR_ACCENT);
+    draw_header(pixels, width, height);
     draw_network_status(pixels, width, height, display);
     const int footer_top = height - LAYOUT_FOOTER_HEIGHT;
-    fill_rect(pixels, width, height, 0, footer_top, width, LAYOUT_FOOTER_HEIGHT, COLOR_SURFACE);
-    fill_rect(pixels, width, height, 0, footer_top, width, 2,
-              transport_status_color(display->transport_status));
-    draw_centered_text(pixels, width, height,
-                       footer_top + 6 + (LAYOUT_FOOTER_HEIGHT - 6 - FONT_GLYPH_HEIGHT * 2) / 2, 2,
-                       transport_status_text(display->transport_status), COLOR_TEXT);
+    const uint16_t footer_color = transport_status_color(display->transport_status);
+    fill_rect(pixels, width, height, LAYOUT_MARGIN, footer_top, width - 2 * LAYOUT_MARGIN, 1, COLOR_TRACK);
+    fill_circle(pixels, width, height, LAYOUT_MARGIN + 4, footer_top + LAYOUT_FOOTER_HEIGHT / 2, 3, footer_color);
+    draw_text(pixels, width, height, LAYOUT_MARGIN + 14,
+              footer_top + (LAYOUT_FOOTER_HEIGHT - FONT_GLYPH_HEIGHT * 2) / 2,
+              2, transport_status_text(display->transport_status), footer_color);
 
     for (int y = 0; y < height; y += PLACEHOLDER_CHUNK_LINES) {
         const int y2 = (y + PLACEHOLDER_CHUNK_LINES < height) ? y + PLACEHOLDER_CHUNK_LINES : height;
