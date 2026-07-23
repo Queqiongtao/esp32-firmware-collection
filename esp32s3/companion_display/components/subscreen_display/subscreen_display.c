@@ -21,21 +21,35 @@ static const char *TAG = "subscreen_display";
 #define DECODE_BUFFER_COUNT 2
 #define JPEG_WORKING_BUFFER_SIZE 65472
 
-#define COLOR_BG 0x1084
-#define COLOR_HEADER 0x07FF
-#define COLOR_ACCENT 0xFBE0
-#define COLOR_TRACK 0x39E7
-#define COLOR_CARD 0x2945
-#define COLOR_DARK 0x0000
-#define COLOR_TEXT 0xFFFF
-#define COLOR_MUTED 0x8410
-#define COLOR_SUCCESS 0x07E0
-#define COLOR_WARNING 0xFBE0
+/*
+ * SH8601 QSPI color writes consume RGB565 as high byte then low byte. ESP32-S3
+ * stores uint16_t values little-endian, so local UI constants are converted at
+ * compile time to the byte layout expected by the panel. JPEG decode produces
+ * the same layout through swap_color_bytes.
+ */
+#define SH8601_RGB565(logical_rgb565) __builtin_bswap16((uint16_t)(logical_rgb565))
 
-#define LAYOUT_HEADER_HEIGHT 48
+#define COLOR_BG SH8601_RGB565(0x18E3)
+#define COLOR_SURFACE SH8601_RGB565(0x3906)
+#define COLOR_TRACK SH8601_RGB565(0x42C8)
+#define COLOR_TEXT SH8601_RGB565(0xEF7D)
+#define COLOR_MUTED SH8601_RGB565(0x9552)
+#define COLOR_ACCENT SH8601_RGB565(0x36FB)
+#define COLOR_INFO SH8601_RGB565(0x36FB)
+#define COLOR_SUCCESS SH8601_RGB565(0x36C0)
+#define COLOR_WARNING SH8601_RGB565(0xFB60)
+#define COLOR_DANGER SH8601_RGB565(0xEA00)
+#define COLOR_MAGENTA SH8601_RGB565(0xF817)
+#define COLOR_CARD COLOR_SURFACE
+
 #define LAYOUT_FOOTER_HEIGHT 32
-#define LAYOUT_MARGIN 16
+#define LAYOUT_MARGIN 20
+#define LAYOUT_CARD_RADIUS 8
 #define LAYOUT_CARD_BORDER 2
+#define LAYOUT_TITLE_Y 16
+#define LAYOUT_TITLE_UNDERLINE_Y 40
+#define LAYOUT_TITLE_UNDERLINE_H 2
+#define LAYOUT_TITLE_UNDERLINE_W 96
 
 struct subscreen_display {
     esp_lcd_panel_handle_t panel;
@@ -123,12 +137,12 @@ static const uint8_t s_font_5x7[][5] = {
     {0x0f, 0x10, 0x10, 0x10, 0x0f}, {0x07, 0x08, 0x10, 0x08, 0x07},
     {0x1f, 0x08, 0x04, 0x08, 0x1f}, {0x1b, 0x04, 0x04, 0x04, 0x1b},
     {0x03, 0x04, 0x18, 0x04, 0x03}, {0x19, 0x15, 0x15, 0x13, 0x00},
-    {0x0e, 0x11, 0x11, 0x11, 0x0e}, {0x00, 0x12, 0x1f, 0x10, 0x00},
-    {0x19, 0x15, 0x15, 0x15, 0x12}, {0x11, 0x15, 0x15, 0x15, 0x0a},
-    {0x07, 0x04, 0x04, 0x04, 0x1f}, {0x17, 0x15, 0x15, 0x15, 0x09},
-    {0x0e, 0x15, 0x15, 0x15, 0x08}, {0x01, 0x01, 0x1d, 0x03, 0x01},
-    {0x0a, 0x15, 0x15, 0x15, 0x0a}, {0x02, 0x05, 0x05, 0x05, 0x1e},
-    {0x00, 0x10, 0x10, 0x00, 0x00}, {0x00, 0x00, 0x0a, 0x00, 0x00},
+    {0x3e, 0x41, 0x41, 0x41, 0x3e}, {0x00, 0x42, 0x7f, 0x40, 0x00},
+    {0x62, 0x51, 0x49, 0x49, 0x47}, {0x22, 0x41, 0x49, 0x49, 0x36},
+    {0x18, 0x14, 0x12, 0x7f, 0x00}, {0x27, 0x45, 0x45, 0x7d, 0x39},
+    {0x3e, 0x49, 0x49, 0x79, 0x30}, {0x01, 0x71, 0x09, 0x05, 0x03},
+    {0x36, 0x49, 0x49, 0x49, 0x36}, {0x06, 0x49, 0x49, 0x79, 0x3e},
+    {0x00, 0x60, 0x60, 0x00, 0x00}, {0x00, 0x00, 0x0a, 0x00, 0x00},
     {0x00, 0x00, 0x0a, 0x00, 0x00},
 };
 
@@ -186,13 +200,45 @@ static void fill_rect(uint16_t *pixels, int width, int height, int x, int y,
     }
 }
 
+static void set_pixel(uint16_t *pixels, int width, int height, int x, int y, uint16_t color)
+{
+    if (x < 0 || x >= width || y < 0 || y >= height) return;
+    pixels[y * width + x] = color;
+}
+
+static void fill_rounded_rect(uint16_t *pixels, int width, int height, int x, int y,
+                              int rect_width, int rect_height, int radius, uint16_t color)
+{
+    if (radius < 0) radius = 0;
+    if (radius > rect_width / 2) radius = rect_width / 2;
+    if (radius > rect_height / 2) radius = rect_height / 2;
+    fill_rect(pixels, width, height, x, y, rect_width, rect_height, color);
+    if (radius == 0) return;
+    const int center = 2 * radius - 1;
+    const int r2 = center * center;
+    for (int cy = 0; cy < radius; ++cy) {
+        const int dy = 2 * cy - center;
+        for (int cx = 0; cx < radius; ++cx) {
+            const int dx = 2 * cx - center;
+            if (dx * dx + dy * dy > r2) {
+                set_pixel(pixels, width, height, x + cx, y + cy, COLOR_BG);
+                set_pixel(pixels, width, height, x + rect_width - 1 - cx, y + cy, COLOR_BG);
+                set_pixel(pixels, width, height, x + cx, y + rect_height - 1 - cy, COLOR_BG);
+                set_pixel(pixels, width, height, x + rect_width - 1 - cx, y + rect_height - 1 - cy, COLOR_BG);
+            }
+        }
+    }
+}
+
 static void draw_card(uint16_t *pixels, int width, int height, int y, int card_height)
 {
     const int x = LAYOUT_MARGIN;
     const int card_width = width - 2 * LAYOUT_MARGIN;
-    fill_rect(pixels, width, height, x, y, card_width, card_height, COLOR_TRACK);
-    fill_rect(pixels, width, height, x + LAYOUT_CARD_BORDER, y + LAYOUT_CARD_BORDER,
-              card_width - 2 * LAYOUT_CARD_BORDER, card_height - 2 * LAYOUT_CARD_BORDER, COLOR_CARD);
+    fill_rounded_rect(pixels, width, height, x, y, card_width, card_height,
+                      LAYOUT_CARD_RADIUS, COLOR_TRACK);
+    fill_rounded_rect(pixels, width, height, x + LAYOUT_CARD_BORDER, y + LAYOUT_CARD_BORDER,
+                      card_width - 2 * LAYOUT_CARD_BORDER, card_height - 2 * LAYOUT_CARD_BORDER,
+                      LAYOUT_CARD_RADIUS - LAYOUT_CARD_BORDER, COLOR_CARD);
 }
 
 typedef struct {
@@ -220,42 +266,57 @@ static void draw_card_with_lines(uint16_t *pixels, int width, int height, int y,
     }
 }
 
+static void draw_section_label(uint16_t *pixels, int width, int height, int y,
+                               const char *text)
+{
+    const int scale = 2;
+    const int x = LAYOUT_MARGIN + 6;
+    draw_text(pixels, width, height, x, y, scale, text, COLOR_MUTED);
+    const int label_w = text_width(text, scale);
+    const int bar_y = y + (FONT_GLYPH_HEIGHT * scale) / 2;
+    fill_rect(pixels, width, height, x + label_w + 8, bar_y,
+              width - LAYOUT_MARGIN - (x + label_w + 8), 1, COLOR_TRACK);
+}
+
 static void draw_network_status(uint16_t *pixels, int width, int height,
                                 const subscreen_display_t *display)
 {
     switch (display->network_status) {
     case SUBSCREEN_NETWORK_CONNECTED: {
+        draw_section_label(pixels, width, height, 64, "NETWORK");
         const card_line_t network_lines[] = {
-            {"WIFI CONNECTED", 2, COLOR_SUCCESS, 0},
-            {display->network_ipv4, 3, COLOR_TEXT, 20},
+            {"WIFI CONNECTED", 3, COLOR_SUCCESS, 0},
+            {display->network_ipv4, 4, COLOR_TEXT, 18},
         };
-        draw_card_with_lines(pixels, width, height, 64, 120, network_lines, 2);
+        draw_card_with_lines(pixels, width, height, 76, 120, network_lines, 2);
         if (strlen(display->pairing_token) == 6) {
+            draw_section_label(pixels, width, height, 210, "PAIRING");
             const card_line_t pairing_lines[] = {
-                {"PAIRING CODE", 2, COLOR_ACCENT, 0},
-                {display->pairing_token, 6, COLOR_TEXT, 24},
+                {"PAIRING CODE", 3, COLOR_ACCENT, 0},
+                {display->pairing_token, 8, COLOR_TEXT, 22},
             };
-            draw_card_with_lines(pixels, width, height, 200, 144, pairing_lines, 2);
+            draw_card_with_lines(pixels, width, height, 222, 150, pairing_lines, 2);
         }
-        draw_centered_text(pixels, width, height, 372, 2, "ENTER IP AND CODE ON PC", COLOR_MUTED);
+        draw_centered_text(pixels, width, height, 388, 2, "ENTER IP AND CODE ON PC", COLOR_MUTED);
         break;
     }
     case SUBSCREEN_NETWORK_CONNECTING: {
         const card_line_t lines[] = {
-            {"WIFI CONNECTING", 2, COLOR_WARNING, 0},
-            {"WAITING FOR IP", 2, COLOR_TEXT, 24},
+            {"WIFI CONNECTING", 3, COLOR_WARNING, 0},
+            {"WAITING FOR IP", 3, COLOR_TEXT, 22},
         };
-        draw_card_with_lines(pixels, width, height, 140, 160, lines, 2);
+        draw_card_with_lines(pixels, width, height, 140, 110, lines, 2);
         break;
     }
     case SUBSCREEN_NETWORK_SETUP_REQUIRED:
     default: {
         const card_line_t lines[] = {
-            {"WIFI SETUP REQUIRED", 2, COLOR_WARNING, 0},
-            {"CONNECT TO COMPANION AP", 2, COLOR_TEXT, 26},
-            {"OPEN 192.168.4.1", 2, COLOR_TEXT, 26},
+            {"WIFI SETUP REQUIRED", 3, COLOR_WARNING, 0},
+            {"CONNECT TO", 3, COLOR_TEXT, 22},
+            {"COMPANION AP", 3, COLOR_TEXT, 6},
+            {"OPEN 192.168.4.1", 3, COLOR_ACCENT, 22},
         };
-        draw_card_with_lines(pixels, width, height, 120, 200, lines, 3);
+        draw_card_with_lines(pixels, width, height, 116, 220, lines, 4);
         break;
     }
     }
@@ -271,7 +332,7 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
     case SUBSCREEN_TRANSPORT_NEGOTIATING:
     case SUBSCREEN_TRANSPORT_TCP_VIDEO:
     case SUBSCREEN_TRANSPORT_UDP_VIDEO:
-        return COLOR_HEADER;
+        return COLOR_INFO;
     case SUBSCREEN_TRANSPORT_RECEIVING_FRAME:
         return COLOR_SUCCESS;
     case SUBSCREEN_TRANSPORT_BAD_PAIRING_CODE:
@@ -286,9 +347,9 @@ static uint16_t transport_status_color(subscreen_transport_status_t status)
     case SUBSCREEN_TRANSPORT_UDP_REJECTED:
     case SUBSCREEN_TRANSPORT_SESSION_EXPIRED:
     case SUBSCREEN_TRANSPORT_STREAM_TIMEOUT:
-        return 0xF800;
+        return COLOR_DANGER;
     case SUBSCREEN_TRANSPORT_FRAME_FAILED:
-        return 0xF81F;
+        return COLOR_MAGENTA;
     case SUBSCREEN_TRANSPORT_READY:
     default:
         return COLOR_ACCENT;
@@ -355,16 +416,19 @@ static esp_err_t draw_placeholder_locked(subscreen_display_t *display)
     ESP_RETURN_ON_FALSE(pixels != NULL, ESP_ERR_NO_MEM, TAG, "placeholder buffer alloc failed");
 
     fill_rect(pixels, width, height, 0, 0, width, height, COLOR_BG);
-    fill_rect(pixels, width, height, 0, 0, width, LAYOUT_HEADER_HEIGHT, COLOR_HEADER);
-    draw_centered_text(pixels, width, height, (LAYOUT_HEADER_HEIGHT - FONT_GLYPH_HEIGHT * 2) / 2, 2,
-                       "COMPANION DISPLAY", COLOR_DARK);
+    draw_centered_text(pixels, width, height, LAYOUT_TITLE_Y, 3,
+                       "COMPANION DISPLAY", COLOR_ACCENT);
+    fill_rect(pixels, width, height,
+              (width - LAYOUT_TITLE_UNDERLINE_W) / 2, LAYOUT_TITLE_UNDERLINE_Y,
+              LAYOUT_TITLE_UNDERLINE_W, LAYOUT_TITLE_UNDERLINE_H, COLOR_ACCENT);
     draw_network_status(pixels, width, height, display);
     const int footer_top = height - LAYOUT_FOOTER_HEIGHT;
-    fill_rect(pixels, width, height, 0, footer_top, width, LAYOUT_FOOTER_HEIGHT,
+    fill_rect(pixels, width, height, 0, footer_top, width, LAYOUT_FOOTER_HEIGHT, COLOR_SURFACE);
+    fill_rect(pixels, width, height, 0, footer_top, width, 2,
               transport_status_color(display->transport_status));
     draw_centered_text(pixels, width, height,
-                       footer_top + (LAYOUT_FOOTER_HEIGHT - FONT_GLYPH_HEIGHT * 2) / 2, 2,
-                       transport_status_text(display->transport_status), COLOR_DARK);
+                       footer_top + 6 + (LAYOUT_FOOTER_HEIGHT - 6 - FONT_GLYPH_HEIGHT * 2) / 2, 2,
+                       transport_status_text(display->transport_status), COLOR_TEXT);
 
     for (int y = 0; y < height; y += PLACEHOLDER_CHUNK_LINES) {
         const int y2 = (y + PLACEHOLDER_CHUNK_LINES < height) ? y + PLACEHOLDER_CHUNK_LINES : height;
