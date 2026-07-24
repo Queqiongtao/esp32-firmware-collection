@@ -6,6 +6,12 @@ export type CaptureSource = {
   height: number;
 };
 
+export type DisplayOrientation =
+  | "portrait"
+  | "landscape_left"
+  | "portrait_inverted"
+  | "landscape_right";
+
 export type StreamEvent = {
   state: string;
   detail: string;
@@ -66,6 +72,7 @@ export type StreamConfig = {
   fps: number;
   jpegQuality: number;
   videoTransport: string;
+  displayOrientation: DisplayOrientation;
 };
 
 export type LogTone = "normal" | "good" | "warn" | "bad";

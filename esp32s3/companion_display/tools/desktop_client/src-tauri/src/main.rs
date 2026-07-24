@@ -1,3 +1,4 @@
+mod orientation;
 mod protocol;
 #[cfg(target_os = "linux")]
 mod wayland_capture;
@@ -11,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageBuffer, Rgb};
+use orientation::DisplayOrientation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -41,6 +43,8 @@ struct StreamConfig {
     fps: u8,
     jpeg_quality: u8,
     video_transport: String,
+    #[serde(default)]
+    display_orientation: DisplayOrientation,
 }
 
 #[derive(Clone, Serialize)]
@@ -167,7 +171,7 @@ enum VideoSender {
 }
 
 /* FPS and JPEG quality can be retuned while a stream is running; the stream
-   thread reads them every loop iteration. */
+thread reads them every loop iteration. */
 #[derive(Default)]
 struct LiveParams {
     fps: AtomicU8,
@@ -196,7 +200,7 @@ const CONTROL_PROTOCOL_VERSION: u8 = 2;
 const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
 const UDP_FRAGMENT_SPACING: Duration = Duration::from_millis(1);
 /* Two ~1.2 KB datagrams per tick stays far below the device's 24-packet
-   receive mailbox while halving per-frame pacing latency. */
+receive mailbox while halving per-frame pacing latency. */
 const UDP_FRAGMENTS_PER_TICK: usize = 2;
 const UDP_FRAME_SEND_LIMIT: Duration = Duration::from_millis(120);
 const STATIC_FRAME_INTERVAL: Duration = Duration::from_secs(1);
@@ -281,7 +285,7 @@ fn list_capture_sources_impl() -> Result<Vec<CaptureSourceInfo>, String> {
     }
 }
 
-fn static_color_bars() -> DynamicImage {
+fn static_color_bars(width: u32, height: u32) -> DynamicImage {
     const COLORS: [[u8; 3]; 8] = [
         [255, 255, 255],
         [255, 255, 0],
@@ -292,8 +296,6 @@ fn static_color_bars() -> DynamicImage {
         [0, 0, 255],
         [0, 0, 0],
     ];
-    let width = u32::from(protocol::WIDTH);
-    let height = u32::from(protocol::HEIGHT);
     let image = ImageBuffer::from_fn(width, height, |x, _| {
         Rgb(COLORS[(x as usize * COLORS.len()) / width as usize])
     });
@@ -353,18 +355,15 @@ fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<Dyna
         return Err("capture region is outside the selected source".to_string());
     }
     let cropped = image.crop_imm(config.region_x, config.region_y, crop_width, crop_height);
+    let physical_width = u32::from(protocol::WIDTH);
+    let physical_height = u32::from(protocol::HEIGHT);
+    let (logical_width, logical_height) = config
+        .display_orientation
+        .logical_size(physical_width, physical_height);
     let resized = cropped
-        .resize(
-            protocol::WIDTH as u32,
-            protocol::HEIGHT as u32,
-            FilterType::Triangle,
-        )
+        .resize(logical_width, logical_height, FilterType::Triangle)
         .to_rgb8();
-    let mut canvas = ImageBuffer::from_pixel(
-        protocol::WIDTH as u32,
-        protocol::HEIGHT as u32,
-        Rgb([0, 0, 0]),
-    );
+    let mut canvas = ImageBuffer::from_pixel(logical_width, logical_height, Rgb([0, 0, 0]));
     let offset_x = (canvas.width() - resized.width()) / 2;
     let offset_y = (canvas.height() - resized.height()) / 2;
     overlay(
@@ -373,11 +372,13 @@ fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<Dyna
         i64::from(offset_x),
         i64::from(offset_y),
     );
-    Ok(DynamicImage::ImageRgb8(canvas))
+    Ok(DynamicImage::ImageRgb8(
+        config.display_orientation.orient_logical_image(&canvas),
+    ))
 }
 
 /* Returns the encoded JPEG and the quality that fit the device limit, so the
-   next frame can start near it instead of re-walking the ladder from the top. */
+next frame can start near it instead of re-walking the ladder from the top. */
 fn encode_jpeg(image: &DynamicImage, requested_quality: u8) -> Result<(Vec<u8>, u8), String> {
     for quality in (30..=requested_quality.clamp(30, 95)).rev().step_by(5) {
         let mut output = Vec::new();
@@ -392,7 +393,7 @@ fn encode_jpeg(image: &DynamicImage, requested_quality: u8) -> Result<(Vec<u8>, 
 }
 
 /* Crop, scale, and letterbox a raw capture to the device canvas. PipeWire
-   frames arrive already transformed, so they pass through untouched. */
+frames arrive already transformed, so they pass through untouched. */
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 fn prepare_image(
     image: DynamicImage,
@@ -437,7 +438,12 @@ fn open_capture_session(
     stop: Arc<AtomicBool>,
 ) -> Result<CaptureSession, String> {
     if config.source_id == STATIC_COLOR_BARS_ID {
-        return Ok(CaptureSession::StaticColorBars(static_color_bars()));
+        let (width, height) = config
+            .display_orientation
+            .logical_size(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT));
+        return Ok(CaptureSession::StaticColorBars(static_color_bars(
+            width, height,
+        )));
     }
     #[cfg(target_os = "linux")]
     {
@@ -491,6 +497,7 @@ fn open_capture_session(
                 region_height: config.region_height,
                 target_width: u32::from(protocol::WIDTH),
                 target_height: u32::from(protocol::HEIGHT),
+                orientation: config.display_orientation,
             },
         )));
     }
@@ -561,13 +568,16 @@ fn base64_encode(data: &[u8]) -> String {
 const PREVIEW_INTERVAL: Duration = Duration::from_secs(1);
 
 /* Mirrors the most recently sent JPEG into the UI so the user can confirm
-   what the device shows without looking at it. */
+what the device shows without looking at it. */
 fn emit_preview(app: &AppHandle, frame: &[u8], last_preview: &mut Instant) {
     if last_preview.elapsed() < PREVIEW_INTERVAL || frame.len() <= protocol::HEADER_LEN {
         return;
     }
     *last_preview = Instant::now();
-    let _ = app.emit("stream-preview", base64_encode(&frame[protocol::HEADER_LEN..]));
+    let _ = app.emit(
+        "stream-preview",
+        base64_encode(&frame[protocol::HEADER_LEN..]),
+    );
 }
 
 fn replay_frame(frame: &[u8], sequence: u32) -> Result<Vec<u8>, String> {
@@ -1164,7 +1174,7 @@ fn run_stream(
     live.quality.store(jpeg_quality, Ordering::Relaxed);
     let mut frame_interval = Duration::from_millis(1000 / u64::from(fps));
     /* Start each encode near the last quality that fit the 100 KiB limit
-       instead of re-walking the ladder from the user setting every frame. */
+    instead of re-walking the ladder from the user setting every frame. */
     let mut adaptive_quality = jpeg_quality;
     let mut dropped_frames = 0_u32;
     let mut heartbeat = if matches!(sender, VideoSender::Udp { .. }) {
@@ -1220,32 +1230,33 @@ fn run_stream(
     }
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
     let encode_started = Instant::now();
-    let (frame, jpeg_bytes, first_fingerprint): (Vec<u8>, usize, u32) = match prepare_image(image, &capture, &config)
-        .and_then(|prepared| {
+    let (frame, jpeg_bytes, first_fingerprint): (Vec<u8>, usize, u32) =
+        match prepare_image(image, &capture, &config).and_then(|prepared| {
             let fingerprint = image_fingerprint(&prepared);
-            encode_prepared_frame(&prepared, adaptive_quality, sequence)
-                .map(|(frame, jpeg_bytes, used_quality)| (frame, jpeg_bytes, used_quality, fingerprint))
+            encode_prepared_frame(&prepared, adaptive_quality, sequence).map(
+                |(frame, jpeg_bytes, used_quality)| (frame, jpeg_bytes, used_quality, fingerprint),
+            )
         }) {
-        Ok((frame, jpeg_bytes, used_quality, fingerprint)) => {
-            adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
-            (frame, jpeg_bytes, fingerprint)
-        }
-        Err(error) => {
-            if !stop.load(Ordering::Relaxed) {
-                emit(
-                    &app,
-                    "error",
-                    format!("First screenshot failed: {error}"),
-                    0,
-                    0,
-                    0,
-                    video_transport,
-                );
+            Ok((frame, jpeg_bytes, used_quality, fingerprint)) => {
+                adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
+                (frame, jpeg_bytes, fingerprint)
             }
-            close_device_stream(&mut socket);
-            return dropped_frames;
-        }
-    };
+            Err(error) => {
+                if !stop.load(Ordering::Relaxed) {
+                    emit(
+                        &app,
+                        "error",
+                        format!("First screenshot failed: {error}"),
+                        0,
+                        0,
+                        0,
+                        video_transport,
+                    );
+                }
+                close_device_stream(&mut socket);
+                return dropped_frames;
+            }
+        };
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
     let mut cached_frame = frame.clone();
     let mut last_fingerprint = first_fingerprint;
@@ -1374,7 +1385,7 @@ fn run_stream(
         let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
         let encode_started = Instant::now();
         /* Fingerprint the already cropped/scaled 368x448 image exactly once
-           per captured frame; a raw desktop-sized hash costs far more. */
+        per captured frame; a raw desktop-sized hash costs far more. */
         let prepared = match image {
             Some(image) => match prepare_image(image, &capture, &config) {
                 Ok(prepared) => {
@@ -1670,7 +1681,11 @@ fn start_wifi_stream(
 }
 
 #[tauri::command]
-fn set_stream_params(fps: u8, jpeg_quality: u8, state: State<'_, StreamState>) -> Result<(), String> {
+fn set_stream_params(
+    fps: u8,
+    jpeg_quality: u8,
+    state: State<'_, StreamState>,
+) -> Result<(), String> {
     if !(1..=30).contains(&fps) {
         return Err("FPS must be between 1 and 30".to_string());
     }
@@ -1735,12 +1750,13 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use image::GenericImageView;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use super::{
         active_stream_error, base64_encode, build_frame, encode_jpeg, parse_http_response,
-        replay_frame, static_color_bars, StreamConfig,
+        replay_frame, static_color_bars, DisplayOrientation, StreamConfig,
     };
     use crate::protocol;
 
@@ -1756,12 +1772,14 @@ mod tests {
             fps: 30,
             jpeg_quality: 80,
             video_transport: "tcp".into(),
+            display_orientation: DisplayOrientation::Portrait,
         }
     }
 
     #[test]
     fn static_color_bars_use_full_device_canvas() {
-        let image = static_color_bars().to_rgb8();
+        let image =
+            static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)).to_rgb8();
         assert_eq!(
             image.dimensions(),
             (u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT))
@@ -1784,7 +1802,12 @@ mod tests {
 
     #[test]
     fn static_color_bars_build_a_valid_cdp1_jpeg_frame() {
-        let (frame, jpeg_bytes) = build_frame(static_color_bars(), &test_config(), 42).unwrap();
+        let (frame, jpeg_bytes) = build_frame(
+            static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)),
+            &test_config(),
+            42,
+        )
+        .unwrap();
         assert_eq!(jpeg_bytes, frame.len() - protocol::HEADER_LEN);
         assert!(jpeg_bytes <= protocol::MAX_JPEG_BYTES);
         assert_eq!(&frame[..4], b"CDP1");
@@ -1793,6 +1816,36 @@ mod tests {
             &frame[protocol::HEADER_LEN..protocol::HEADER_LEN + 2],
             [0xff, 0xd8]
         );
+    }
+
+    #[test]
+    fn all_orientations_keep_the_native_wire_dimensions() {
+        for orientation in [
+            DisplayOrientation::Portrait,
+            DisplayOrientation::LandscapeLeft,
+            DisplayOrientation::PortraitInverted,
+            DisplayOrientation::LandscapeRight,
+        ] {
+            let mut config = test_config();
+            config.display_orientation = orientation;
+            let (logical_width, logical_height) =
+                orientation.logical_size(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT));
+            let (frame, _) =
+                build_frame(static_color_bars(logical_width, logical_height), &config, 7).unwrap();
+            assert_eq!(
+                u16::from_le_bytes(frame[12..14].try_into().unwrap()),
+                protocol::WIDTH
+            );
+            assert_eq!(
+                u16::from_le_bytes(frame[14..16].try_into().unwrap()),
+                protocol::HEIGHT
+            );
+            let jpeg = image::load_from_memory(&frame[protocol::HEADER_LEN..]).unwrap();
+            assert_eq!(
+                jpeg.dimensions(),
+                (u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT))
+            );
+        }
     }
 
     #[test]
@@ -1846,7 +1899,11 @@ mod tests {
 
     #[test]
     fn encode_jpeg_reports_the_quality_that_fit() {
-        let (jpeg, used_quality) = encode_jpeg(&static_color_bars(), 80).unwrap();
+        let (jpeg, used_quality) = encode_jpeg(
+            &static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)),
+            80,
+        )
+        .unwrap();
         assert!(!jpeg.is_empty());
         assert!(jpeg.len() <= protocol::MAX_JPEG_BYTES);
         assert!((30..=80).contains(&used_quality));

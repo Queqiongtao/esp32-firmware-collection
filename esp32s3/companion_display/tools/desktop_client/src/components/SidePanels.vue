@@ -6,6 +6,7 @@ import DevicePanel from "./DevicePanel.vue";
 import SourcePanel from "./SourcePanel.vue";
 import StreamPanel from "./StreamPanel.vue";
 import type { CaptureSource } from "../types/tauri";
+import type { DisplayOrientation } from "../types/tauri";
 
 const props = defineProps<{
   sourceId: string;
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   (e: "refresh"): void;
   (e: "check"): void;
   (e: "update:videoTransport", v: string): void;
+  (e: "update:displayOrientation", v: DisplayOrientation): void;
   (e: "update:fps", v: number): void;
   (e: "update:quality", v: number): void;
   (e: "input-params"): void;
@@ -75,6 +77,7 @@ const settings = useSettingsStore();
         <StreamPanel
           :locked="props.locked"
           :videoTransport="settings.videoTransport"
+          :displayOrientation="settings.displayOrientation"
           :fps="settings.fps"
           :quality="settings.quality"
           :readyLabel="props.readyLabel"
@@ -82,6 +85,7 @@ const settings = useSettingsStore();
           :startDisabled="props.startDisabled"
           :stopDisabled="props.stopDisabled"
           @update:videoTransport="(v) => emit('update:videoTransport', v)"
+          @update:displayOrientation="(v) => (settings.displayOrientation = v)"
           @update:fps="(v) => (settings.fps = v)"
           @update:quality="(v) => (settings.quality = v)"
           @input-params="emit('input-params')"

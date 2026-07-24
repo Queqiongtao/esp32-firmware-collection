@@ -151,6 +151,7 @@ export function useStreamLifecycle() {
           fps: settings.fps,
           jpegQuality: settings.quality,
           videoTransport: settings.videoTransport,
+          displayOrientation: settings.displayOrientation,
         },
       });
     } catch (error) {

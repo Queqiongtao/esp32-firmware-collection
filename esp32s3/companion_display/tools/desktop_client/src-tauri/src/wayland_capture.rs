@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::orientation::DisplayOrientation;
 use ashpd::desktop::{
     screencast::{CursorMode, Screencast, SourceType, Stream as PortalStream},
     PersistMode,
@@ -97,6 +98,7 @@ pub struct CaptureTransform {
     pub region_height: u32,
     pub target_width: u32,
     pub target_height: u32,
+    pub orientation: DisplayOrientation,
 }
 
 pub struct PortalSelection {
@@ -580,8 +582,13 @@ fn image_from_data(
     }
     let crop_x = base.x + relative_x;
     let crop_y = base.y + relative_y;
-    let target_width = transform.target_width as usize;
-    let target_height = transform.target_height as usize;
+    let physical_width = transform.target_width as usize;
+    let physical_height = transform.target_height as usize;
+    let (logical_width, logical_height) = transform
+        .orientation
+        .logical_size(transform.target_width, transform.target_height);
+    let target_width = logical_width as usize;
+    let target_height = logical_height as usize;
     let (draw_width, draw_height, offset_x, offset_y) =
         letterbox_layout(crop_width, crop_height, target_width, target_height);
     let mut output = ImageBuffer::from_pixel(
@@ -625,11 +632,15 @@ fn image_from_data(
                 let bottom = p01[channel] as f32 + (p11[channel] as f32 - p01[channel] as f32) * fx;
                 rgb[channel] = (top + (bottom - top) * fy).round() as u8;
             }
-            output.put_pixel(
-                (offset_x + output_x) as u32,
-                (offset_y + output_y) as u32,
-                Rgb(rgb),
+            let logical_x = (offset_x + output_x) as u32;
+            let logical_y = (offset_y + output_y) as u32;
+            let (physical_x, physical_y) = transform.orientation.map_logical_to_physical(
+                logical_x,
+                logical_y,
+                physical_width as u32,
+                physical_height as u32,
             );
+            output.put_pixel(physical_x, physical_y, Rgb(rgb));
         }
     }
     Ok(Some(PreparedFrame {

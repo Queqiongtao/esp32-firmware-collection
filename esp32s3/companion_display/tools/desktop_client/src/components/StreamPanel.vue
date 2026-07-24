@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { NButton, NSelect, NInputNumber } from "naive-ui";
+import type { DisplayOrientation } from "../types/tauri";
 
 defineProps<{
   locked: boolean;
   videoTransport: string;
+  displayOrientation: DisplayOrientation;
   fps: number;
   quality: number;
   readyLabel: string;
@@ -14,6 +16,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: "update:videoTransport", v: string): void;
+  (e: "update:displayOrientation", v: DisplayOrientation): void;
   (e: "update:fps", v: number): void;
   (e: "update:quality", v: number): void;
   (e: "input-params"): void;
@@ -24,6 +27,13 @@ const emit = defineEmits<{
 const transportOptions = [
   { label: "TCP (reliable)", value: "tcp" },
   { label: "UDP (low latency)", value: "udp" },
+];
+
+const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = [
+  { label: "Portrait (top up)", value: "portrait" },
+  { label: "Landscape (top left)", value: "landscape_left" },
+  { label: "Portrait (top down)", value: "portrait_inverted" },
+  { label: "Landscape (top right)", value: "landscape_right" },
 ];
 </script>
 
@@ -40,6 +50,15 @@ const transportOptions = [
           :options="transportOptions"
           :disabled="locked"
           @update:value="(v: string) => emit('update:videoTransport', v)"
+        />
+      </div>
+      <div class="field">
+        <label>Display orientation</label>
+        <n-select
+          :value="displayOrientation"
+          :options="orientationOptions"
+          :disabled="locked"
+          @update:value="(v: DisplayOrientation) => emit('update:displayOrientation', v)"
         />
       </div>
       <div class="field">
