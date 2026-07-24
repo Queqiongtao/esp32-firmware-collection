@@ -1,17 +1,20 @@
 <script setup lang="ts">
 import { useStreamStore } from "../stores/stream";
+import { useLocaleStore } from "../stores/locale";
+import { computed } from "vue";
 
 const stream = useStreamStore();
+const locale = useLocaleStore();
 
-const items = [
-  { key: "transport", name: "Transport", get: () => (stream.metrics.videoTransport === "none" ? "--" : stream.metrics.videoTransport.toUpperCase()) },
+const items = computed(() => [
+  { key: "transport", name: locale.t("metric.transport"), get: () => (stream.metrics.videoTransport === "none" ? "--" : stream.metrics.videoTransport.toUpperCase()) },
   { key: "fps", name: "FPS", get: () => String(stream.metrics.fps) },
-  { key: "capture", name: "Capture", get: () => `${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },
-  { key: "encode", name: "Encode", get: () => `${stream.metrics.captureEncodeMs} ms`, slow: () => stream.encodeSlow },
-  { key: "device", name: "Device", get: () => `${stream.metrics.deviceMs} ms`, slow: () => stream.deviceSlow },
-  { key: "replaced", name: "Replaced", get: () => String(stream.metrics.deviceReplacedFrames) },
-  { key: "dropped", name: "Dropped", get: () => String(stream.metrics.droppedFrames) },
-];
+  { key: "capture", name: locale.t("metric.capture"), get: () => `${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },
+  { key: "encode", name: locale.t("metric.encode"), get: () => `${stream.metrics.captureEncodeMs} ms`, slow: () => stream.encodeSlow },
+  { key: "device", name: locale.t("metric.device"), get: () => `${stream.metrics.deviceMs} ms`, slow: () => stream.deviceSlow },
+  { key: "replaced", name: locale.t("metric.replaced"), get: () => String(stream.metrics.deviceReplacedFrames) },
+  { key: "dropped", name: locale.t("metric.dropped"), get: () => String(stream.metrics.droppedFrames) },
+]);
 </script>
 
 <template>
@@ -20,7 +23,7 @@ const items = [
       <span class="metric-name">{{ item.name }}</span>
       <span class="metric-value">{{ item.get() }}</span>
     </div>
-    <span class="metric limited" :class="{ hidden: !stream.performanceLimited || !stream.active }">Performance limited</span>
+    <span class="metric limited" :class="{ hidden: !stream.performanceLimited || !stream.active }">{{ locale.t("metric.limited") }}</span>
   </div>
 </template>
 

@@ -2,8 +2,10 @@
 import { computed, ref } from "vue";
 import { NCollapse, NCollapseItem } from "naive-ui";
 import { useLogsStore } from "../stores/logs";
+import { useLocaleStore } from "../stores/locale";
 
 const logs = useLogsStore();
+const locale = useLocaleStore();
 const expanded = ref(false);
 
 const entries = computed(() => logs.entries);
@@ -12,6 +14,12 @@ function formatTime(t: number): string {
   const d = new Date(t);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function entryText(entry: (typeof entries.value)[number]): string {
+  if (!entry.key) return entry.text ?? "";
+  const translated = locale.t(entry.key, entry.params);
+  return entry.text ? `${translated}: ${entry.text}` : translated;
 }
 </script>
 
@@ -24,15 +32,15 @@ function formatTime(t: number): string {
       <n-collapse-item name="logs">
         <template #header>
           <span class="logs-title">
-            Event log
+            {{ locale.t("logs.title") }}
             <span class="logs-count">{{ entries.length }}</span>
           </span>
         </template>
         <div class="logs-body">
-          <div v-if="!entries.length" class="logs-empty">No events yet</div>
+          <div v-if="!entries.length" class="logs-empty">{{ locale.t("logs.empty") }}</div>
           <div v-for="entry in entries" :key="entry.id" :class="['log-line', `tone-${entry.tone}`]">
             <span class="log-time">{{ formatTime(entry.time) }}</span>
-            <span class="log-text">{{ entry.text }}</span>
+            <span class="log-text">{{ entryText(entry) }}</span>
           </div>
         </div>
       </n-collapse-item>

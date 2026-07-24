@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { StreamEvent } from "../types/tauri";
 import { useSettingsStore } from "./settings";
+import { streamStateKey, useLocaleStore } from "./locale";
 
 /* 性能受限判定参数：窗口帧数 + 帧预算安全裕度。阈值随用户 FPS 自适应，
    并以最近 STAGE_WINDOW 帧的最不利值平滑，避免单帧抖动闪烁。 */
@@ -16,13 +17,27 @@ function pushWindow(window: number[], value: number): number[] {
 
 export const useStreamStore = defineStore("stream", () => {
   const settings = useSettingsStore();
+  const locale = useLocaleStore();
 
   const active = ref(false);
   const stopping = ref(false);
   const state = ref("idle");
   const detail = ref("");
-  const pillText = ref("Idle");
+  const pillMode = ref<"idle" | "starting" | "stopping" | "streaming" | "error" | "event">("idle");
   const pillTone = ref<"muted" | "good" | "warn" | "bad" | "active">("muted");
+
+  const pillText = computed(() => {
+    const fixed = {
+      idle: "status.idle",
+      starting: "status.starting",
+      stopping: "status.stopping",
+      streaming: "status.streaming",
+      error: "status.error",
+    } as const;
+    if (pillMode.value !== "event") return locale.t(fixed[pillMode.value]);
+    const key = streamStateKey(state.value);
+    return key ? locale.t(key) : state.value;
+  });
 
   const metrics = ref({
     videoTransport: "none",
@@ -56,8 +71,10 @@ export const useStreamStore = defineStore("stream", () => {
   });
 
   const headlineText = computed(() => {
-    if (state.value === "idle") return "Disconnected";
-    return `${state.value}: ${detail.value}`;
+    if (state.value === "idle") return locale.t("status.disconnected");
+    const key = streamStateKey(state.value);
+    const label = key ? locale.t(key) : state.value;
+    return detail.value ? `${label}: ${detail.value}` : label;
   });
 
   /* 帧预算按用户当前 FPS 自适应：1000/fps * 0.9。10FPS→90ms、25FPS→36ms、30FPS→30ms。 */
@@ -125,7 +142,7 @@ export const useStreamStore = defineStore("stream", () => {
     active.value = !failed && !stopped;
     state.value = payload.state;
     detail.value = payload.detail;
-    pillText.value = stopped ? "Stopped" : payload.state;
+    pillMode.value = "event";
     pillTone.value = failed ? "bad" : warning ? "warn" : active.value ? "active" : "muted";
     applyMetrics(payload);
   }
@@ -134,27 +151,22 @@ export const useStreamStore = defineStore("stream", () => {
     streamStarting.value = true;
     active.value = true;
     stopping.value = false;
-    pillText.value = "Starting";
+    pillMode.value = "starting";
     pillTone.value = "active";
   }
 
   function stopBegin() {
     stopping.value = true;
     streamStarting.value = false;
-    pillText.value = "Stopping";
+    pillMode.value = "stopping";
     pillTone.value = "active";
-  }
-
-  function setPill(text: string, tone: "muted" | "good" | "warn" | "bad" | "active") {
-    pillText.value = text;
-    pillTone.value = tone;
   }
 
   function setStreaming() {
     active.value = true;
     stopping.value = false;
     streamStarting.value = false;
-    pillText.value = "Streaming";
+    pillMode.value = "streaming";
     pillTone.value = "active";
   }
 
@@ -162,7 +174,7 @@ export const useStreamStore = defineStore("stream", () => {
     active.value = false;
     stopping.value = false;
     streamStarting.value = false;
-    pillText.value = "Error";
+    pillMode.value = "error";
     pillTone.value = "bad";
   }
 
@@ -193,7 +205,6 @@ export const useStreamStore = defineStore("stream", () => {
     applyStreamStatus,
     starting,
     stopBegin,
-    setPill,
     setStreaming,
     setStreamError,
   };

@@ -7,6 +7,7 @@ import SourcePanel from "./SourcePanel.vue";
 import StreamPanel from "./StreamPanel.vue";
 import type { CaptureSource } from "../types/tauri";
 import type { DisplayOrientation } from "../types/tauri";
+import { useLocaleStore } from "../stores/locale";
 
 const props = defineProps<{
   sourceId: string;
@@ -35,12 +36,13 @@ const emit = defineEmits<{
 }>();
 
 const settings = useSettingsStore();
+const locale = useLocaleStore();
 </script>
 
 <template>
   <aside class="side">
     <n-collapse :default-expanded-names="['stream']" arrow-placement="left">
-      <n-collapse-item title="Device" name="device">
+      <n-collapse-item :title="locale.t('panel.device')" name="device">
         <DevicePanel
           :locked="props.locked"
           :endpoint="settings.endpoint"
@@ -53,7 +55,7 @@ const settings = useSettingsStore();
           @check="emit('check')"
         />
       </n-collapse-item>
-      <n-collapse-item title="Source" name="source">
+      <n-collapse-item :title="locale.t('panel.source')" name="source">
         <SourcePanel
           :locked="props.locked"
           :sourceId="props.sourceId"
@@ -73,7 +75,7 @@ const settings = useSettingsStore();
           @refresh="emit('refresh')"
         />
       </n-collapse-item>
-      <n-collapse-item title="Stream" name="stream">
+      <n-collapse-item :title="locale.t('panel.stream')" name="stream">
         <StreamPanel
           :locked="props.locked"
           :videoTransport="settings.videoTransport"

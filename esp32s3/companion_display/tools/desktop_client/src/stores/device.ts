@@ -1,17 +1,16 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import type { DeviceStatus } from "../types/tauri";
+import { useLocaleStore } from "./locale";
+
+type DeviceViewState = "unchecked" | "checking" | "available" | "unavailable";
 
 export const useDeviceStore = defineStore("device", () => {
+  const locale = useLocaleStore();
   const info = ref<DeviceStatus | null>(null);
   const checking = ref(false);
-  const devicePillText = ref("Device unchecked");
-  const devicePillTone = ref<"muted" | "good" | "warn" | "bad" | "active">("muted");
-  const statusLine = ref("Not checked");
-  const wifi = ref("--");
-  const screen = ref("--");
-  const transport = ref("--");
-  const connection = ref("Not checked");
+  const viewState = ref<DeviceViewState>("unchecked");
+  const rawError = ref("");
 
   const online = computed(() => info.value?.wifi === "connected" && info.value?.activeTransport === "none");
   const protocolOk = computed(() => info.value?.protocolVersion === 2);
@@ -22,48 +21,84 @@ export const useDeviceStore = defineStore("device", () => {
     return Math.round((p.queueWaitUs + p.jpegDecodeUs + p.lcdWaitUs + p.lcdSubmitUs) / 1000);
   });
 
+  const devicePillText = computed(() => {
+    if (viewState.value === "checking") return locale.t("device.checking");
+    if (viewState.value === "unavailable") return locale.t("device.unavailable");
+    if (viewState.value === "available") return online.value ? locale.t("device.ready") : locale.t("device.attention");
+    return locale.t("device.unchecked");
+  });
+  const devicePillTone = computed<"muted" | "good" | "warn" | "bad" | "active">(() => {
+    if (viewState.value === "checking") return "active";
+    if (viewState.value === "unavailable") return "bad";
+    if (viewState.value === "available") return online.value ? "good" : "warn";
+    return "muted";
+  });
+  const statusLine = computed(() => {
+    if (viewState.value === "checking") return locale.t("device.checkingDetail");
+    if (viewState.value === "unavailable") return rawError.value;
+    return connection.value;
+  });
+  const connection = computed(() => {
+    if (viewState.value === "checking") return locale.t("device.checkingDetail");
+    if (viewState.value === "unavailable") return rawError.value;
+    if (!info.value) return locale.t("device.notChecked");
+    return info.value.ipv4
+      ? locale.t("device.onlineAt", { address: info.value.ipv4 })
+      : locale.t("device.onlineNoIp");
+  });
+  const wifi = computed(() => {
+    const value = info.value?.wifi;
+    if (!value) return "--";
+    const keys = {
+      connected: "device.wifi.connected",
+      connecting: "device.wifi.connecting",
+      setup_required: "device.wifi.setup_required",
+    } as const;
+    return value in keys ? locale.t(keys[value as keyof typeof keys]) : value;
+  });
+  const screen = computed(() => (info.value ? `${info.value.width}x${info.value.height}` : "--"));
+  const transport = computed(() => {
+    const device = info.value;
+    if (!device) return "--";
+    if (device.activeTransport === "udp") {
+      const udp = device.udp;
+      return locale.t("device.transport.udpSummary", {
+        rx: udp.rxPackets,
+        accepted: udp.acceptedFragments,
+        rejected: udp.rejectedPackets,
+        reason: udp.lastReject,
+        frames: udp.submittedFrames,
+      });
+    }
+    const active = device.activeTransport === "none" ? locale.t("device.transport.none") : device.activeTransport.toUpperCase();
+    return locale.t("device.transport.summary", {
+      transport: active,
+      deviceMs: ackTotalMs.value,
+      replaced: device.performance.replacedFrames,
+    });
+  });
+
   function apply(device: DeviceStatus) {
     info.value = device;
-    const ready = device.wifi === "connected" && device.activeTransport === "none";
-    devicePillText.value = ready ? "Device ready" : "Device attention";
-    devicePillTone.value = ready ? "good" : "warn";
-    connection.value = device.ipv4 ? `Online at ${device.ipv4}` : "Online, no IP reported";
-    wifi.value = device.wifi;
-    screen.value = `${device.width}x${device.height}`;
-    const udp = device.udp;
-    transport.value =
-      device.activeTransport === "udp"
-        ? `udp | rx ${udp.rxPackets} | accepted ${udp.acceptedFragments} | rejected ${udp.rejectedPackets} (${udp.lastReject}) | frames ${udp.submittedFrames}`
-        : `${device.activeTransport} | device ${ackTotalMs.value} ms | replaced ${device.performance.replacedFrames}`;
+    viewState.value = "available";
+    rawError.value = "";
   }
 
   function reset() {
     info.value = null;
-    devicePillText.value = "Device unchecked";
-    devicePillTone.value = "muted";
-    statusLine.value = "Not checked";
-    wifi.value = "--";
-    screen.value = "--";
-    transport.value = "--";
-    connection.value = "Not checked";
+    viewState.value = "unchecked";
+    rawError.value = "";
   }
 
-  function setChecking(text: string = "Checking device...") {
-    devicePillText.value = "Checking";
-    devicePillTone.value = "active";
-    statusLine.value = text;
-    connection.value = text;
+  function setChecking() {
+    viewState.value = "checking";
+    rawError.value = "";
   }
 
   function setUnavailable(message: string) {
     info.value = null;
-    devicePillText.value = "Device unavailable";
-    devicePillTone.value = "bad";
-    statusLine.value = message;
-    connection.value = message;
-    wifi.value = "--";
-    screen.value = "--";
-    transport.value = "--";
+    viewState.value = "unavailable";
+    rawError.value = message;
   }
 
   return {
@@ -79,7 +114,7 @@ export const useDeviceStore = defineStore("device", () => {
     online,
     protocolOk,
     supportedTransports,
- ackTotalMs,
+    ackTotalMs,
     apply,
     reset,
     setChecking,

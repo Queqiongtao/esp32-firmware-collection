@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { NButton, NSelect, NInputNumber } from "naive-ui";
 import type { DisplayOrientation } from "../types/tauri";
+import { useLocaleStore } from "../stores/locale";
+import { computed } from "vue";
+
+const locale = useLocaleStore();
 
 defineProps<{
   locked: boolean;
@@ -24,17 +28,17 @@ const emit = defineEmits<{
   (e: "stop"): void;
 }>();
 
-const transportOptions = [
-  { label: "TCP (reliable)", value: "tcp" },
-  { label: "UDP (low latency)", value: "udp" },
-];
+const transportOptions = computed(() => [
+  { label: locale.t("stream.tcp"), value: "tcp" },
+  { label: locale.t("stream.udp"), value: "udp" },
+]);
 
-const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = [
-  { label: "Portrait (top up)", value: "portrait" },
-  { label: "Landscape (top left)", value: "landscape_left" },
-  { label: "Portrait (top down)", value: "portrait_inverted" },
-  { label: "Landscape (top right)", value: "landscape_right" },
-];
+const orientationOptions = computed<Array<{ label: string; value: DisplayOrientation }>>(() => [
+  { label: locale.t("stream.orientation.portrait"), value: "portrait" },
+  { label: locale.t("stream.orientation.landscape_left"), value: "landscape_left" },
+  { label: locale.t("stream.orientation.portrait_inverted"), value: "portrait_inverted" },
+  { label: locale.t("stream.orientation.landscape_right"), value: "landscape_right" },
+]);
 </script>
 
 <template>
@@ -44,7 +48,7 @@ const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = 
     </div>
     <div class="control-grid">
       <div class="field">
-        <label>Video transport</label>
+        <label>{{ locale.t("stream.transport") }}</label>
         <n-select
           :value="videoTransport"
           :options="transportOptions"
@@ -53,7 +57,7 @@ const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = 
         />
       </div>
       <div class="field">
-        <label>Display orientation</label>
+        <label>{{ locale.t("stream.orientation") }}</label>
         <n-select
           :value="displayOrientation"
           :options="orientationOptions"
@@ -74,7 +78,7 @@ const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = 
         />
       </div>
       <div class="field">
-        <label>JPEG quality</label>
+        <label>{{ locale.t("stream.jpegQuality") }}</label>
         <n-input-number
           :value="quality"
           :min="30"
@@ -88,9 +92,9 @@ const orientationOptions: Array<{ label: string; value: DisplayOrientation }> = 
     </div>
     <div class="actions">
       <n-button type="primary" attr-type="button" :disabled="startDisabled" @click="emit('start')">
-        Start Wi-Fi Stream
+        {{ locale.t("stream.start") }}
       </n-button>
-      <n-button type="error" attr-type="button" :disabled="stopDisabled" @click="emit('stop')">Stop</n-button>
+      <n-button type="error" attr-type="button" :disabled="stopDisabled" @click="emit('stop')">{{ locale.t("stream.stop") }}</n-button>
     </div>
   </div>
 </template>

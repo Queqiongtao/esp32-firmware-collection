@@ -5,14 +5,16 @@ import { useDeviceStore } from "../stores/device";
 import { useStreamStore } from "../stores/stream";
 import { useThemeStore } from "../stores/theme";
 import type { ThemeMode } from "../stores/theme";
+import { useLocaleStore } from "../stores/locale";
 
 const device = useDeviceStore();
 const stream = useStreamStore();
 const theme = useThemeStore();
+const locale = useLocaleStore();
 
 const toneClass = (tone: string) => `tone-${tone}`;
 
-const themeLabel = computed<ThemeMode>(() => theme.mode);
+const translatedThemeLabel = computed(() => locale.t(`theme.${theme.mode}` as "theme.auto" | "theme.light" | "theme.dark"));
 function cycleTheme() {
   const order: ThemeMode[] = ["auto", "light", "dark"];
   const idx = order.indexOf(theme.mode);
@@ -24,14 +26,17 @@ function cycleTheme() {
   <header class="topbar">
     <div class="brand">
       <h1>Companion Display</h1>
-      <p class="subtitle">Wi-Fi sender for the ESP32 companion screen</p>
+      <p class="subtitle">{{ locale.t("app.subtitle") }}</p>
     </div>
     <div class="topbar-right">
       <span :class="['pill', toneClass(device.devicePillTone)]">{{ device.devicePillText }}</span>
       <span :class="['pill', toneClass(stream.pillTone)]">{{ stream.pillText }}</span>
-      <n-button quaternary size="small" class="theme-btn" :title="`Theme: ${themeLabel}`" @click="cycleTheme">
+      <n-button quaternary size="small" :title="locale.t('language.switch')" @click="locale.toggle">
+        {{ locale.t("language.current") }}
+      </n-button>
+      <n-button quaternary size="small" class="theme-btn" :title="locale.t('theme.title', { mode: translatedThemeLabel })" @click="cycleTheme">
         <span class="theme-icon">{{ theme.dark ? "☾" : "☼" }}</span>
-        <span class="theme-text">{{ themeLabel }}</span>
+        <span class="theme-text">{{ translatedThemeLabel }}</span>
       </n-button>
     </div>
   </header>

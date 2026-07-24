@@ -5,18 +5,12 @@ import { useLogsStore } from "../stores/logs";
 import { useStreamStore } from "../stores/stream";
 import { useSettingsStore } from "../stores/settings";
 import type { CaptureSource, DeviceStatus, StreamEvent } from "../types/tauri";
+import { useLocaleStore } from "../stores/locale";
 
 const PROBE_DEBOUNCE_MS = 800;
 const PARAMS_DEBOUNCE_MS = 300;
 const DEVICE_POLL_MS = 2000;
 const STATUS_POLL_MS = 300;
-
-function friendlyError(message: string): string {
-  if (message.includes("device_busy")) return `${message} — press Stop in the other client or restart the device.`;
-  if (message.includes("not_negotiated")) return `${message} — restart the stream to renegotiate.`;
-  if (message.includes("unsupported_protocol")) return `${message} — flash matching v2 firmware.`;
-  return message;
-}
 
 function clamp(value: number, min: number, max: number, fallback: number): number {
   const parsed = Number.isFinite(value) ? value : fallback;
@@ -28,21 +22,29 @@ export function useStreamLifecycle() {
   const stream = useStreamStore();
   const logs = useLogsStore();
   const settings = useSettingsStore();
+  const locale = useLocaleStore();
+
+  function friendlyError(message: string): string {
+    if (message.includes("device_busy")) return `${message} — ${locale.t("error.deviceBusyHelp")}`;
+    if (message.includes("not_negotiated")) return `${message} — ${locale.t("error.notNegotiatedHelp")}`;
+    if (message.includes("unsupported_protocol")) return `${message} — ${locale.t("error.protocolHelp")}`;
+    return message;
+  }
 
   const sources = ref<CaptureSource[]>([]);
 
   const validationMessage = computed(() => {
-    if (!settings.normalizedEndpoint) return "Enter the device address";
-    if (settings.token.length !== 6) return "Enter the 6-digit pairing code";
-    if (!settings.sourceId) return "Choose a capture source";
-    if (device.info && device.info.protocolVersion !== 2) return "Flash firmware with low-latency control protocol v2";
+    if (!settings.normalizedEndpoint) return locale.t("validation.address");
+    if (settings.token.length !== 6) return locale.t("validation.token");
+    if (!settings.sourceId) return locale.t("validation.source");
+    if (device.info && device.info.protocolVersion !== 2) return locale.t("validation.protocol");
     const supported = device.supportedTransports;
     if (supported.length && !supported.includes(settings.videoTransport)) {
-      return `Device does not support ${settings.videoTransport.toUpperCase()} video`;
+      return locale.t("validation.transport", { transport: settings.videoTransport.toUpperCase() });
     }
-    if (device.info?.wifi && device.info.wifi !== "connected") return "Device Wi-Fi is not connected";
+    if (device.info?.wifi && device.info.wifi !== "connected") return locale.t("validation.wifi");
     if (device.info?.activeTransport && device.info.activeTransport !== "none") {
-      return `Device is busy with ${device.info.activeTransport}`;
+      return locale.t("validation.busy", { transport: device.info.activeTransport.toUpperCase() });
     }
     return "";
   });
@@ -53,10 +55,10 @@ export function useStreamLifecycle() {
   const stopDisabled = computed(() => !stream.active || stream.stopping);
 
   const readyLabel = computed(() => {
-    if (stream.stopping) return "Stopping";
-    if (stream.active) return "Streaming";
+    if (stream.stopping) return locale.t("status.stopping");
+    if (stream.active) return locale.t("status.streaming");
     const message = validationMessage.value;
-    return message || "Ready";
+    return message || locale.t("status.ready");
   });
   const readyTone = computed<"good" | "warn" | "active">(() =>
     stream.active || stream.stopping ? "active" : validationMessage.value ? "warn" : "good",
@@ -67,21 +69,21 @@ export function useStreamLifecycle() {
     settings.normalizeEndpointInPlace();
     const dev = await invoke<DeviceStatus>("probe_wifi_device", { endpoint });
     device.apply(dev);
-    if (dev.activeTransport !== "none") throw new Error(`Device is busy with ${dev.activeTransport} transport`);
-    if (dev.wifi !== "connected") throw new Error("Device Wi-Fi is not connected");
+    if (dev.activeTransport !== "none") throw new Error(locale.t("validation.busy", { transport: dev.activeTransport.toUpperCase() }));
+    if (dev.wifi !== "connected") throw new Error(locale.t("validation.wifi"));
     return dev;
   }
 
   async function checkDeviceNow() {
     device.checking = true;
     device.setChecking();
-    logs.push("Checking device...", "normal");
+    logs.pushKey("log.checkingDevice", "normal");
     try {
       await probeDevice();
-      logs.push("Device is reachable", "good");
+      logs.pushKey("log.deviceReachable", "good");
     } catch (error) {
       device.setUnavailable(String(error));
-      logs.push(String(error), "bad");
+      logs.pushRaw(String(error), "bad");
     } finally {
       device.checking = false;
     }
@@ -89,16 +91,16 @@ export function useStreamLifecycle() {
 
   async function refreshSources() {
     stream.refreshBusy = true;
-    logs.push("Refreshing capture sources...", "normal");
+    logs.pushKey("log.refreshingSources", "normal");
     try {
       const list = await invoke<CaptureSource[]>("list_capture_sources");
       sources.value = list;
-      if (!list.length) logs.push("No capture source available", "warn");
-      else logs.push(`${list.length} capture sources found`, "good");
+      if (!list.length) logs.pushKey("log.noSources", "warn");
+      else logs.pushKey("log.sourcesFound", "good", { count: list.length });
       if (settings.sourceId && !list.some((s) => s.id === settings.sourceId)) settings.sourceId = "";
       stream.refreshSourcesDone++;
     } catch (error) {
-      logs.push(String(error), "bad");
+      logs.pushRaw(String(error), "bad");
     } finally {
       stream.refreshBusy = false;
     }
@@ -124,7 +126,7 @@ export function useStreamLifecycle() {
       const nextFps = clamp(settings.fps, 1, 30, 25);
       const nextQuality = clamp(settings.quality, 30, 95, 70);
       invoke("set_stream_params", { fps: nextFps, jpegQuality: nextQuality }).catch((error) =>
-        logs.push(String(error), "warn"),
+        logs.pushRaw(String(error), "warn"),
       );
     }, PARAMS_DEBOUNCE_MS);
   }
@@ -132,12 +134,12 @@ export function useStreamLifecycle() {
   async function start() {
     const message = validationMessage.value;
     if (message) {
-      logs.push(message, "warn");
+      logs.pushRaw(message, "warn");
       return;
     }
     settings.save();
     stream.starting();
-    logs.push("Opening Wi-Fi stream...", "normal");
+    logs.pushKey("log.openingStream", "normal");
     try {
       await invoke("start_wifi_stream", {
         config: {
@@ -159,24 +161,24 @@ export function useStreamLifecycle() {
       if (msg.includes("still stopping")) {
         stream.active = true;
         stream.stopping = true;
-        stream.setPill("Stopping", "active");
+        stream.stopBegin();
       } else if (msg.includes("already running")) {
         stream.setStreaming();
       } else {
         stream.setStreamError();
       }
-      logs.push(friendlyError(msg), stream.active ? "warn" : "bad");
+      logs.pushRaw(friendlyError(msg), stream.active ? "warn" : "bad");
     }
   }
 
   async function stop() {
     stream.stopBegin();
-    logs.push("Stopping stream...", "normal");
+    logs.pushKey("log.stoppingStream", "normal");
     try {
       await invoke("stop_wifi_stream");
     } catch (error) {
       stream.stopping = false;
-      logs.push(String(error), "bad");
+      logs.pushRaw(String(error), "bad");
     }
   }
 
@@ -203,9 +205,16 @@ export function useStreamLifecycle() {
   }
 
   function sourceLabel(item: CaptureSource): string {
-    const size = item.width > 0 && item.height > 0 ? `${item.width}x${item.height}` : "system dialog";
-    const kind = item.kind === "test" ? "Test" : item.kind === "portal" ? "Portal" : item.kind;
-    return `${kind}: ${item.label} (${size})`;
+    const size = item.width > 0 && item.height > 0 ? `${item.width}x${item.height}` : locale.t("source.systemDialog");
+    const kindKeys = {
+      test: "source.kind.test",
+      portal: "source.kind.portal",
+      monitor: "source.kind.monitor",
+      window: "source.kind.window",
+    } as const;
+    const kind = item.kind in kindKeys ? locale.t(kindKeys[item.kind as keyof typeof kindKeys]) : item.kind;
+    const label = item.id === "test:color-bars" ? locale.t("source.colorBars") : item.id === "linux:portal" ? locale.t("source.portal") : item.label;
+    return `${kind}: ${label} (${size})`;
   }
 
   onUnmounted(() => {

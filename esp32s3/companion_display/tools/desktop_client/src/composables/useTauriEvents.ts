@@ -4,6 +4,7 @@ import { useLogsStore } from "../stores/logs";
 import { useStreamStore } from "../stores/stream";
 import { useSettingsStore } from "../stores/settings";
 import { usePreviewSink } from "../composables/usePreviewSink";
+import { streamStateKey } from "../stores/locale";
 
 export function useTauriEvents() {
   const device = useDeviceStore();
@@ -19,7 +20,9 @@ export function useTauriEvents() {
         stream.applyStreamStatus(payload);
         const tone =
           stream.headlineTone === "bad" ? "bad" : stream.headlineTone === "warn" ? "warn" : stream.headlineTone === "good" ? "good" : "normal";
-        logs.push(stream.headlineText, tone);
+        const key = streamStateKey(payload.state);
+        if (key) logs.pushKey(key, tone, {}, payload.detail);
+        else logs.pushRaw(stream.headlineText, tone);
         if (payload.state.toLowerCase() === "stopped" && !wasStopped) {
           device.reset();
           preview.clear();
@@ -34,7 +37,7 @@ export function useTauriEvents() {
         preview.display(payload);
       });
     } catch (error) {
-      logs.push(`Event channel unavailable: ${String(error)}`, "bad");
+      logs.pushKey("log.eventUnavailable", "bad", { error: String(error) });
     }
   }
 

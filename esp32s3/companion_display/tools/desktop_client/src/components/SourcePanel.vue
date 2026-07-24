@@ -2,6 +2,9 @@
 import { computed } from "vue";
 import { NButton, NSelect, NInputNumber, NSwitch } from "naive-ui";
 import type { CaptureSource } from "../types/tauri";
+import { useLocaleStore } from "../stores/locale";
+
+const locale = useLocaleStore();
 
 const props = defineProps<{
   locked: boolean;
@@ -28,31 +31,38 @@ const emit = defineEmits<{
 const options = computed(() =>
   props.sources.length
     ? props.sources.map((s) => ({ label: props.sourceLabel(s), value: s.id }))
-    : [{ label: "No capture source available", value: "" }],
+    : [{ label: locale.t("source.noneAvailable"), value: "" }],
 );
 
 const selected = computed(() => props.sources.find((s) => s.id === props.sourceId) ?? null);
 
 const summary = computed(() => {
   const item = selected.value;
-  if (!item) return "No source selected";
-  if (item.id === "test:color-bars") return "Static color bars test the JPEG and Wi-Fi path without screen capture.";
-  if (item.id === "linux:portal") return "The system dialog will ask which screen or window to share.";
-  return `Selected ${item.kind} source, ${item.width}x${item.height}.`;
+  if (!item) return locale.t("source.noneSelected");
+  if (item.id === "test:color-bars") return locale.t("source.colorBarsSummary");
+  if (item.id === "linux:portal") return locale.t("source.portalSummary");
+  const kindKeys = {
+    test: "source.kind.test",
+    portal: "source.kind.portal",
+    monitor: "source.kind.monitor",
+    window: "source.kind.window",
+  } as const;
+  const kind = item.kind in kindKeys ? locale.t(kindKeys[item.kind as keyof typeof kindKeys]) : item.kind;
+  return locale.t("source.selectedSummary", { kind, width: item.width, height: item.height });
 });
 </script>
 
 <template>
   <div class="panel-content">
     <div class="field">
-      <label>Capture source</label>
+      <label>{{ locale.t("source.capture") }}</label>
       <n-select
         :value="sourceId"
         :options="options"
         :disabled="locked"
         @update:value="(v: string) => emit('update:sourceId', v)"
       />
-      <n-button size="small" :disabled="locked" class="refresh-btn" @click="emit('refresh')">Refresh</n-button>
+      <n-button size="small" :disabled="locked" class="refresh-btn" @click="emit('refresh')">{{ locale.t("source.refresh") }}</n-button>
     </div>
     <div class="source-summary">{{ summary }}</div>
     <div class="toggle-row">
@@ -61,23 +71,23 @@ const summary = computed(() => {
         :disabled="locked"
         @update:value="(v: boolean) => emit('update:cropEnabled', v)"
       />
-      <span>Crop selected source</span>
+      <span>{{ locale.t("source.crop") }}</span>
     </div>
     <div v-if="cropEnabled" class="region">
       <div class="field">
-        <label>X</label>
+        <label>{{ locale.t("source.x") }}</label>
         <n-input-number :value="regionX" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionX', v ?? 0)" />
       </div>
       <div class="field">
-        <label>Y</label>
+        <label>{{ locale.t("source.y") }}</label>
         <n-input-number :value="regionY" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionY', v ?? 0)" />
       </div>
       <div class="field">
-        <label>Width</label>
+        <label>{{ locale.t("source.width") }}</label>
         <n-input-number :value="regionWidth" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionWidth', v ?? 0)" />
       </div>
       <div class="field">
-        <label>Height</label>
+        <label>{{ locale.t("source.height") }}</label>
         <n-input-number :value="regionHeight" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionHeight', v ?? 0)" />
       </div>
     </div>

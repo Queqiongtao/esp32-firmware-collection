@@ -76,10 +76,3 @@ export type StreamConfig = {
 };
 
 export type LogTone = "normal" | "good" | "warn" | "bad";
-
-export type LogEntry = {
-  id: number;
-  time: number;
-  tone: LogTone;
-  text: string;
-};

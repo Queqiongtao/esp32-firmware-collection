@@ -32,7 +32,7 @@ onMounted(async () => {
   await events.init();
   await lc.refreshSources();
   lc.startPolling();
-  logs.push("Client ready", "good");
+  logs.pushKey("log.clientReady", "good");
   if (settings.normalizedEndpoint && settings.token.length === 6) {
     lc.checkDeviceNow().catch(() => undefined);
   }

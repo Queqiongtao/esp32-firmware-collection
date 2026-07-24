@@ -34,6 +34,12 @@ npm run tauri:build
 
 Linux 启动时会在 WebKitGTK 初始化前设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`，规避部分 Wayland、虚拟 GPU 或显卡驱动下的 DMA-BUF 界面合成杂块；该设置不影响 PipeWire 采集和视频发送。
 
+### 界面语言
+
+顶部栏提供中文和英文切换，不需要重启客户端，也不受推流锁定状态影响。首次运行时读取浏览器/WebView 报告的系统语言：语言代码以 `zh` 开头时默认 `zh-CN`，其他情况默认 `en-US`。用户选择保存在 `companion-display.locale.v1`，后续启动优先使用保存值。
+
+本地化使用项目内置的类型化语言资源，不引入第三方 i18n 运行库。按钮、标签、方向选项、校验提示、设备状态、常用流状态和结构化事件日志均可即时切换；操作系统提供的显示器名称、窗口标题以及 Rust 返回的 PipeWire、网络和协议底层诊断保留原文，便于直接搜索错误。
+
 ## 前后端结构
 
 ```text
@@ -57,6 +63,7 @@ Vue 组件
 | `stream` | 流生命周期、指标窗口、性能受限状态和预览 |
 | `logs` | 最近 500 条探测、来源刷新、启停和错误事件 |
 | `theme` | `auto`、`light`、`dark` 主题持久化 |
+| `locale` | 系统语言检测、中英文资源、语言切换和选择持久化 |
 | `useStreamLifecycle` | 探测、防抖、参数更新、启停和轮询 |
 | `useTauriEvents` | 消费 Rust 的状态与预览事件 |
 | `usePreviewSink` | 将预览 JPEG 转换为前端可显示资源 |

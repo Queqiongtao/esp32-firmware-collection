@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { useStreamStore } from "../stores/stream";
+import { useLocaleStore } from "../stores/locale";
 
 const stream = useStreamStore();
+const locale = useLocaleStore();
 
 const empty = computed(() => !stream.previewReady);
 const limitHint = computed(() => stream.performanceLimited && stream.active);
@@ -11,12 +13,12 @@ const limitHint = computed(() => stream.performanceLimited && stream.active);
 <template>
   <div class="stage">
     <div class="frame">
-      <img v-if="!empty" :src="stream.previewSrc" alt="Last frame sent to the device" />
+      <img v-if="!empty" :src="stream.previewSrc" :alt="locale.t('preview.alt')" />
       <div v-else class="placeholder">
-        <div class="placeholder-title">Preview appears while streaming</div>
-        <div class="placeholder-sub">Start a Wi-Fi stream to mirror this screen to the device.</div>
+        <div class="placeholder-title">{{ locale.t("preview.title") }}</div>
+        <div class="placeholder-sub">{{ locale.t("preview.subtitle") }}</div>
       </div>
-      <div v-if="limitHint" class="limit-badge">Performance limited</div>
+      <div v-if="limitHint" class="limit-badge">{{ locale.t("metric.limited") }}</div>
     </div>
   </div>
 </template>

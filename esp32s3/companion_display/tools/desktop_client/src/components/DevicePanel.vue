@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { NButton, NInput } from "naive-ui";
 import { useDeviceStore } from "../stores/device";
+import { useLocaleStore } from "../stores/locale";
 
 const device = useDeviceStore();
+const locale = useLocaleStore();
 
 defineProps<{
   locked: boolean;
@@ -24,7 +26,7 @@ const emit = defineEmits<{
   <div class="panel-content">
     <div class="field-stack">
       <div class="field">
-        <label>Address</label>
+        <label>{{ locale.t("device.address") }}</label>
         <n-input
           :value="endpoint"
           :disabled="locked || device.checking"
@@ -37,26 +39,26 @@ const emit = defineEmits<{
         />
       </div>
       <div class="field">
-        <label>Pairing code</label>
+        <label>{{ locale.t("device.pairingCode") }}</label>
         <n-input
           :value="token"
           :disabled="locked || device.checking"
           inputmode="numeric"
           autocomplete="one-time-code"
-          placeholder="6-digit code on the device screen"
+          :placeholder="locale.t('device.pairingPlaceholder')"
           @update:value="(v) => emit('update:token', v)"
           @input="() => emit('input-token')"
         />
       </div>
     </div>
     <div class="actions">
-      <n-button size="small" :loading="device.checking" :disabled="locked" @click="emit('check')">Check</n-button>
+      <n-button size="small" :loading="device.checking" :disabled="locked" @click="emit('check')">{{ locale.t("device.check") }}</n-button>
     </div>
     <dl class="facts">
-      <div><dt>Connection</dt><dd>{{ device.connection }}</dd></div>
-      <div><dt>Wi-Fi</dt><dd>{{ device.wifi }}</dd></div>
-      <div><dt>Screen</dt><dd>{{ device.screen }}</dd></div>
-      <div><dt>Transport</dt><dd>{{ device.transport }}</dd></div>
+      <div><dt>{{ locale.t("device.connection") }}</dt><dd>{{ device.connection }}</dd></div>
+      <div><dt>{{ locale.t("device.wifi") }}</dt><dd>{{ device.wifi }}</dd></div>
+      <div><dt>{{ locale.t("device.screen") }}</dt><dd>{{ device.screen }}</dd></div>
+      <div><dt>{{ locale.t("device.transport") }}</dt><dd>{{ device.transport }}</dd></div>
     </dl>
   </div>
 </template>
