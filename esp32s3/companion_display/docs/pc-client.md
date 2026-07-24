@@ -1,0 +1,217 @@
+# Companion Display PC 端实现
+
+本文说明桌面客户端的安装、界面结构、前后端边界、画面处理、传输策略和性能诊断。通信字段与帧格式以 [`PROTOCOL.md`](../PROTOCOL.md) 为准。
+
+## 技术栈与构建
+
+客户端位于 `tools/desktop_client`：
+
+- 前端：Vue 3、TypeScript、Pinia、Naive UI、Vite；
+- 桌面容器：Tauri 2；
+- 后端：Rust；
+- Linux 采集：XDG Desktop Portal + PipeWire；
+- 非 Linux 采集：XCap 枚举显示器和窗口；
+- 编码与传输：`image`、`tungstenite`、`crc32fast`。
+
+Ubuntu/Debian 依赖：
+
+```bash
+sudo apt install build-essential pkg-config curl clang libclang-dev \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libpipewire-0.3-dev \
+  libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+`clang` 和 `libclang-dev` 用于构建仓库内 vendor 的 PipeWire/libspa 绑定。开发与发布命令：
+
+```bash
+cd tools/desktop_client
+npm ci
+npm run tauri:dev
+npm run tauri:build
+```
+
+发布二进制位于 `src-tauri/target/release/`，安装包位于其 `bundle/` 子目录。默认窗口为 1280×800，最小 720×560。
+
+Linux 启动时会在 WebKitGTK 初始化前设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`，规避部分 Wayland、虚拟 GPU 或显卡驱动下的 DMA-BUF 界面合成杂块；该设置不影响 PipeWire 采集和视频发送。
+
+## 前后端结构
+
+```text
+Vue 组件
+  -> Pinia stores / composables
+  -> Tauri invoke + event
+  -> Rust StreamState 与工作线程
+  -> 采集 / JPEG / WebSocket / UDP
+```
+
+### 前端
+
+主界面由顶部状态栏、流指标条、预览区、`Device`/`Source`/`Stream` 参数面板和可折叠日志面板组成。窗口宽度小于约 1100px 时从双列切换为单列。
+
+主要状态职责：
+
+| 模块 | 职责 |
+| --- | --- |
+| `settings` | 地址、配对码、FPS、质量、传输方式和 Crop 参数持久化 |
+| `device` | 设备可达性、协议版本、支持传输和 UDP 诊断 |
+| `stream` | 流生命周期、指标窗口、性能受限状态和预览 |
+| `logs` | 最近 500 条探测、来源刷新、启停和错误事件 |
+| `theme` | `auto`、`light`、`dark` 主题持久化 |
+| `useStreamLifecycle` | 探测、防抖、参数更新、启停和轮询 |
+| `useTauriEvents` | 消费 Rust 的状态与预览事件 |
+| `usePreviewSink` | 将预览 JPEG 转换为前端可显示资源 |
+
+设置使用 `companion-display.settings.v1` 保存；主题使用独立 key。采集来源 `sourceId` 不持久化，启动后重新枚举并由用户选择。
+
+### Tauri 接口
+
+前端调用的命令：
+
+| 命令 | 作用 |
+| --- | --- |
+| `list_capture_sources` | 返回测试源、Portal 或 XCap 来源 |
+| `probe_wifi_device` | 请求设备 `/api/status` 并解析诊断字段 |
+| `get_stream_status` | 返回 Rust 内保存的最近流状态 |
+| `start_wifi_stream` | 校验参数、打开采集与控制连接、启动发送线程 |
+| `set_stream_params` | 运行中原子更新 FPS 和 JPEG 质量 |
+| `stop_wifi_stream` | 设置停止标志，由发送线程完成协议停止和资源释放 |
+
+Rust 向前端发送：
+
+| 事件 | payload | 作用 |
+| --- | --- | --- |
+| `stream-status` | `StreamEvent` | 生命周期、FPS、耗时、丢帧和替换统计 |
+| `stream-preview` | Base64 JPEG | 最近成功编码画面的低频预览 |
+
+前端每 300 ms 轮询一次 `get_stream_status`，UDP 流运行时每 2 秒探测一次设备状态。地址或配对码输入约 800 ms 后自动探测；FPS 和质量修改约 300 ms 后下发。
+
+## 设备连接与生命周期
+
+用户可输入裸 IP、`ws://` 地址或完整 `/stream` 地址，前端会规范化为：
+
+```text
+ws://DEVICE_IP[:PORT]/stream
+```
+
+启动时 Rust 追加 `?token=PAIRING_CODE`，使用 5 秒 TCP 建连、读写超时，并启用 `TCP_NODELAY`。随后发送 `hello` 和 `start_stream`。地址、配对码、来源、Crop 和传输方式在流运行期间锁定；FPS 与 JPEG 质量通过原子变量每轮读取，可以动态修改。
+
+Stop 不是立即杀死线程：前端进入 `stopping`，Rust 设置停止标志，发送线程发送 `stop_stream`、关闭 WebSocket、停止采集并释放状态，最后发出 `stopped`。
+
+## 画面来源与处理
+
+### 测试源
+
+`Static color bars` 直接生成设备尺寸的八色条，不依赖屏幕采集权限，适合验证：
+
+```text
+PC JPEG 编码 -> 协议封装 -> 网络 -> 设备解码 -> AMOLED
+```
+
+### Linux Portal/PipeWire
+
+Linux 只在系统 Portal 对话框中选择屏幕或窗口，不逐帧调用 XCap。客户端要求 Portal 支持嵌入式光标；光标作为画面的一部分参与后续 Crop 和缩放。
+
+PipeWire 回调直接生成目标尺寸图像，避免复制完整桌面。选择窗口时有效区域按以下优先级确定：
+
+1. 标准 `SPA_META_VideoCrop`；
+2. BGRA/RGBA Alpha 非透明边界；
+3. 完整协商帧。
+
+GNOME Portal 可能为单窗口返回全屏大小透明画布，因此 `logical_size` 或 PipeWire negotiated size 不一定等于窗口主体。日志中的 `PipeWire VideoCrop` 和 `Capture layout.crop` 才是实际处理区域。
+
+空帧、损坏帧、异常 stride 或布局尚未稳定的启动过渡帧会被跳过。共享获批后 10 秒仍没有有效首帧才报告超时。
+
+### 非 Linux XCap
+
+非 Linux 构建会枚举 monitor 和非空标题 window。来源 ID 使用 `monitor:N` 或 `window:N`。来源列表基于枚举序号，窗口消失或顺序变化后需要刷新并重新选择。
+
+### Crop、缩放与补边
+
+手动 Crop 坐标相对于自动识别后的有效来源区域。Crop 关闭或宽高为 0 时使用整个有效区域。选定区域按比例缩放到 `368x448`：
+
+- 不拉伸；
+- 不裁掉选定内容；
+- 宽高比不一致时居中补最少黑边。
+
+设备端不执行缩放，因此 PC 始终输出完整设备尺寸。
+
+## JPEG 与帧生成
+
+FPS 范围为 1～30，JPEG 质量范围为 30～95，默认 25 FPS、质量 70。
+
+编码结果超过 100 KiB 时，客户端按 5 逐步降低当前帧质量，最低降到 30。质量 30 仍超限则丢弃该帧。成功 JPEG 被封装为 24 字节 `CDP1` 头和 payload，CRC 使用与设备 `esp_crc32_le(0, ...)` 兼容的算法。
+
+客户端对目标尺寸图像计算指纹。画面不变或采集端暂时没有新帧时，复用最后成功编码的 JPEG，并以 1 FPS 发送；每次重发只更新 `CDP1.sequence`，JPEG payload 与 payload CRC 不变。这样既减少静态带宽，也不会触发设备完整帧超时。
+
+预览只在成功生成 `CDP1` 后提取 JPEG，最多每秒发送一次 Base64 事件。预览频率与视频 FPS 解耦。
+
+## TCP 发送
+
+TCP 模式把完整 `CDP1` 作为 WebSocket binary message 发送。每帧发送后等待相同 sequence 的 `frame_presented`：
+
+```text
+发送一帧 -> 设备排队/解码/LCD 提交 -> frame_presented -> 发送下一帧
+```
+
+因此可靠连接不会积压多帧旧画面。设备耗时由 `queue_wait_us + jpeg_decode_us + lcd_wait_us + lcd_submit_us` 汇总显示；`previous_dma_us` 保留在设备诊断中。
+
+## UDP 发送与控制重连
+
+UDP 模式把完整 `CDP1` 按设备协商的 `max_payload` 拆成 `CDU1`。客户端将 UDP socket 绑定到 WebSocket TCP 连接使用的本机 IPv4，设备据此校验来源地址。
+
+发送节奏固定为每 1 ms 最多两个分片，单帧发送预算为 120 ms。超过预算或发送失败时丢弃该帧，不重传旧分片。
+
+WebSocket 控制连接保持非阻塞：
+
+- 每 2 秒发送一次 JSON `ping`；
+- 连续 3 个周期未确认 `pong` 判定控制通道失效；
+- 暂停 UDP 发送并按 1、2、4、5、5 秒延迟最多重连 5 次；
+- 重连后重新执行 `hello`、`start_stream`，使用新的 UDP session 参数继续发送最新画面。
+
+设备允许同一 PC IPv4 的新 WebSocket 替换遗留会话，因此异常断线后通常不需要手工重启设备。
+
+## 指标与前端判定
+
+指标含义：
+
+| 指标 | 含义 |
+| --- | --- |
+| `Capture` | 等待或取得最新采集图像的耗时 |
+| `Encode` | 图像准备、JPEG 编码和帧封装耗时 |
+| `Device` | 设备报告的排队、解码和 LCD 提交耗时 |
+| `Replaced` | 设备帧管线主动替换的待处理旧帧数 |
+| `Dropped` | PC 采集、图像处理、编码或发送路径累计丢帧数 |
+
+性能阈值为当前帧预算的 90%：
+
+```text
+threshold_ms = floor(1000 / fps * 0.9)
+```
+
+例如 25 FPS 为 36 ms，10 FPS 为 90 ms。前端保留最近 5 次指标并取窗口最大值；任一阶段超阈值时对应指标变红，预览显示 `Performance limited`。
+
+## 性能与排障
+
+| 现象 | 判断与处理 |
+| --- | --- |
+| 设备探测失败 | 确认 PC 与设备同网段、地址指向 `/stream` 所在主机和端口 |
+| Pairing code rejected | 重新输入设备屏幕当前六位配对码 |
+| Device busy | 在另一客户端 Stop；异常残留可等待同 IPv4 重连替换或重启设备 |
+| TCP 画面慢 | 查看 `Device`；TCP 本身不会积压多帧，瓶颈通常在采集、编码或设备绘制 |
+| UDP `rx` 不增长 | 检查端口、防火墙、路由和 PC UDP socket 的本机 IPv4 |
+| `accepted` 增长、`completed` 不增长 | 网络丢分片或单帧未在 120 ms 预算内发完 |
+| `completed` 增长、`submitted` 不增长 | `CDP1` 长度、CRC、尺寸或帧管线提交失败 |
+| `Capture` 很高 | 停止并重新建立 Portal 共享；超过 500 ms 优先检查采集端 |
+| `Encode` 很高 | 降低 FPS 或 JPEG 质量，减少来源区域复杂度 |
+| `Device` 很高 | 降低 FPS/质量；检查设备 JPEG 解码与 LCD 指标 |
+| 窗口带大块黑色背景 | 检查是否存在 `PipeWire VideoCrop`；无 crop 和 alpha 时会回退完整帧 |
+| 客户端窗口固定色块 | 确认当前版本已设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1` |
+| Stop 后重新 Start 首帧失败 | 过渡帧会自动跳过；持续 10 秒无有效帧时重新选择共享对象 |
+
+推荐排障顺序：TCP + 色条验证基础链路，随后 Portal + TCP 验证采集，最后切换 UDP 检查低延迟与分片统计。
+
+## 安全与兼容性
+
+客户端仅支持控制协议 v2，并会拒绝不匹配设备。配对码和 UDP session 参数均为明文，WebSocket 使用 `ws://`，UDP 不加密；只应在可信局域网使用。
+
+新增触摸、文字或音频能力时，必须先更新 [`PROTOCOL.md`](../PROTOCOL.md)，再同步实现设备端与 PC 端的鉴权、生命周期、失败处理和兼容策略。

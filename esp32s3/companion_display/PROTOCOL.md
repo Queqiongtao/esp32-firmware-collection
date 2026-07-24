@@ -1,5 +1,7 @@
 # Companion Display 通信协议 v2
 
+本文只定义线上接口、控制状态机和二进制格式。固件内部实现见[设备端实现](docs/device.md)，桌面采集与发送策略见[PC 端实现](docs/pc-client.md)，首次使用流程见 [README](README.md)。
+
 ## 总览
 
 协议 v2 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。设备同时只支持一个控制会话和一个视频流。v2 与 v1 控制协商不兼容，PC 客户端和固件必须同步升级。
