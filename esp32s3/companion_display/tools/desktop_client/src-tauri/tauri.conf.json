@@ -9,6 +9,6 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
   },
-  "app": { "windows": [{ "title": "Companion Display", "width": 1024, "height": 700 }] },
+  "app": { "windows": [{ "title": "Companion Display", "width": 1280, "height": 800, "minWidth": 720, "minHeight": 560 }] },
   "bundle": { "active": true, "targets": "all" }
 }

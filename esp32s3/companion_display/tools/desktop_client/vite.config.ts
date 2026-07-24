@@ -1,2 +1,7 @@
 import { defineConfig } from "vite";
-export default defineConfig({ clearScreen: false });
+import vue from "@vitejs/plugin-vue";
+
+export default defineConfig({
+  clearScreen: false,
+  plugins: [vue()],
+});

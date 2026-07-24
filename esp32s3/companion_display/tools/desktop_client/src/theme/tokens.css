@@ -1,0 +1,71 @@
+:root,
+:root[data-theme="light"] {
+  --cd-bg: #f4f6f8;
+  --cd-text: #1f2933;
+  --cd-surface: #ffffff;
+  --cd-surface-2: #f8fafb;
+  --cd-border: #d5dde5;
+  --cd-border-soft: #e1e7ed;
+  --cd-border-hair: #edf1f5;
+  --cd-muted: #607080;
+  --cd-subtle: #6c7b89;
+  --cd-strong: #243444;
+  --cd-night: #10161c;
+  --cd-night-fg: #8494a5;
+
+  --cd-accent: #127f8e;
+  --cd-accent-soft: #d9eef3;
+  --cd-accent-ink: #116477;
+  --cd-focus: #1f9bb4;
+
+  --cd-good: #146c3f;
+  --cd-good-soft: #dff5e7;
+  --cd-warn: #7a5600;
+  --cd-warn-soft: #fff1c7;
+  --cd-bad: #9a2a2a;
+  --cd-bad-soft: #ffe0e0;
+  --cd-neutral-soft: #dfe6ed;
+  --cd-neutral-ink: #364657;
+
+  --cd-radius: 8px;
+  --cd-radius-sm: 6px;
+  --cd-pad: 16px;
+  --cd-gap: 16px;
+  --cd-line: 1.35;
+  --cd-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --cd-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  color: var(--cd-text);
+  background: var(--cd-bg);
+  font-family: var(--cd-sans);
+  font-size: 14px;
+}
+
+:root[data-theme="dark"] {
+  --cd-bg: #0f1318;
+  --cd-text: #d6dde4;
+  --cd-surface: #1a2128;
+  --cd-surface-2: #151b21;
+  --cd-border: #2c3640;
+  --cd-border-soft: #232c34;
+  --cd-border-hair: #1e262d;
+  --cd-muted: #8b98a5;
+  --cd-subtle: #728294;
+  --cd-strong: #e3e9ee;
+  --cd-night: #060a0e;
+  --cd-night-fg: #5a6775;
+
+  --cd-accent: #2bb6c8;
+  --cd-accent-soft: #14323a;
+  --cd-accent-ink: #2bb6c8;
+  --cd-focus: #2bb6c8;
+
+  --cd-good: #5ac88a;
+  --cd-good-soft: #163024;
+  --cd-warn: #e2b340;
+  --cd-warn-soft: #332a13;
+  --cd-bad: #e46b6b;
+  --cd-bad-soft: #331c1f;
+  --cd-neutral-soft: #2a333c;
+  --cd-neutral-ink: #a9b4bf;
+}
