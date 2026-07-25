@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
-import type { DisplayOrientation } from "../types/tauri";
+import type { DisplayOrientation, ProjectionMode } from "../types/tauri";
 
 const STORAGE_KEY = "companion-display.settings.v1";
 
@@ -8,6 +8,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const endpoint = ref("");
   const token = ref("");
   const sourceId = ref("");
+  const projectionMode = ref<ProjectionMode>("live");
   const fps = ref(25);
   const quality = ref(70);
   const videoTransport = ref("tcp");
@@ -42,6 +43,7 @@ export const useSettingsStore = defineStore("settings", () => {
         JSON.stringify({
           endpoint: endpoint.value,
           token: token.value,
+          projectionMode: projectionMode.value,
           fps: fps.value,
           quality: quality.value,
           videoTransport: videoTransport.value,
@@ -71,6 +73,7 @@ export const useSettingsStore = defineStore("settings", () => {
       const saved = JSON.parse(raw) as Record<string, unknown>;
       if (typeof saved.endpoint === "string") endpoint.value = saved.endpoint;
       if (typeof saved.token === "string") token.value = saved.token;
+      if (saved.projectionMode === "live" || saved.projectionMode === "region") projectionMode.value = saved.projectionMode;
       if (typeof saved.fps === "number") fps.value = saved.fps;
       else if (typeof saved.fps === "string") fps.value = Number(saved.fps);
       if (typeof saved.quality === "number") quality.value = saved.quality;
@@ -102,7 +105,7 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   watch(
-    [endpoint, token, fps, quality, videoTransport, displayOrientation, portalRestoreToken, cropEnabled, regionX, regionY, regionWidth, regionHeight],
+    [endpoint, token, projectionMode, fps, quality, videoTransport, displayOrientation, portalRestoreToken, cropEnabled, regionX, regionY, regionWidth, regionHeight],
     () => save(),
   );
 
@@ -110,6 +113,7 @@ export const useSettingsStore = defineStore("settings", () => {
     endpoint,
     token,
     sourceId,
+    projectionMode,
     fps,
     quality,
     videoTransport,

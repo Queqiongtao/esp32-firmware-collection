@@ -82,6 +82,10 @@ Vue 组件
 | `probe_wifi_device` | 请求设备 `/api/status` 并解析诊断字段 |
 | `get_stream_status` | 返回 Rust 内保存的最近流状态 |
 | `start_wifi_stream` | 校验参数、打开采集与控制连接、启动发送线程 |
+| `prepare_region_selection` | 打开来源并生成一次性全屏框选预览 |
+| `cancel_region_selection` | 取消并释放尚未启动的区域采集会话 |
+| `prepare_region_reselection` | 从活动来源取得重新框选预览 |
+| `replace_stream_region` | 在不中断连接的情况下更新实时采集区域 |
 | `set_stream_params` | 运行中原子更新 FPS 和 JPEG 质量 |
 | `stop_wifi_stream` | 设置停止标志，由发送线程完成协议停止和资源释放 |
 
@@ -107,6 +111,12 @@ ws://DEVICE_IP[:PORT]/stream
 Stop 不是立即杀死线程：前端进入 `stopping`，Rust 设置停止标志，发送线程发送 `stop_stream`、关闭 WebSocket、停止采集并释放状态，最后发出 `stopped`。
 
 ## 画面来源与处理
+
+### 区域投屏
+
+投屏面板可在“实时投屏”和“区域投屏”间切换。区域模式先选择屏幕或窗口；Linux 使用 Screencast Portal 和 PipeWire，Windows、macOS 使用 XCap。客户端取得来源的一帧作为冻结背景并进入全屏框选层，矩形确认后按设置的 FPS 持续采集、缩放、编码和发送该区域。
+
+首次启动先检查设备，再打开来源和框选层；取消时释放待用采集会话，不连接设备。活动期间可从同一来源重新框选，确认后更新 PipeWire transform 或 XCap Crop，取消则继续原区域。选区坐标以来源像素表示，最小为 `16x16`；内容按设备逻辑画布等比缩放并补边。静态内容仍沿用通用的 1 FPS 缓存帧保活策略，但区域本身是持续实时流。
 
 ### 测试源
 

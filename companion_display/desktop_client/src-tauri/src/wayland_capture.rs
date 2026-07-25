@@ -16,7 +16,7 @@ use pw::{properties::properties, spa};
 struct PipeWireData {
     format: spa::param::video::VideoInfoRaw,
     frames: Arc<LatestFrame>,
-    transform: CaptureTransform,
+    transform: Arc<LatestFrame>,
     is_window: bool,
     layout_logged: bool,
     last_layout_issue: Option<FrameLayoutIssue>,
@@ -112,6 +112,20 @@ pub struct PortalSelection {
 pub struct LatestFrame {
     frame: Mutex<Option<Result<DynamicImage, String>>>,
     ready: Condvar,
+    preview: Mutex<Option<Result<SelectionFrame, String>>>,
+    preview_ready: Condvar,
+    preview_requested: AtomicBool,
+    transform: Mutex<CaptureTransform>,
+}
+
+pub struct SelectionFrame {
+    pub image: DynamicImage,
+    pub content_x: u32,
+    pub content_y: u32,
+    pub content_width: u32,
+    pub content_height: u32,
+    pub source_width: u32,
+    pub source_height: u32,
 }
 
 impl LatestFrame {
@@ -136,6 +150,29 @@ impl LatestFrame {
             .wait_timeout_while(pending, timeout, |frame| frame.is_none())
             .map_err(|_| "PipeWire frame wait failed".to_string())?;
         pending.take().transpose()
+    }
+
+    pub fn request_preview(&self, timeout: Duration) -> Result<SelectionFrame, String> {
+        *self.preview.lock().map_err(|_| "preview lock failed")? = None;
+        self.preview_requested.store(true, Ordering::Release);
+        let pending = self.preview.lock().map_err(|_| "preview lock failed")?;
+        let (mut pending, result) = self
+            .preview_ready
+            .wait_timeout_while(pending, timeout, |frame| frame.is_none())
+            .map_err(|_| "preview wait failed")?;
+        if result.timed_out() {
+            return Err("PipeWire did not provide a selection preview".to_string());
+        }
+        pending.take().expect("preview was signalled")
+    }
+
+    pub fn set_transform(&self, transform: CaptureTransform) -> Result<(), String> {
+        *self
+            .transform
+            .lock()
+            .map_err(|_| "capture transform lock failed")? = transform;
+        *self.frame.lock().map_err(|_| "capture frame lock failed")? = None;
+        Ok(())
     }
 }
 
@@ -210,8 +247,13 @@ pub fn start(
     let frames = Arc::new(LatestFrame {
         frame: Mutex::new(None),
         ready: Condvar::new(),
+        preview: Mutex::new(None),
+        preview_ready: Condvar::new(),
+        preview_requested: AtomicBool::new(false),
+        transform: Mutex::new(transform),
     });
     let producer = frames.clone();
+    let transform_control = frames.clone();
     std::thread::spawn(move || {
         if let Err(error) = run(
             node_id,
@@ -220,7 +262,7 @@ pub fn start(
             stop,
             producer.clone(),
             fps,
-            transform,
+            transform_control,
         ) {
             producer.publish(Err(error));
         }
@@ -235,7 +277,7 @@ fn run(
     stop: Arc<AtomicBool>,
     frames: Arc<LatestFrame>,
     fps: u8,
-    transform: CaptureTransform,
+    transform: Arc<LatestFrame>,
 ) -> Result<(), String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoop::new(None)
@@ -312,10 +354,21 @@ fn run(
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
             };
+            let transform = match user_data.transform.transform.lock() {
+                Ok(transform) => *transform,
+                Err(_) => {
+                    user_data.frames.publish(Err("capture transform lock failed".to_string()));
+                    return;
+                }
+            };
+            let wants_preview = user_data
+                .transform
+                .preview_requested
+                .swap(false, Ordering::AcqRel);
             match image_from_data(
                 data,
                 &user_data.format,
-                user_data.transform,
+                transform,
                 user_data.is_window,
                 video_crop,
             ) {
@@ -356,11 +409,48 @@ fn run(
                             prepared.draw_height,
                             prepared.offset_x,
                             prepared.offset_y,
-                            user_data.transform.target_width,
-                            user_data.transform.target_height
+                            transform.target_width,
+                            transform.target_height
                         );
                     }
                     user_data.layout_logged = true;
+                    if wants_preview {
+                        let size = user_data.format.size();
+                        let preview_transform = CaptureTransform {
+                            region_x: 0,
+                            region_y: 0,
+                            region_width: 0,
+                            region_height: 0,
+                            target_width: size.width,
+                            target_height: size.height,
+                            orientation: DisplayOrientation::Portrait,
+                        };
+                        let preview = image_from_data(
+                            data,
+                            &user_data.format,
+                            preview_transform,
+                            user_data.is_window,
+                            video_crop,
+                        )
+                        .map_err(|error| match error {
+                            CaptureFrameError::Retry(issue) => issue.description().to_string(),
+                            CaptureFrameError::Fatal(error) => error,
+                        })
+                        .and_then(|frame| frame.ok_or_else(|| "selection source is empty".to_string()))
+                        .map(|frame| SelectionFrame {
+                            image: frame.image,
+                            content_x: frame.offset_x as u32,
+                            content_y: frame.offset_y as u32,
+                            content_width: frame.draw_width as u32,
+                            content_height: frame.draw_height as u32,
+                            source_width: frame.crop.width as u32,
+                            source_height: frame.crop.height as u32,
+                        });
+                        if let Ok(mut slot) = user_data.transform.preview.lock() {
+                            *slot = Some(preview);
+                            user_data.transform.preview_ready.notify_one();
+                        }
+                    }
                     user_data.frames.publish(Ok(prepared.image));
                 }
                 Ok(None) => {
@@ -857,6 +947,18 @@ mod tests {
         let frames = LatestFrame {
             frame: Mutex::new(None),
             ready: Condvar::new(),
+            preview: Mutex::new(None),
+            preview_ready: Condvar::new(),
+            preview_requested: AtomicBool::new(false),
+            transform: Mutex::new(CaptureTransform {
+                region_x: 0,
+                region_y: 0,
+                region_width: 0,
+                region_height: 0,
+                target_width: 1,
+                target_height: 1,
+                orientation: DisplayOrientation::Portrait,
+            }),
         };
         let first = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([1, 0, 0])));
         let latest = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([2, 0, 0])));

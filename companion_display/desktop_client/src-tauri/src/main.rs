@@ -5,7 +5,8 @@ mod wayland_capture;
 
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -47,6 +48,18 @@ struct StreamConfig {
     display_orientation: DisplayOrientation,
     #[serde(default)]
     portal_restore_token: Option<String>,
+    #[serde(default)]
+    projection_mode: ProjectionMode,
+    #[serde(default)]
+    selection_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ProjectionMode {
+    #[default]
+    Live,
+    Region,
 }
 
 #[derive(Clone, Serialize)]
@@ -62,6 +75,7 @@ struct StreamEvent {
     capture_wait_ms: u32,
     device_ms: u32,
     device_replaced_frames: u32,
+    projection_mode: ProjectionMode,
 }
 
 impl Default for StreamEvent {
@@ -77,6 +91,7 @@ impl Default for StreamEvent {
             capture_wait_ms: 0,
             device_ms: 0,
             device_replaced_frames: 0,
+            projection_mode: ProjectionMode::Live,
         }
     }
 }
@@ -203,8 +218,53 @@ struct LiveParams {
 #[derive(Default)]
 struct StreamState {
     stop: Arc<Mutex<Option<Arc<AtomicBool>>>>,
+    controls: Arc<Mutex<Option<SyncSender<StreamControl>>>>,
+    projection_mode: Arc<Mutex<ProjectionMode>>,
     event: Arc<Mutex<StreamEvent>>,
     live: Arc<LiveParams>,
+}
+
+#[derive(Default)]
+struct RegionSelectionState {
+    next_id: AtomicU64,
+    pending: Mutex<Option<PendingSelection>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RegionSelectionPreview {
+    id: String,
+    width: u32,
+    height: u32,
+    content_x: u32,
+    content_y: u32,
+    content_width: u32,
+    content_height: u32,
+    source_width: u32,
+    source_height: u32,
+    jpeg_base64: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CaptureRegionConfig {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+struct PendingSelection {
+    id: String,
+    capture: CaptureSession,
+    stop: Arc<AtomicBool>,
+    source_width: u32,
+    source_height: u32,
+}
+
+enum StreamControl {
+    Preview(SyncSender<Result<RegionSelectionPreview, String>>),
+    UpdateRegion(CaptureRegionConfig, SyncSender<Result<(), String>>),
 }
 
 enum CaptureSession {
@@ -482,6 +542,7 @@ fn open_capture_session(
     config: &StreamConfig,
     stop: Arc<AtomicBool>,
     target: &StreamTarget,
+    notify: bool,
 ) -> Result<CaptureSession, String> {
     if config.source_id == STATIC_COLOR_BARS_ID {
         let (width, height) = config
@@ -496,15 +557,17 @@ fn open_capture_session(
         if config.source_id != "linux:portal" {
             return Err("refresh capture sources and choose the Linux portal source".to_string());
         }
-        emit(
-            app,
-            "requesting screen share",
-            "Choose a screen or window in the system dialog",
-            0,
-            0,
-            0,
-            &config.video_transport,
-        );
+        if notify {
+            emit(
+                app,
+                "requesting screen share",
+                "Choose a screen or window in the system dialog",
+                0,
+                0,
+                0,
+                &config.video_transport,
+            );
+        }
         let selection = tauri::async_runtime::block_on(wayland_capture::open_portal(
             config.portal_restore_token.as_deref(),
         ))
@@ -526,15 +589,17 @@ fn open_capture_session(
             "Portal selected: type={} logical_size={} node={}",
             source_type, source_size, selection.node_id
         );
-        emit(
-            app,
-            "waiting for PipeWire frames",
-            &format!("Waiting for {source_type} at {source_size}"),
-            0,
-            0,
-            0,
-            &config.video_transport,
-        );
+        if notify {
+            emit(
+                app,
+                "waiting for PipeWire frames",
+                format!("Waiting for {source_type} at {source_size}"),
+                0,
+                0,
+                0,
+                &config.video_transport,
+            );
+        }
         return Ok(CaptureSession::PipeWire(wayland_capture::start(
             selection.node_id,
             selection.remote,
@@ -677,6 +742,12 @@ fn emit_metrics(
     device_ms: u32,
     device_replaced_frames: u32,
 ) {
+    let projection_mode = app
+        .state::<StreamState>()
+        .projection_mode
+        .lock()
+        .map(|mode| *mode)
+        .unwrap_or_default();
     let event = StreamEvent {
         state: state.into(),
         detail: detail.into(),
@@ -688,6 +759,7 @@ fn emit_metrics(
         capture_wait_ms,
         device_ms,
         device_replaced_frames,
+        projection_mode,
     };
     if let Ok(mut current) = app.state::<StreamState>().event.lock() {
         *current = event.clone();
@@ -1291,12 +1363,14 @@ fn udp_sender_stats(sender: &VideoSender) -> (u64, u64) {
 
 fn run_stream(
     app: AppHandle,
-    config: StreamConfig,
+    mut config: StreamConfig,
     target: StreamTarget,
     stop: Arc<AtomicBool>,
     live: Arc<LiveParams>,
     mut socket: WebSocket<TcpStream>,
     mut sender: VideoSender,
+    capture_override: Option<CaptureSession>,
+    controls: Receiver<StreamControl>,
 ) -> u32 {
     let video_transport = config.video_transport.as_str();
     let mut fps = config.fps.clamp(1, 30);
@@ -1319,7 +1393,10 @@ fn run_stream(
         None
     };
     let mut sequence = 0_u32;
-    let capture = match open_capture_session(&app, &config, stop.clone(), &target) {
+    let capture = match capture_override.map_or_else(
+        || open_capture_session(&app, &config, stop.clone(), &target, true),
+        Ok,
+    ) {
         Ok(capture) => capture,
         Err(error) => {
             emit(&app, "error", error, 0, 0, 0, video_transport);
@@ -1327,6 +1404,24 @@ fn run_stream(
             return dropped_frames;
         }
     };
+    #[cfg(target_os = "linux")]
+    if config.projection_mode == ProjectionMode::Region {
+        if let CaptureSession::PipeWire(receiver) = &capture {
+            if let Err(error) = receiver.set_transform(wayland_capture::CaptureTransform {
+                region_x: config.region_x,
+                region_y: config.region_y,
+                region_width: config.region_width,
+                region_height: config.region_height,
+                target_width: u32::from(target.width),
+                target_height: u32::from(target.height),
+                orientation: config.display_orientation,
+            }) {
+                emit(&app, "error", error, 0, 0, 0, video_transport);
+                close_device_stream(&mut socket);
+                return dropped_frames;
+            }
+        }
+    }
     emit(
         &app,
         "capturing",
@@ -1445,7 +1540,7 @@ fn run_stream(
     let (udp_packets, udp_bytes) = udp_sender_stats(&sender);
     emit_metrics(
         &app,
-        "snapshot sent",
+        "frame ready",
         if video_transport == "udp" {
             format!("First screenshot sent over UDP ({udp_packets} datagrams, {udp_bytes} bytes)")
         } else {
@@ -1461,7 +1556,47 @@ fn run_stream(
         device_replaced_frames,
     );
     let mut next_frame = Instant::now() + frame_interval;
+    let mut selection_size = (
+        config.region_x.saturating_add(config.region_width),
+        config.region_y.saturating_add(config.region_height),
+    );
     while !stop.load(Ordering::Relaxed) {
+        while let Ok(command) = controls.try_recv() {
+            match command {
+                StreamControl::Preview(reply) => {
+                    let id = format!("active-region-{sequence}");
+                    let result = capture_selection_frame(&capture).and_then(|frame| {
+                        selection_size = (frame.source_width, frame.source_height);
+                        encode_selection_preview(id, frame)
+                    });
+                    let _ = reply.send(result);
+                }
+                StreamControl::UpdateRegion(region, reply) => {
+                    let result = validate_region(region, selection_size.0, selection_size.1)
+                        .and_then(|_| {
+                            config.region_x = region.x;
+                            config.region_y = region.y;
+                            config.region_width = region.width;
+                            config.region_height = region.height;
+                            #[cfg(target_os = "linux")]
+                            if let CaptureSession::PipeWire(receiver) = &capture {
+                                receiver.set_transform(wayland_capture::CaptureTransform {
+                                    region_x: region.x,
+                                    region_y: region.y,
+                                    region_width: region.width,
+                                    region_height: region.height,
+                                    target_width: u32::from(target.width),
+                                    target_height: u32::from(target.height),
+                                    orientation: config.display_orientation,
+                                })?;
+                            }
+                            last_fingerprint = last_fingerprint.wrapping_add(1);
+                            Ok(())
+                        });
+                    let _ = reply.send(result);
+                }
+            }
+        }
         let now = Instant::now();
         if now < next_frame {
             thread::sleep(next_frame - now);
@@ -1676,6 +1811,180 @@ fn run_stream(
     dropped_frames
 }
 
+struct RawSelectionFrame {
+    image: DynamicImage,
+    content_x: u32,
+    content_y: u32,
+    content_width: u32,
+    content_height: u32,
+    source_width: u32,
+    source_height: u32,
+}
+
+fn capture_selection_frame(capture: &CaptureSession) -> Result<RawSelectionFrame, String> {
+    #[cfg(target_os = "linux")]
+    if let CaptureSession::PipeWire(receiver) = capture {
+        let frame = receiver.request_preview(Duration::from_secs(10))?;
+        return Ok(RawSelectionFrame {
+            image: frame.image,
+            content_x: frame.content_x,
+            content_y: frame.content_y,
+            content_width: frame.content_width,
+            content_height: frame.content_height,
+            source_width: frame.source_width,
+            source_height: frame.source_height,
+        });
+    }
+    let image = capture_next(capture)?;
+    let width = image.width();
+    let height = image.height();
+    Ok(RawSelectionFrame {
+        image,
+        content_x: 0,
+        content_y: 0,
+        content_width: width,
+        content_height: height,
+        source_width: width,
+        source_height: height,
+    })
+}
+
+fn encode_selection_preview(
+    id: String,
+    frame: RawSelectionFrame,
+) -> Result<RegionSelectionPreview, String> {
+    let (jpeg, _) = encode_jpeg(&frame.image, 80, 8 * 1024 * 1024)?;
+    Ok(RegionSelectionPreview {
+        id,
+        width: frame.image.width(),
+        height: frame.image.height(),
+        content_x: frame.content_x,
+        content_y: frame.content_y,
+        content_width: frame.content_width,
+        content_height: frame.content_height,
+        source_width: frame.source_width,
+        source_height: frame.source_height,
+        jpeg_base64: base64_encode(&jpeg),
+    })
+}
+
+#[tauri::command]
+fn prepare_region_selection(
+    app: AppHandle,
+    mut config: StreamConfig,
+    target_width: u16,
+    target_height: u16,
+    state: State<'_, RegionSelectionState>,
+) -> Result<RegionSelectionPreview, String> {
+    if config.source_id == STATIC_COLOR_BARS_ID {
+        return Err("select a screen or window for region projection".to_string());
+    }
+    config.region_x = 0;
+    config.region_y = 0;
+    config.region_width = 0;
+    config.region_height = 0;
+    let target = StreamTarget {
+        width: target_width,
+        height: target_height,
+        max_frame_bytes: MAX_FRAME_BYTES,
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let capture = open_capture_session(&app, &config, stop.clone(), &target, false)?;
+    let id = format!(
+        "region-{}",
+        state.next_id.fetch_add(1, Ordering::Relaxed) + 1
+    );
+    let raw = capture_selection_frame(&capture)?;
+    let source_width = raw.source_width;
+    let source_height = raw.source_height;
+    let preview = encode_selection_preview(id.clone(), raw)?;
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| "region selection state unavailable")?;
+    if let Some(old) = pending.replace(PendingSelection {
+        id,
+        capture,
+        stop,
+        source_width,
+        source_height,
+    }) {
+        old.stop.store(true, Ordering::Relaxed);
+    }
+    Ok(preview)
+}
+
+#[tauri::command]
+fn cancel_region_selection(
+    selection_id: String,
+    state: State<'_, RegionSelectionState>,
+) -> Result<(), String> {
+    let mut pending = state
+        .pending
+        .lock()
+        .map_err(|_| "region selection state unavailable")?;
+    if pending
+        .as_ref()
+        .is_some_and(|selection| selection.id == selection_id)
+    {
+        if let Some(selection) = pending.take() {
+            selection.stop.store(true, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn prepare_region_reselection(
+    stream: State<'_, StreamState>,
+) -> Result<RegionSelectionPreview, String> {
+    let sender = stream
+        .controls
+        .lock()
+        .map_err(|_| "stream state unavailable")?
+        .clone()
+        .ok_or_else(|| "no region projection is active".to_string())?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    sender
+        .try_send(StreamControl::Preview(tx))
+        .map_err(|_| "region selection is busy".to_string())?;
+    rx.recv().map_err(|_| "region stream stopped".to_string())?
+}
+
+#[tauri::command]
+fn replace_stream_region(
+    region: CaptureRegionConfig,
+    stream: State<'_, StreamState>,
+) -> Result<(), String> {
+    validate_region(region, u32::MAX, u32::MAX)?;
+    let sender = stream
+        .controls
+        .lock()
+        .map_err(|_| "stream state unavailable")?
+        .clone()
+        .ok_or_else(|| "no region projection is active".to_string())?;
+    let (tx, rx) = mpsc::sync_channel(1);
+    sender
+        .try_send(StreamControl::UpdateRegion(region, tx))
+        .map_err(|_| "region update is busy".to_string())?;
+    rx.recv().map_err(|_| "region stream stopped".to_string())?
+}
+
+fn validate_region(region: CaptureRegionConfig, width: u32, height: u32) -> Result<(), String> {
+    if region.width < 16
+        || region.height < 16
+        || region.x >= width
+        || region.y >= height
+        || region.width > width - region.x
+        || region.height > height - region.y
+    {
+        return Err(
+            "selected region is outside the capture source or smaller than 16x16".to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn list_capture_sources() -> Result<Vec<CaptureSourceInfo>, String> {
     list_capture_sources_impl()
@@ -1700,6 +2009,7 @@ fn start_wifi_stream(
     app: AppHandle,
     mut config: StreamConfig,
     state: State<'_, StreamState>,
+    selections: State<'_, RegionSelectionState>,
 ) -> Result<StreamTarget, String> {
     config.endpoint = config.endpoint.trim().to_owned();
     config.token = config.token.trim().to_owned();
@@ -1783,24 +2093,79 @@ fn start_wifi_stream(
         close_device_stream(&mut socket);
         return Err(error);
     }
+    let (capture_override, prepared_stop) = if config.projection_mode == ProjectionMode::Region {
+        let id = config
+            .selection_id
+            .as_deref()
+            .ok_or_else(|| "select a capture region before starting".to_string())?;
+        let mut pending = selections
+            .pending
+            .lock()
+            .map_err(|_| "region selection state unavailable")?;
+        let selection = pending
+            .take()
+            .filter(|selection| selection.id == id)
+            .ok_or_else(|| "region selection expired or was already used".to_string())?;
+        if let Err(error) = validate_region(
+            CaptureRegionConfig {
+                x: config.region_x,
+                y: config.region_y,
+                width: config.region_width,
+                height: config.region_height,
+            },
+            selection.source_width,
+            selection.source_height,
+        ) {
+            selection.stop.store(true, Ordering::Relaxed);
+            close_device_stream(&mut socket);
+            return Err(error);
+        }
+        (Some(selection.capture), Some(selection.stop))
+    } else {
+        (None, None)
+    };
     let mut guard = state.stop.lock().map_err(|_| "stream state unavailable")?;
     if let Some(error) = active_stream_error(guard.as_ref()) {
         close_device_stream(&mut socket);
         return Err(error.to_string());
     }
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = prepared_stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     *guard = Some(stop.clone());
     drop(guard);
+    if let Ok(mut mode) = state.projection_mode.lock() {
+        *mode = config.projection_mode;
+    }
+    let (control_tx, control_rx) = mpsc::sync_channel(1);
+    if config.projection_mode == ProjectionMode::Region {
+        *state
+            .controls
+            .lock()
+            .map_err(|_| "stream state unavailable")? = Some(control_tx);
+    }
     let controller = state.stop.clone();
+    let control_state = state.controls.clone();
     let live = state.live.clone();
     let final_app = app.clone();
     let final_transport = config.video_transport.clone();
     let final_stop = stop.clone();
     let stream_target = target.clone();
     thread::spawn(move || {
-        let dropped_frames = run_stream(app, config, stream_target, stop, live, socket, sender);
+        let dropped_frames = run_stream(
+            app,
+            config,
+            stream_target,
+            stop,
+            live,
+            socket,
+            sender,
+            capture_override,
+            control_rx,
+        );
         if let Ok(mut active) = controller.lock() {
             *active = None;
+        }
+        if let Ok(mut controls) = control_state.lock() {
+            *controls = None;
         }
         if final_stop.load(Ordering::Relaxed) {
             emit(
@@ -1873,8 +2238,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(StreamState::default())
+        .manage(RegionSelectionState::default())
         .invoke_handler(tauri::generate_handler![
             list_capture_sources,
+            prepare_region_selection,
+            cancel_region_selection,
+            prepare_region_reselection,
+            replace_stream_region,
             probe_wifi_device,
             get_stream_status,
             start_wifi_stream,
@@ -1894,8 +2264,8 @@ mod tests {
     use super::{
         active_stream_error, base64_encode, build_frame, encode_jpeg, ensure_reconnect_target,
         ensure_status_dimensions, parse_http_response, replay_frame, static_color_bars,
-        validate_stream_target, ControlReply, DisplayOrientation, StreamConfig, StreamTarget,
-        UdpParameters,
+        validate_region, validate_stream_target, CaptureRegionConfig, ControlReply,
+        DisplayOrientation, ProjectionMode, StreamConfig, StreamTarget, UdpParameters,
     };
     use crate::protocol;
 
@@ -1913,6 +2283,8 @@ mod tests {
             video_transport: "tcp".into(),
             display_orientation: DisplayOrientation::Portrait,
             portal_restore_token: None,
+            projection_mode: ProjectionMode::Live,
+            selection_id: None,
         }
     }
 
@@ -2159,10 +2531,53 @@ mod tests {
         });
         let without: StreamConfig = serde_json::from_value(base.clone()).unwrap();
         assert_eq!(without.portal_restore_token, None);
+        assert_eq!(without.projection_mode, ProjectionMode::Live);
 
-        let mut with = base;
+        let mut with = base.clone();
         with["portalRestoreToken"] = serde_json::Value::String("restore-1".into());
         let with: StreamConfig = serde_json::from_value(with).unwrap();
         assert_eq!(with.portal_restore_token.as_deref(), Some("restore-1"));
+
+        let mut region = base;
+        region["projectionMode"] = serde_json::Value::String("region".into());
+        let region: StreamConfig = serde_json::from_value(region).unwrap();
+        assert_eq!(region.projection_mode, ProjectionMode::Region);
+    }
+
+    #[test]
+    fn region_validation_rejects_small_and_out_of_bounds_rectangles() {
+        assert!(validate_region(
+            CaptureRegionConfig {
+                x: 10,
+                y: 20,
+                width: 100,
+                height: 80
+            },
+            200,
+            150
+        )
+        .is_ok());
+        assert!(validate_region(
+            CaptureRegionConfig {
+                x: 10,
+                y: 20,
+                width: 8,
+                height: 80
+            },
+            200,
+            150
+        )
+        .is_err());
+        assert!(validate_region(
+            CaptureRegionConfig {
+                x: 150,
+                y: 20,
+                width: 100,
+                height: 80
+            },
+            200,
+            150
+        )
+        .is_err());
     }
 }

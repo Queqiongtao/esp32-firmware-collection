@@ -11,6 +11,20 @@ export type DisplayOrientation =
   | "landscape_left"
   | "portrait_inverted"
   | "landscape_right";
+export type ProjectionMode = "live" | "region";
+export type CaptureRegion = { x: number; y: number; width: number; height: number };
+export type RegionSelectionPreview = {
+  id: string;
+  width: number;
+  height: number;
+  contentX: number;
+  contentY: number;
+  contentWidth: number;
+  contentHeight: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  jpegBase64: string;
+};
 
 export type StreamEvent = {
   state: string;
@@ -23,6 +37,7 @@ export type StreamEvent = {
   captureWaitMs: number;
   deviceMs: number;
   deviceReplacedFrames: number;
+  projectionMode: ProjectionMode;
 };
 
 export type StreamTarget = {
@@ -80,6 +95,8 @@ export type StreamConfig = {
   videoTransport: string;
   displayOrientation: DisplayOrientation;
   portalRestoreToken?: string;
+  projectionMode: ProjectionMode;
+  selectionId?: string;
 };
 
 export type LogTone = "normal" | "good" | "warn" | "bad";

@@ -1,10 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, onUnmounted, ref } from "vue";
 import { useDeviceStore } from "../stores/device";
 import { useLogsStore } from "../stores/logs";
 import { useStreamStore } from "../stores/stream";
 import { useSettingsStore } from "../stores/settings";
-import type { CaptureSource, DeviceStatus, StreamEvent, StreamTarget } from "../types/tauri";
+import type { CaptureRegion, CaptureSource, DeviceStatus, RegionSelectionPreview, StreamEvent, StreamTarget } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 
 const PROBE_DEBOUNCE_MS = 800;
@@ -37,6 +38,7 @@ export function useStreamLifecycle() {
     if (!settings.normalizedEndpoint) return locale.t("validation.address");
     if (settings.token.length !== 6) return locale.t("validation.token");
     if (!settings.sourceId) return locale.t("validation.source");
+    if (settings.projectionMode === "region" && settings.sourceId === "test:color-bars") return locale.t("validation.regionSource");
     if (device.info && device.info.protocolVersion !== 2) return locale.t("validation.protocol");
     const supported = device.supportedTransports;
     if (supported.length && !supported.includes(settings.videoTransport)) {
@@ -49,9 +51,12 @@ export function useStreamLifecycle() {
     return "";
   });
 
-  const locked = computed(() => stream.active || stream.stopping);
+  const locked = computed(() => stream.regionBusy || stream.active || stream.stopping);
 
-  const startDisabled = computed(() => stream.active || stream.stopping || Boolean(validationMessage.value));
+  const startDisabled = computed(() => {
+    if (stream.active && settings.projectionMode === "region") return stream.regionBusy || stream.stopping;
+    return stream.regionBusy || stream.stopping || stream.active || Boolean(validationMessage.value);
+  });
   const stopDisabled = computed(() => !stream.active || stream.stopping);
 
   const readyLabel = computed(() => {
@@ -135,6 +140,44 @@ export function useStreamLifecycle() {
     }, PARAMS_DEBOUNCE_MS);
   }
 
+  const regionPreview = ref<RegionSelectionPreview | null>(null);
+  let regionResolver: ((region: CaptureRegion | null) => void) | null = null;
+
+  async function chooseRegion(preview: RegionSelectionPreview): Promise<CaptureRegion | null> {
+    const window = getCurrentWindow();
+    const wasFullscreen = await window.isFullscreen();
+    await window.setFullscreen(true);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    regionPreview.value = preview;
+    const region = await new Promise<CaptureRegion | null>((resolve) => { regionResolver = resolve; });
+    regionResolver = null;
+    regionPreview.value = null;
+    if (!wasFullscreen) await window.setFullscreen(false);
+    return region;
+  }
+
+  function confirmRegion(region: CaptureRegion) { regionResolver?.(region); }
+  function cancelRegion() { regionResolver?.(null); }
+
+  function streamConfig(region?: CaptureRegion, selectionId?: string) {
+    return {
+      endpoint: settings.normalizedEndpoint,
+      token: settings.token,
+      sourceId: settings.sourceId,
+      regionX: region?.x ?? (settings.cropEnabled ? settings.regionX : 0),
+      regionY: region?.y ?? (settings.cropEnabled ? settings.regionY : 0),
+      regionWidth: region?.width ?? (settings.cropEnabled ? settings.regionWidth : 0),
+      regionHeight: region?.height ?? (settings.cropEnabled ? settings.regionHeight : 0),
+      fps: settings.fps,
+      jpegQuality: settings.quality,
+      videoTransport: settings.videoTransport,
+      displayOrientation: settings.displayOrientation,
+      portalRestoreToken: settings.portalRestoreToken || undefined,
+      projectionMode: settings.projectionMode,
+      selectionId,
+    };
+  }
+
   async function start() {
     const message = validationMessage.value;
     if (message) {
@@ -142,28 +185,55 @@ export function useStreamLifecycle() {
       return;
     }
     settings.save();
-    stream.setTarget(null);
-    stream.starting();
-    logs.pushKey("log.openingStream", "normal");
+    if (settings.projectionMode === "region" && stream.active) {
+      stream.regionBusy = true;
+      logs.pushKey("log.selectingRegion", "normal");
+      try {
+        const preview = await invoke<RegionSelectionPreview>("prepare_region_reselection");
+        const region = await chooseRegion(preview);
+        if (region) {
+          await invoke("replace_stream_region", { region });
+          logs.pushKey("log.regionReplaced", "good");
+        }
+      } catch (error) {
+        logs.pushRaw(String(error), "warn");
+      } finally {
+        stream.regionBusy = false;
+      }
+      return;
+    }
+    stream.regionBusy = settings.projectionMode === "region";
+    let streamMarkedStarted = false;
+    let preparedSelectionId: string | undefined;
     try {
+      const dev = await probeDevice();
+      let region: CaptureRegion | undefined;
+      if (settings.projectionMode === "region") {
+        logs.pushKey("log.selectingRegion", "normal");
+        const preview = await invoke<RegionSelectionPreview>("prepare_region_selection", {
+          config: streamConfig(), targetWidth: dev.width, targetHeight: dev.height,
+        });
+        preparedSelectionId = preview.id;
+        region = (await chooseRegion(preview)) ?? undefined;
+        if (!region) {
+          await invoke("cancel_region_selection", { selectionId: preview.id });
+          return;
+        }
+      }
+      stream.setTarget(null);
+      stream.starting();
+      streamMarkedStarted = true;
+      logs.pushKey("log.openingStream", "normal");
       const target = await invoke<StreamTarget>("start_wifi_stream", {
         config: {
-          endpoint: settings.normalizedEndpoint,
-          token: settings.token,
-          sourceId: settings.sourceId,
-          regionX: settings.cropEnabled ? settings.regionX : 0,
-          regionY: settings.cropEnabled ? settings.regionY : 0,
-          regionWidth: settings.cropEnabled ? settings.regionWidth : 0,
-          regionHeight: settings.cropEnabled ? settings.regionHeight : 0,
-          fps: settings.fps,
-          jpegQuality: settings.quality,
-          videoTransport: settings.videoTransport,
-          displayOrientation: settings.displayOrientation,
-          portalRestoreToken: settings.portalRestoreToken || undefined,
+          ...streamConfig(region, preparedSelectionId),
         },
       });
       if (stream.active) stream.setTarget(target);
     } catch (error) {
+      if (preparedSelectionId) {
+        invoke("cancel_region_selection", { selectionId: preparedSelectionId }).catch(() => undefined);
+      }
       const msg = String(error);
       if (msg.includes("still stopping")) {
         stream.active = true;
@@ -171,10 +241,12 @@ export function useStreamLifecycle() {
         stream.stopBegin();
       } else if (msg.includes("already running")) {
         stream.setStreaming();
-      } else {
+      } else if (streamMarkedStarted) {
         stream.setStreamError();
       }
       logs.pushRaw(friendlyError(msg), stream.active ? "warn" : "bad");
+    } finally {
+      stream.regionBusy = false;
     }
   }
 
@@ -250,5 +322,8 @@ export function useStreamLifecycle() {
     start,
     stop,
     startPolling,
+    regionPreview,
+    confirmRegion,
+    cancelRegion,
   };
 }

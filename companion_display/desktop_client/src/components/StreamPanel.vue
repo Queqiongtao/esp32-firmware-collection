@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { NButton, NSelect, NInputNumber } from "naive-ui";
-import type { DisplayOrientation } from "../types/tauri";
+import { NButton, NSelect, NInputNumber, NRadioButton, NRadioGroup } from "naive-ui";
+import type { DisplayOrientation, ProjectionMode } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 import { computed } from "vue";
 
 const locale = useLocaleStore();
 
-defineProps<{
+const props = defineProps<{
   locked: boolean;
   videoTransport: string;
   displayOrientation: DisplayOrientation;
@@ -16,6 +16,9 @@ defineProps<{
   readyTone: "good" | "warn" | "active";
   startDisabled: boolean;
   stopDisabled: boolean;
+  projectionMode: ProjectionMode;
+  active: boolean;
+  regionBusy: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +29,7 @@ const emit = defineEmits<{
   (e: "input-params"): void;
   (e: "start"): void;
   (e: "stop"): void;
+  (e: "update:projectionMode", v: ProjectionMode): void;
 }>();
 
 const transportOptions = computed(() => [
@@ -43,6 +47,10 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
 
 <template>
   <div class="panel-content">
+    <n-radio-group :value="projectionMode" :disabled="active || regionBusy" @update:value="(v: ProjectionMode) => emit('update:projectionMode', v)">
+      <n-radio-button value="live">{{ locale.t("stream.mode.live") }}</n-radio-button>
+      <n-radio-button value="region">{{ locale.t("stream.mode.region") }}</n-radio-button>
+    </n-radio-group>
     <div class="ready-row">
       <span :class="['ready-label', `tone-${readyTone}`]">{{ readyLabel }}</span>
     </div>
@@ -91,8 +99,8 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
       </div>
     </div>
     <div class="actions">
-      <n-button type="primary" attr-type="button" :disabled="startDisabled" @click="emit('start')">
-        {{ locale.t("stream.start") }}
+      <n-button type="primary" attr-type="button" :loading="regionBusy" :disabled="startDisabled" @click="emit('start')">
+        {{ locale.t(projectionMode === "region" ? (active ? "stream.reselectRegion" : "stream.regionStart") : "stream.start") }}
       </n-button>
       <n-button type="error" attr-type="button" :disabled="stopDisabled" @click="emit('stop')">{{ locale.t("stream.stop") }}</n-button>
     </div>

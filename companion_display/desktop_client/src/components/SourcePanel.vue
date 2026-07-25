@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { NButton, NSelect, NInputNumber, NSwitch } from "naive-ui";
-import type { CaptureSource } from "../types/tauri";
+import type { CaptureSource, ProjectionMode } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 
 const locale = useLocaleStore();
@@ -17,6 +17,7 @@ const props = defineProps<{
   sources: CaptureSource[];
   sourceLabel: (item: CaptureSource) => string;
   portalRemembered: boolean;
+  projectionMode: ProjectionMode;
 }>();
 
 const emit = defineEmits<{
@@ -73,7 +74,7 @@ const summary = computed(() => {
         {{ locale.t("source.portalReselect") }}
       </n-button>
     </div>
-    <div class="toggle-row">
+    <div v-if="projectionMode === 'live'" class="toggle-row">
       <n-switch
         :value="cropEnabled"
         :disabled="locked"
@@ -81,7 +82,7 @@ const summary = computed(() => {
       />
       <span>{{ locale.t("source.crop") }}</span>
     </div>
-    <div v-if="cropEnabled" class="region">
+    <div v-if="projectionMode === 'live' && cropEnabled" class="region">
       <div class="field">
         <label>{{ locale.t("source.x") }}</label>
         <n-input-number :value="regionX" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionX', v ?? 0)" />

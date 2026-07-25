@@ -14,6 +14,7 @@ import { useLogsStore } from "./stores/logs";
 import { useNaiveTheme } from "./theme/naivetheme";
 import { useTauriEvents } from "./composables/useTauriEvents";
 import { useStreamLifecycle } from "./composables/useStreamLifecycle";
+import RegionSelector from "./components/RegionSelector.vue";
 
 const theme = useThemeStore();
 const settings = useSettingsStore();
@@ -61,6 +62,8 @@ function onTransportChange(v: string) {
               :readyTone="lc.readyTone.value"
               :startDisabled="lc.startDisabled.value"
               :stopDisabled="lc.stopDisabled.value"
+              :active="stream.active"
+              :regionBusy="stream.regionBusy"
               @update:sourceId="(v: string) => (settings.sourceId = v)"
               @refresh="lc.refreshSources"
               @check="lc.checkDeviceNow"
@@ -70,10 +73,17 @@ function onTransportChange(v: string) {
               @input-token="lc.scheduleProbe"
               @start="lc.start"
               @stop="lc.stop"
+              @update:projectionMode="(v) => (settings.projectionMode = v)"
             />
           </div>
           <LogPanel />
         </div>
+        <RegionSelector
+          v-if="lc.regionPreview.value"
+          :preview="lc.regionPreview.value"
+          @confirm="lc.confirmRegion"
+          @cancel="lc.cancelRegion"
+        />
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>

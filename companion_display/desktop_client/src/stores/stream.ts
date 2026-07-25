@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { StreamEvent, StreamTarget } from "../types/tauri";
+import type { ProjectionMode, StreamEvent, StreamTarget } from "../types/tauri";
 import { useSettingsStore } from "./settings";
 import { streamStateKey, useLocaleStore } from "./locale";
 
@@ -21,6 +21,8 @@ export const useStreamStore = defineStore("stream", () => {
 
   const active = ref(false);
   const stopping = ref(false);
+  const regionBusy = ref(false);
+  const activeMode = ref<ProjectionMode>("live");
   const state = ref("idle");
   const detail = ref("");
   const pillMode = ref<"idle" | "starting" | "stopping" | "streaming" | "error" | "event">("idle");
@@ -150,6 +152,7 @@ export const useStreamStore = defineStore("stream", () => {
     pillMode.value = "event";
     pillTone.value = failed ? "bad" : warning ? "warn" : active.value ? "active" : "muted";
     applyMetrics(payload);
+    activeMode.value = payload.projectionMode;
   }
 
   function starting() {
@@ -186,6 +189,8 @@ export const useStreamStore = defineStore("stream", () => {
   return {
     active,
     stopping,
+    regionBusy,
+    activeMode,
     state,
     detail,
     pillText,

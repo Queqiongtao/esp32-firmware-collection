@@ -7,6 +7,7 @@ import SourcePanel from "./SourcePanel.vue";
 import StreamPanel from "./StreamPanel.vue";
 import type { CaptureSource } from "../types/tauri";
 import type { DisplayOrientation } from "../types/tauri";
+import type { ProjectionMode } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 import { useLogsStore } from "../stores/logs";
 
@@ -19,6 +20,8 @@ const props = defineProps<{
   readyTone: "good" | "warn" | "active";
   startDisabled: boolean;
   stopDisabled: boolean;
+  active: boolean;
+  regionBusy: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -32,6 +35,7 @@ const emit = defineEmits<{
   (e: "input-params"): void;
   (e: "start"): void;
   (e: "stop"): void;
+  (e: "update:projectionMode", v: ProjectionMode): void;
   (e: "input-endpoint"): void;
   (e: "input-token"): void;
 }>();
@@ -74,6 +78,7 @@ function forgetPortalSelection() {
           :regionWidth="settings.regionWidth"
           :regionHeight="settings.regionHeight"
           :portalRemembered="Boolean(settings.portalRestoreToken)"
+          :projectionMode="settings.projectionMode"
           @update:sourceId="(v) => (settings.sourceId = v)"
           @update:cropEnabled="(v) => (settings.cropEnabled = v)"
           @update:regionX="(v) => (settings.regionX = v)"
@@ -95,6 +100,9 @@ function forgetPortalSelection() {
           :readyTone="props.readyTone"
           :startDisabled="props.startDisabled"
           :stopDisabled="props.stopDisabled"
+          :projectionMode="settings.projectionMode"
+          :active="props.active"
+          :regionBusy="props.regionBusy"
           @update:videoTransport="(v) => emit('update:videoTransport', v)"
           @update:displayOrientation="(v) => (settings.displayOrientation = v)"
           @update:fps="(v) => (settings.fps = v)"
@@ -102,6 +110,7 @@ function forgetPortalSelection() {
           @input-params="emit('input-params')"
           @start="emit('start')"
           @stop="emit('stop')"
+          @update:projectionMode="(v) => emit('update:projectionMode', v)"
         />
       </n-collapse-item>
     </n-collapse>
