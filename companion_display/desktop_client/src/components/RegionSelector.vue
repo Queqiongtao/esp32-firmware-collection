@@ -4,10 +4,14 @@ import { NButton } from "naive-ui";
 import type { CaptureRegion, RegionSelectionPreview } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 
-const props = defineProps<{ preview: RegionSelectionPreview }>();
+const props = defineProps<{
+  preview: RegionSelectionPreview;
+  canChangeSource: boolean;
+}>();
 const emit = defineEmits<{
   (e: "confirm", region: CaptureRegion): void;
   (e: "cancel"): void;
+  (e: "change-source"): void;
 }>();
 const locale = useLocaleStore();
 const stage = ref<HTMLElement | null>(null);
@@ -140,6 +144,9 @@ onBeforeUnmount(() => {
       <span v-if="sourceRegion">{{ sourceRegion.width }} x {{ sourceRegion.height }}</span>
     </div>
     <div class="actions" @pointerdown.stop @pointermove.stop @pointerup.stop>
+      <n-button v-if="canChangeSource" secondary @click="emit('change-source')">
+        {{ locale.t("region.changeSource") }}
+      </n-button>
       <n-button @click="emit('cancel')">{{ locale.t("region.cancel") }}</n-button>
       <n-button type="primary" :disabled="!sourceRegion" @click="sourceRegion && emit('confirm', sourceRegion)">
         {{ locale.t("region.confirm") }}

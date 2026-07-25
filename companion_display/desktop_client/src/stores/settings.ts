@@ -14,11 +14,6 @@ export const useSettingsStore = defineStore("settings", () => {
   const videoTransport = ref("tcp");
   const displayOrientation = ref<DisplayOrientation>("portrait");
   const portalRestoreToken = ref("");
-  const cropEnabled = ref(false);
-  const regionX = ref(0);
-  const regionY = ref(0);
-  const regionWidth = ref(0);
-  const regionHeight = ref(0);
 
   const normalizedEndpoint = computed(() => {
     const trimmed = endpoint.value.trim();
@@ -49,11 +44,6 @@ export const useSettingsStore = defineStore("settings", () => {
           videoTransport: videoTransport.value,
           displayOrientation: displayOrientation.value,
           portalRestoreToken: portalRestoreToken.value,
-          cropEnabled: cropEnabled.value,
-          regionX: regionX.value,
-          regionY: regionY.value,
-          regionWidth: regionWidth.value,
-          regionHeight: regionHeight.value,
         }),
       );
     } catch {
@@ -88,15 +78,6 @@ export const useSettingsStore = defineStore("settings", () => {
         displayOrientation.value = saved.displayOrientation;
       }
       if (typeof saved.portalRestoreToken === "string") portalRestoreToken.value = saved.portalRestoreToken;
-      if (typeof saved.cropEnabled === "boolean") cropEnabled.value = saved.cropEnabled;
-      if (typeof saved.regionX === "number") regionX.value = saved.regionX;
-      else if (typeof saved.regionX === "string") regionX.value = Number(saved.regionX);
-      if (typeof saved.regionY === "number") regionY.value = saved.regionY;
-      else if (typeof saved.regionY === "string") regionY.value = Number(saved.regionY);
-      if (typeof saved.regionWidth === "number") regionWidth.value = saved.regionWidth;
-      else if (typeof saved.regionWidth === "string") regionWidth.value = Number(saved.regionWidth);
-      if (typeof saved.regionHeight === "number") regionHeight.value = saved.regionHeight;
-      else if (typeof saved.regionHeight === "string") regionHeight.value = Number(saved.regionHeight);
     } catch {
       /* ignore */
     }
@@ -105,7 +86,7 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   watch(
-    [endpoint, token, projectionMode, fps, quality, videoTransport, displayOrientation, portalRestoreToken, cropEnabled, regionX, regionY, regionWidth, regionHeight],
+    [endpoint, token, projectionMode, fps, quality, videoTransport, displayOrientation, portalRestoreToken],
     () => save(),
   );
 
@@ -119,11 +100,6 @@ export const useSettingsStore = defineStore("settings", () => {
     videoTransport,
     displayOrientation,
     portalRestoreToken,
-    cropEnabled,
-    regionX,
-    regionY,
-    regionWidth,
-    regionHeight,
     normalizedEndpoint,
     normalizeEndpointInPlace,
     sanitizeToken,

@@ -81,8 +81,10 @@ function onTransportChange(v: string) {
         <RegionSelector
           v-if="lc.regionPreview.value"
           :preview="lc.regionPreview.value"
+          :canChangeSource="lc.regionCanChangeSource.value"
           @confirm="lc.confirmRegion"
           @cancel="lc.cancelRegion"
+          @change-source="lc.changeRegionSource"
         />
       </n-dialog-provider>
     </n-message-provider>

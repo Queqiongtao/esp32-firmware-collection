@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NButton, NSelect, NInputNumber, NSwitch } from "naive-ui";
-import type { CaptureSource, ProjectionMode } from "../types/tauri";
+import { NButton, NSelect } from "naive-ui";
+import type { CaptureSource } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 
 const locale = useLocaleStore();
@@ -9,24 +9,13 @@ const locale = useLocaleStore();
 const props = defineProps<{
   locked: boolean;
   sourceId: string;
-  cropEnabled: boolean;
-  regionX: number;
-  regionY: number;
-  regionWidth: number;
-  regionHeight: number;
   sources: CaptureSource[];
   sourceLabel: (item: CaptureSource) => string;
   portalRemembered: boolean;
-  projectionMode: ProjectionMode;
 }>();
 
 const emit = defineEmits<{
   (e: "update:sourceId", v: string): void;
-  (e: "update:cropEnabled", v: boolean): void;
-  (e: "update:regionX", v: number): void;
-  (e: "update:regionY", v: number): void;
-  (e: "update:regionWidth", v: number): void;
-  (e: "update:regionHeight", v: number): void;
   (e: "refresh"): void;
   (e: "forgetPortal"): void;
 }>();
@@ -74,32 +63,6 @@ const summary = computed(() => {
         {{ locale.t("source.portalReselect") }}
       </n-button>
     </div>
-    <div v-if="projectionMode === 'live'" class="toggle-row">
-      <n-switch
-        :value="cropEnabled"
-        :disabled="locked"
-        @update:value="(v: boolean) => emit('update:cropEnabled', v)"
-      />
-      <span>{{ locale.t("source.crop") }}</span>
-    </div>
-    <div v-if="projectionMode === 'live' && cropEnabled" class="region">
-      <div class="field">
-        <label>{{ locale.t("source.x") }}</label>
-        <n-input-number :value="regionX" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionX', v ?? 0)" />
-      </div>
-      <div class="field">
-        <label>{{ locale.t("source.y") }}</label>
-        <n-input-number :value="regionY" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionY', v ?? 0)" />
-      </div>
-      <div class="field">
-        <label>{{ locale.t("source.width") }}</label>
-        <n-input-number :value="regionWidth" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionWidth', v ?? 0)" />
-      </div>
-      <div class="field">
-        <label>{{ locale.t("source.height") }}</label>
-        <n-input-number :value="regionHeight" :min="0" :disabled="locked" :show-button="false" @update:value="(v: number | null) => emit('update:regionHeight', v ?? 0)" />
-      </div>
-    </div>
   </div>
 </template>
 
@@ -144,17 +107,4 @@ const summary = computed(() => {
   font-size: 12px;
 }
 
-.toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  color: var(--cd-strong);
-}
-
-.region {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
-}
 </style>

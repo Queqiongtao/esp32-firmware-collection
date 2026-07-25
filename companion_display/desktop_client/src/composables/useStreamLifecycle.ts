@@ -13,6 +13,10 @@ const PARAMS_DEBOUNCE_MS = 300;
 const DEVICE_POLL_MS = 2000;
 const STATUS_POLL_MS = 300;
 
+type RegionSelectionResult =
+  | { action: "confirm"; region: CaptureRegion }
+  | { action: "cancel" | "change-source" };
+
 function clamp(value: number, min: number, max: number, fallback: number): number {
   const parsed = Number.isFinite(value) ? value : fallback;
   return Math.min(max, Math.max(min, parsed));
@@ -141,33 +145,37 @@ export function useStreamLifecycle() {
   }
 
   const regionPreview = ref<RegionSelectionPreview | null>(null);
-  let regionResolver: ((region: CaptureRegion | null) => void) | null = null;
+  const regionCanChangeSource = ref(false);
+  let regionResolver: ((result: RegionSelectionResult) => void) | null = null;
 
-  async function chooseRegion(preview: RegionSelectionPreview): Promise<CaptureRegion | null> {
+  async function chooseRegion(preview: RegionSelectionPreview, canChangeSource = false): Promise<RegionSelectionResult> {
     const window = getCurrentWindow();
     const wasFullscreen = await window.isFullscreen();
     await window.setFullscreen(true);
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    regionCanChangeSource.value = canChangeSource;
     regionPreview.value = preview;
-    const region = await new Promise<CaptureRegion | null>((resolve) => { regionResolver = resolve; });
+    const result = await new Promise<RegionSelectionResult>((resolve) => { regionResolver = resolve; });
     regionResolver = null;
     regionPreview.value = null;
+    regionCanChangeSource.value = false;
     if (!wasFullscreen) await window.setFullscreen(false);
-    return region;
+    return result;
   }
 
-  function confirmRegion(region: CaptureRegion) { regionResolver?.(region); }
-  function cancelRegion() { regionResolver?.(null); }
+  function confirmRegion(region: CaptureRegion) { regionResolver?.({ action: "confirm", region }); }
+  function cancelRegion() { regionResolver?.({ action: "cancel" }); }
+  function changeRegionSource() { regionResolver?.({ action: "change-source" }); }
 
   function streamConfig(region?: CaptureRegion, selectionId?: string) {
     return {
       endpoint: settings.normalizedEndpoint,
       token: settings.token,
       sourceId: settings.sourceId,
-      regionX: region?.x ?? (settings.cropEnabled ? settings.regionX : 0),
-      regionY: region?.y ?? (settings.cropEnabled ? settings.regionY : 0),
-      regionWidth: region?.width ?? (settings.cropEnabled ? settings.regionWidth : 0),
-      regionHeight: region?.height ?? (settings.cropEnabled ? settings.regionHeight : 0),
+      regionX: region?.x ?? 0,
+      regionY: region?.y ?? 0,
+      regionWidth: region?.width ?? 0,
+      regionHeight: region?.height ?? 0,
       fps: settings.fps,
       jpegQuality: settings.quality,
       videoTransport: settings.videoTransport,
@@ -190,9 +198,9 @@ export function useStreamLifecycle() {
       logs.pushKey("log.selectingRegion", "normal");
       try {
         const preview = await invoke<RegionSelectionPreview>("prepare_region_reselection");
-        const region = await chooseRegion(preview);
-        if (region) {
-          await invoke("replace_stream_region", { region });
+        const result = await chooseRegion(preview);
+        if (result.action === "confirm") {
+          await invoke("replace_stream_region", { region: result.region });
           logs.pushKey("log.regionReplaced", "good");
         }
       } catch (error) {
@@ -210,14 +218,29 @@ export function useStreamLifecycle() {
       let region: CaptureRegion | undefined;
       if (settings.projectionMode === "region") {
         logs.pushKey("log.selectingRegion", "normal");
-        const preview = await invoke<RegionSelectionPreview>("prepare_region_selection", {
-          config: streamConfig(), targetWidth: dev.width, targetHeight: dev.height,
-        });
-        preparedSelectionId = preview.id;
-        region = (await chooseRegion(preview)) ?? undefined;
-        if (!region) {
+        let forcePortalChooser = false;
+        while (!region) {
+          const usedRememberedPortal = settings.sourceId === "linux:portal"
+            && Boolean(settings.portalRestoreToken)
+            && !forcePortalChooser;
+          const config = streamConfig();
+          if (forcePortalChooser) config.portalRestoreToken = undefined;
+          const preview = await invoke<RegionSelectionPreview>("prepare_region_selection", {
+            config, targetWidth: dev.width, targetHeight: dev.height,
+          });
+          preparedSelectionId = preview.id;
+          const result = await chooseRegion(preview, usedRememberedPortal);
+          if (result.action === "confirm") {
+            region = result.region;
+            break;
+          }
           await invoke("cancel_region_selection", { selectionId: preview.id });
-          return;
+          preparedSelectionId = undefined;
+          if (result.action === "cancel") return;
+          settings.clearPortalRestoreToken();
+          settings.save();
+          forcePortalChooser = true;
+          logs.pushKey("log.portalReselecting", "normal");
         }
       }
       stream.setTarget(null);
@@ -323,7 +346,9 @@ export function useStreamLifecycle() {
     stop,
     startPolling,
     regionPreview,
+    regionCanChangeSource,
     confirmRegion,
     cancelRegion,
+    changeRegionSource,
   };
 }
