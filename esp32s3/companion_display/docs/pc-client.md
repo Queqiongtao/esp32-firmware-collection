@@ -68,7 +68,7 @@ Vue 组件
 | `useTauriEvents` | 消费 Rust 的状态与预览事件 |
 | `usePreviewSink` | 将预览 JPEG 转换为前端可显示资源 |
 
-设置使用 `companion-display.settings.v1` 保存；主题使用独立 key。采集来源 `sourceId` 不持久化，启动后重新枚举并由用户选择。
+设置使用 `companion-display.settings.v1` 保存；主题使用独立 key。采集来源 `sourceId` 不持久化：Linux 启动后重新枚举，并在当前来源为空或失效时自动选择 `linux:portal`；非 Linux 仍由用户选择显示器或窗口。
 
 ### Tauri 接口
 
@@ -117,6 +117,10 @@ PC JPEG 编码 -> 协议封装 -> 网络 -> 设备解码 -> AMOLED
 ### Linux Portal/PipeWire
 
 Linux 只在系统 Portal 对话框中选择屏幕或窗口，不逐帧调用 XCap。客户端要求 Portal 支持嵌入式光标；光标作为画面的一部分参与后续 Crop 和缩放。
+
+Portal 使用 `PersistMode::ExplicitlyRevoked` 请求持久化授权，并将 `start` 响应中的 restore token 通过 `portal-restore-token` 事件交给前端，保存在 `companion-display.settings.v1`。后续 Start 会把 token 传回 `select_sources`，桌面后端支持时恢复上次屏幕或窗口。token 不会通过设备 WebSocket 或 UDP 发送。
+
+Source 面板显示当前是否已有记忆选择。停止投屏后点击“重新选择”会清除本地 token，下一次 Start 重新打开系统对话框。共享对象消失、权限被系统或用户撤销、token 失效或 Portal 后端不支持持久化时，系统仍可要求重新选择；客户端不绕过 Portal 安全策略。
 
 PipeWire 回调直接生成目标尺寸图像，避免复制完整桌面。选择窗口时有效区域按以下优先级确定：
 

@@ -45,6 +45,8 @@ struct StreamConfig {
     video_transport: String,
     #[serde(default)]
     display_orientation: DisplayOrientation,
+    #[serde(default)]
+    portal_restore_token: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -459,8 +461,13 @@ fn open_capture_session(
             0,
             &config.video_transport,
         );
-        let selection = tauri::async_runtime::block_on(wayland_capture::open_portal())
-            .map_err(|error| format!("Screen-share request failed: {error}"))?;
+        let selection = tauri::async_runtime::block_on(wayland_capture::open_portal(
+            config.portal_restore_token.as_deref(),
+        ))
+        .map_err(|error| format!("Screen-share request failed: {error}"))?;
+        if let Some(token) = selection.restore_token.as_deref() {
+            let _ = app.emit("portal-restore-token", token);
+        }
         let source_type = selection
             .source_type
             .map(|kind| format!("{kind:?}"))
@@ -1773,6 +1780,7 @@ mod tests {
             jpeg_quality: 80,
             video_transport: "tcp".into(),
             display_orientation: DisplayOrientation::Portrait,
+            portal_restore_token: None,
         }
     }
 
@@ -1924,5 +1932,29 @@ mod tests {
             active_stream_error(Some(&stop)),
             Some("previous Wi-Fi stream is still stopping")
         );
+    }
+
+    #[test]
+    fn stream_config_accepts_missing_and_saved_portal_tokens() {
+        let base = serde_json::json!({
+            "endpoint": "ws://127.0.0.1/stream",
+            "token": "000000",
+            "sourceId": "linux:portal",
+            "regionX": 0,
+            "regionY": 0,
+            "regionWidth": 0,
+            "regionHeight": 0,
+            "fps": 25,
+            "jpegQuality": 70,
+            "videoTransport": "tcp",
+            "displayOrientation": "portrait"
+        });
+        let without: StreamConfig = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(without.portal_restore_token, None);
+
+        let mut with = base;
+        with["portalRestoreToken"] = serde_json::Value::String("restore-1".into());
+        let with: StreamConfig = serde_json::from_value(with).unwrap();
+        assert_eq!(with.portal_restore_token.as_deref(), Some("restore-1"));
     }
 }

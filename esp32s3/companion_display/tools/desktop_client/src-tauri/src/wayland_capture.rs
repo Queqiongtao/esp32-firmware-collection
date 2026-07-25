@@ -106,6 +106,7 @@ pub struct PortalSelection {
     pub remote: OwnedFd,
     pub source_type: Option<SourceType>,
     pub source_size: Option<(u32, u32)>,
+    pub restore_token: Option<String>,
 }
 
 pub struct LatestFrame {
@@ -151,7 +152,7 @@ fn valid_source_size(size: Option<(i32, i32)>) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-pub async fn open_portal() -> Result<PortalSelection, String> {
+pub async fn open_portal(restore_token: Option<&str>) -> Result<PortalSelection, String> {
     let portal = Screencast::new().await.map_err(|error| error.to_string())?;
     let cursor_modes = portal
         .available_cursor_modes()
@@ -168,8 +169,8 @@ pub async fn open_portal() -> Result<PortalSelection, String> {
             cursor_mode,
             (SourceType::Monitor | SourceType::Window).into(),
             false,
-            None,
-            PersistMode::DoNot,
+            restore_token,
+            PersistMode::ExplicitlyRevoked,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -184,6 +185,7 @@ pub async fn open_portal() -> Result<PortalSelection, String> {
         .first()
         .ok_or_else(|| "no screen or window was selected".to_string())?
         .to_owned();
+    let restore_token = response.restore_token().map(ToOwned::to_owned);
     let remote = portal
         .open_pipe_wire_remote(&session)
         .await
@@ -193,6 +195,7 @@ pub async fn open_portal() -> Result<PortalSelection, String> {
         remote,
         source_type: stream.source_type(),
         source_size: valid_source_size(stream.size()),
+        restore_token,
     })
 }
 

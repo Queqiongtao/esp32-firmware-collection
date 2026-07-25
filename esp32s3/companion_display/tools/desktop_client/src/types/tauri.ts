@@ -73,6 +73,7 @@ export type StreamConfig = {
   jpegQuality: number;
   videoTransport: string;
   displayOrientation: DisplayOrientation;
+  portalRestoreToken?: string;
 };
 
 export type LogTone = "normal" | "good" | "warn" | "bad";

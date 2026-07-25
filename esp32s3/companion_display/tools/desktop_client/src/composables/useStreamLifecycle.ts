@@ -98,6 +98,10 @@ export function useStreamLifecycle() {
       if (!list.length) logs.pushKey("log.noSources", "warn");
       else logs.pushKey("log.sourcesFound", "good", { count: list.length });
       if (settings.sourceId && !list.some((s) => s.id === settings.sourceId)) settings.sourceId = "";
+      if (!settings.sourceId && list.some((source) => source.id === "linux:portal")) {
+        settings.sourceId = "linux:portal";
+        logs.pushKey("log.portalDefaulted", "good");
+      }
       stream.refreshSourcesDone++;
     } catch (error) {
       logs.pushRaw(String(error), "bad");
@@ -154,6 +158,7 @@ export function useStreamLifecycle() {
           jpegQuality: settings.quality,
           videoTransport: settings.videoTransport,
           displayOrientation: settings.displayOrientation,
+          portalRestoreToken: settings.portalRestoreToken || undefined,
         },
       });
     } catch (error) {

@@ -90,11 +90,13 @@ npm run tauri:build
 2. 填写屏幕显示的六位 `Pairing code`，等待自动检查或点击 `Check`。
 3. 选择 TCP、`Static color bars`，点击 `Start Wi-Fi Stream`。
 4. 确认客户端预览和设备画面一致后点击 `Stop`。
-5. Linux 选择 `Portal`，在系统对话框中选择屏幕或窗口；实时画面推荐 UDP、25 FPS、JPEG 质量 70。
+5. Linux 默认选择 `Portal`。首次投屏在系统对话框中选择屏幕或窗口；客户端会保存 Portal restore token，桌面后端支持时后续启停和客户端重启可直接恢复。实时画面推荐 UDP、25 FPS、JPEG 质量 70。
 
 `Display orientation` 按设备实际摆放方向提供四档：顶部朝上、顶部朝左、顶部朝下、顶部朝右。横放时 PC 使用 `448x368` 逻辑画布，再旋转为设备仍可接收的 `368x448` 帧；固件和协议尺寸不变。
 
 流运行期间可以修改 FPS 和 JPEG 质量，约 0.3 秒后生效。设备地址、配对码、采集来源、裁剪范围、显示方向和传输方式在流运行期间锁定，修改前需要先停止流。
+
+需要更换已记住的共享对象时，在停止状态下展开 `Source`，点击 `Choose again`/`重新选择`，下一次 Start 会重新打开 Portal 系统选择框。Portal 是否免确认由桌面环境安全策略决定；不支持 restore token 的后端仍会按原流程弹框。
 
 ## TCP 与 UDP
 

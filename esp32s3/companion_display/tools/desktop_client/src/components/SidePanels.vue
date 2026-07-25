@@ -8,6 +8,7 @@ import StreamPanel from "./StreamPanel.vue";
 import type { CaptureSource } from "../types/tauri";
 import type { DisplayOrientation } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
+import { useLogsStore } from "../stores/logs";
 
 const props = defineProps<{
   sourceId: string;
@@ -37,6 +38,12 @@ const emit = defineEmits<{
 
 const settings = useSettingsStore();
 const locale = useLocaleStore();
+const logs = useLogsStore();
+
+function forgetPortalSelection() {
+  settings.clearPortalRestoreToken();
+  logs.pushKey("log.portalSelectionCleared", "normal");
+}
 </script>
 
 <template>
@@ -66,6 +73,7 @@ const locale = useLocaleStore();
           :regionY="settings.regionY"
           :regionWidth="settings.regionWidth"
           :regionHeight="settings.regionHeight"
+          :portalRemembered="Boolean(settings.portalRestoreToken)"
           @update:sourceId="(v) => (settings.sourceId = v)"
           @update:cropEnabled="(v) => (settings.cropEnabled = v)"
           @update:regionX="(v) => (settings.regionX = v)"
@@ -73,6 +81,7 @@ const locale = useLocaleStore();
           @update:regionWidth="(v) => (settings.regionWidth = v)"
           @update:regionHeight="(v) => (settings.regionHeight = v)"
           @refresh="emit('refresh')"
+          @forgetPortal="forgetPortalSelection"
         />
       </n-collapse-item>
       <n-collapse-item :title="locale.t('panel.stream')" name="stream">

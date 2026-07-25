@@ -36,6 +36,12 @@ export function useTauriEvents() {
       await listen<string>("stream-preview", ({ payload }) => {
         preview.display(payload);
       });
+      await listen<string>("portal-restore-token", ({ payload }) => {
+        const token = payload.trim();
+        if (!token || token === settings.portalRestoreToken) return;
+        settings.portalRestoreToken = token;
+        logs.pushKey("log.portalSelectionSaved", "good");
+      });
     } catch (error) {
       logs.pushKey("log.eventUnavailable", "bad", { error: String(error) });
     }

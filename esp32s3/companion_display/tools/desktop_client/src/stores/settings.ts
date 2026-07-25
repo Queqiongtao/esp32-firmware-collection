@@ -12,6 +12,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const quality = ref(70);
   const videoTransport = ref("tcp");
   const displayOrientation = ref<DisplayOrientation>("portrait");
+  const portalRestoreToken = ref("");
   const cropEnabled = ref(false);
   const regionX = ref(0);
   const regionY = ref(0);
@@ -45,6 +46,7 @@ export const useSettingsStore = defineStore("settings", () => {
           quality: quality.value,
           videoTransport: videoTransport.value,
           displayOrientation: displayOrientation.value,
+          portalRestoreToken: portalRestoreToken.value,
           cropEnabled: cropEnabled.value,
           regionX: regionX.value,
           regionY: regionY.value,
@@ -82,6 +84,7 @@ export const useSettingsStore = defineStore("settings", () => {
       ) {
         displayOrientation.value = saved.displayOrientation;
       }
+      if (typeof saved.portalRestoreToken === "string") portalRestoreToken.value = saved.portalRestoreToken;
       if (typeof saved.cropEnabled === "boolean") cropEnabled.value = saved.cropEnabled;
       if (typeof saved.regionX === "number") regionX.value = saved.regionX;
       else if (typeof saved.regionX === "string") regionX.value = Number(saved.regionX);
@@ -99,7 +102,7 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   watch(
-    [endpoint, token, fps, quality, videoTransport, displayOrientation, cropEnabled, regionX, regionY, regionWidth, regionHeight],
+    [endpoint, token, fps, quality, videoTransport, displayOrientation, portalRestoreToken, cropEnabled, regionX, regionY, regionWidth, regionHeight],
     () => save(),
   );
 
@@ -111,6 +114,7 @@ export const useSettingsStore = defineStore("settings", () => {
     quality,
     videoTransport,
     displayOrientation,
+    portalRestoreToken,
     cropEnabled,
     regionX,
     regionY,
@@ -119,6 +123,7 @@ export const useSettingsStore = defineStore("settings", () => {
     normalizedEndpoint,
     normalizeEndpointInPlace,
     sanitizeToken,
+    clearPortalRestoreToken: () => (portalRestoreToken.value = ""),
     save,
     restore,
   };

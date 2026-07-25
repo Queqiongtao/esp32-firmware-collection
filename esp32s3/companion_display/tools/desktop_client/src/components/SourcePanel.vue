@@ -16,6 +16,7 @@ const props = defineProps<{
   regionHeight: number;
   sources: CaptureSource[];
   sourceLabel: (item: CaptureSource) => string;
+  portalRemembered: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   (e: "update:regionWidth", v: number): void;
   (e: "update:regionHeight", v: number): void;
   (e: "refresh"): void;
+  (e: "forgetPortal"): void;
 }>();
 
 const options = computed(() =>
@@ -65,6 +67,12 @@ const summary = computed(() => {
       <n-button size="small" :disabled="locked" class="refresh-btn" @click="emit('refresh')">{{ locale.t("source.refresh") }}</n-button>
     </div>
     <div class="source-summary">{{ summary }}</div>
+    <div v-if="sourceId === 'linux:portal'" class="portal-memory">
+      <span>{{ locale.t(portalRemembered ? "source.portalRemembered" : "source.portalWillPrompt") }}</span>
+      <n-button v-if="portalRemembered" size="tiny" secondary :disabled="locked" @click="emit('forgetPortal')">
+        {{ locale.t("source.portalReselect") }}
+      </n-button>
+    </div>
     <div class="toggle-row">
       <n-switch
         :value="cropEnabled"
@@ -124,6 +132,15 @@ const summary = computed(() => {
   padding: 10px;
   font-size: 12px;
   line-height: var(--cd-line);
+}
+
+.portal-memory {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--cd-muted);
+  font-size: 12px;
 }
 
 .toggle-row {
