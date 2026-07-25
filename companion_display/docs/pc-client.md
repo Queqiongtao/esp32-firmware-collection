@@ -4,7 +4,7 @@
 
 ## 技术栈与构建
 
-客户端位于 `tools/desktop_client`：
+客户端位于仓库根目录 `companion_display/desktop_client`：
 
 - 前端：Vue 3、TypeScript、Pinia、Naive UI、Vite；
 - 桌面容器：Tauri 2；
@@ -24,7 +24,7 @@ sudo apt install build-essential pkg-config curl clang libclang-dev \
 `clang` 和 `libclang-dev` 用于构建仓库内 vendor 的 PipeWire/libspa 绑定。开发与发布命令：
 
 ```bash
-cd tools/desktop_client
+cd companion_display/desktop_client
 npm ci
 npm run tauri:dev
 npm run tauri:build
@@ -54,7 +54,7 @@ Vue 组件
 
 主界面由顶部状态栏、流指标条、预览区、`Device`/`Source`/`Stream` 参数面板和可折叠日志面板组成。窗口宽度小于约 1100px 时从双列切换为单列，预览完整显示在上方，参数面板和日志通过页面纵向滚动访问。
 
-预览组件通过 `ResizeObserver` 测量 workspace 中的实际可用区域，并计算可容纳的最大等比例矩形。竖屏与倒置竖屏使用 `368:448`，两个横屏方向使用 `448:368`；窗口、指标栏、日志或语言文本尺寸变化时会重新测量。预览图继续使用 `object-fit: contain`，不拉伸、不裁剪。默认最小窗口 `720×560` 为完整布局支持下限，更小的窗口尺寸不保证全部控件同时可见。
+预览组件通过 `ResizeObserver` 测量 workspace 中的实际可用区域，并计算可容纳的最大等比例矩形。比例来自当前流协商的设备宽高；尚未启动时使用 `/api/status` 的宽高，尚未检测设备时才回退到 S3 的 `368:448`。两个横屏方向交换宽高；窗口、指标栏、日志或语言文本尺寸变化时会重新测量。预览图继续使用 `object-fit: contain`，不拉伸、不裁剪。默认最小窗口 `720×560` 为完整布局支持下限，更小的窗口尺寸不保证全部控件同时可见。
 
 主要状态职责：
 
@@ -146,10 +146,10 @@ GNOME Portal 可能为单窗口返回全屏大小透明画布，因此 `logical_
 
 | 选项 | 逻辑画布 | PC 编码补偿 |
 | --- | --- | --- |
-| `Portrait (top up)` | `368x448` | 不旋转 |
-| `Landscape (top left)` | `448x368` | 顺时针旋转为原生帧 |
-| `Portrait (top down)` | `368x448` | 旋转 180° |
-| `Landscape (top right)` | `448x368` | 逆时针旋转为原生帧 |
+| `Portrait (top up)` | `width x height` | 不旋转 |
+| `Landscape (top left)` | `height x width` | 顺时针旋转为原生帧 |
+| `Portrait (top down)` | `width x height` | 旋转 180° |
+| `Landscape (top right)` | `height x width` | 逆时针旋转为原生帧 |
 
 选定区域按逻辑画布比例缩放：
 
@@ -157,7 +157,7 @@ GNOME Portal 可能为单窗口返回全屏大小透明画布，因此 `logical_
 - 不裁掉选定内容；
 - 宽高比不一致时居中补最少黑边。
 
-处理顺序固定为：窗口有效区域识别、手动 Crop、逻辑画布等比缩放和补边、方向补偿旋转、JPEG 编码。设备端不执行缩放或旋转，因此 PC 始终输出完整 `368x448` 设备尺寸。
+处理顺序固定为：窗口有效区域识别、手动 Crop、按 `hello_ack.width/height` 建立逻辑画布并等比缩放和补边、方向补偿旋转、JPEG 编码。设备端不执行缩放或旋转，因此 PC 始终输出完整的协商设备尺寸。
 
 Linux PipeWire 在采样时直接把逻辑坐标映射到物理输出坐标，不复制完整桌面。非 Linux XCap 和测试源先生成逻辑画布，再旋转到设备画布。
 
@@ -165,11 +165,11 @@ Linux PipeWire 在采样时直接把逻辑坐标映射到物理输出坐标，�
 
 FPS 范围为 1～30，JPEG 质量范围为 30～95，默认 25 FPS、质量 70。
 
-编码结果超过 100 KiB 时，客户端按 5 逐步降低当前帧质量，最低降到 30。质量 30 仍超限则丢弃该帧。成功 JPEG 被封装为 24 字节 `CDP1` 头和 payload，CRC 使用与设备 `esp_crc32_le(0, ...)` 兼容的算法。
+TCP 编码上限为 `hello_ack.max_frame_bytes - 24`；UDP 还取 `max_payload * 128` 对完整帧的限制。编码结果超过有效上限时，客户端按 5 逐步降低当前帧质量，最低降到 30。质量 30 仍超限则丢弃该帧。成功 JPEG 被封装为 24 字节 `CDP1` 头和 payload，帧头宽高使用协商值，CRC 使用与设备 `esp_crc32_le(0, ...)` 兼容的算法。
 
 客户端对目标尺寸图像计算指纹。画面不变或采集端暂时没有新帧时，复用最后成功编码的 JPEG，并以 1 FPS 发送；每次重发只更新 `CDP1.sequence`，JPEG payload 与 payload CRC 不变。这样既减少静态带宽，也不会触发设备完整帧超时。
 
-预览只在成功生成 `CDP1` 后提取 JPEG，最多每秒发送一次 Base64 事件。前端 canvas 按设备摆放方向反向旋转，因此横屏预览以正常 `448x368` 方向显示，倒置竖屏也保持正向观看。预览频率与视频 FPS 解耦。
+预览只在成功生成 `CDP1` 后提取 JPEG，最多每秒发送一次 Base64 事件。前端 canvas 按设备摆放方向反向旋转，因此横屏预览以协商宽高交换后的方向显示，倒置竖屏也保持正向观看。预览频率与视频 FPS 解耦。
 
 ## TCP 发送
 

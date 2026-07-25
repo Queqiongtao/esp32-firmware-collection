@@ -4,7 +4,7 @@ import { useDeviceStore } from "../stores/device";
 import { useLogsStore } from "../stores/logs";
 import { useStreamStore } from "../stores/stream";
 import { useSettingsStore } from "../stores/settings";
-import type { CaptureSource, DeviceStatus, StreamEvent } from "../types/tauri";
+import type { CaptureSource, DeviceStatus, StreamEvent, StreamTarget } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 
 const PROBE_DEBOUNCE_MS = 800;
@@ -142,10 +142,11 @@ export function useStreamLifecycle() {
       return;
     }
     settings.save();
+    stream.setTarget(null);
     stream.starting();
     logs.pushKey("log.openingStream", "normal");
     try {
-      await invoke("start_wifi_stream", {
+      const target = await invoke<StreamTarget>("start_wifi_stream", {
         config: {
           endpoint: settings.normalizedEndpoint,
           token: settings.token,
@@ -161,6 +162,7 @@ export function useStreamLifecycle() {
           portalRestoreToken: settings.portalRestoreToken || undefined,
         },
       });
+      if (stream.active) stream.setTarget(target);
     } catch (error) {
       const msg = String(error);
       if (msg.includes("still stopping")) {
@@ -210,7 +212,11 @@ export function useStreamLifecycle() {
   }
 
   function sourceLabel(item: CaptureSource): string {
-    const size = item.width > 0 && item.height > 0 ? `${item.width}x${item.height}` : locale.t("source.systemDialog");
+    const size = item.id === "test:color-bars"
+      ? locale.t("source.followsDevice")
+      : item.width > 0 && item.height > 0
+        ? `${item.width}x${item.height}`
+        : locale.t("source.systemDialog");
     const kindKeys = {
       test: "source.kind.test",
       portal: "source.kind.portal",

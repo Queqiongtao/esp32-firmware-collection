@@ -27,9 +27,11 @@ export function useTauriEvents() {
           device.reset();
           preview.clear();
           stream.clearMetrics();
+          stream.setTarget(null);
         } else if (payload.state.toLowerCase() === "error" && !wasStopped) {
           preview.clear();
           stream.clearMetrics();
+          stream.setTarget(null);
         }
       });
       /* 预览渲染入口：高帧化时改 usePreviewSink 内部实现（Blob URL / canvas）。 */

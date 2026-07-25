@@ -104,6 +104,20 @@ struct DeviceStatus {
     performance: DevicePerformance,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamTarget {
+    width: u16,
+    height: u16,
+    max_frame_bytes: usize,
+}
+
+impl StreamTarget {
+    fn max_jpeg_bytes(&self) -> usize {
+        self.max_frame_bytes - protocol::HEADER_LEN
+    }
+}
+
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UdpDiagnostics {
@@ -146,6 +160,12 @@ struct ControlReply {
     code: String,
     #[serde(default)]
     video_transport: String,
+    #[serde(default)]
+    width: Option<u16>,
+    #[serde(default)]
+    height: Option<u16>,
+    #[serde(default)]
+    max_frame_bytes: Option<usize>,
     udp: Option<UdpParameters>,
 }
 
@@ -200,6 +220,9 @@ enum CaptureSession {
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PROTOCOL_VERSION: u8 = 2;
 const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
+const MAX_TARGET_DIMENSION: u16 = 4096;
+const MAX_TARGET_PIXELS: u64 = 8_294_400;
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const UDP_FRAGMENT_SPACING: Duration = Duration::from_millis(1);
 /* Two ~1.2 KB datagrams per tick stays far below the device's 24-packet
 receive mailbox while halving per-frame pacing latency. */
@@ -245,8 +268,8 @@ fn list_capture_sources_impl() -> Result<Vec<CaptureSourceInfo>, String> {
         id: STATIC_COLOR_BARS_ID.into(),
         kind: "test".into(),
         label: "Static color bars".into(),
-        width: u32::from(protocol::WIDTH),
-        height: u32::from(protocol::HEIGHT),
+        width: 0,
+        height: 0,
     }];
     #[cfg(target_os = "linux")]
     {
@@ -333,7 +356,11 @@ fn open_xcap_source(source_id: &str) -> Result<CaptureSession, String> {
     }
 }
 
-fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<DynamicImage, String> {
+fn crop_and_letterbox(
+    image: DynamicImage,
+    config: &StreamConfig,
+    target: &StreamTarget,
+) -> Result<DynamicImage, String> {
     let source_width = image.width();
     let source_height = image.height();
     if source_width == 0 || source_height == 0 {
@@ -357,8 +384,8 @@ fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<Dyna
         return Err("capture region is outside the selected source".to_string());
     }
     let cropped = image.crop_imm(config.region_x, config.region_y, crop_width, crop_height);
-    let physical_width = u32::from(protocol::WIDTH);
-    let physical_height = u32::from(protocol::HEIGHT);
+    let physical_width = u32::from(target.width);
+    let physical_height = u32::from(target.height);
     let (logical_width, logical_height) = config
         .display_orientation
         .logical_size(physical_width, physical_height);
@@ -381,17 +408,23 @@ fn crop_and_letterbox(image: DynamicImage, config: &StreamConfig) -> Result<Dyna
 
 /* Returns the encoded JPEG and the quality that fit the device limit, so the
 next frame can start near it instead of re-walking the ladder from the top. */
-fn encode_jpeg(image: &DynamicImage, requested_quality: u8) -> Result<(Vec<u8>, u8), String> {
+fn encode_jpeg(
+    image: &DynamicImage,
+    requested_quality: u8,
+    max_jpeg_bytes: usize,
+) -> Result<(Vec<u8>, u8), String> {
     for quality in (30..=requested_quality.clamp(30, 95)).rev().step_by(5) {
         let mut output = Vec::new();
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut output), quality)
             .encode_image(image)
             .map_err(|error| format!("JPEG encoding failed: {error}"))?;
-        if output.len() <= protocol::MAX_JPEG_BYTES {
+        if output.len() <= max_jpeg_bytes {
             return Ok((output, quality));
         }
     }
-    Err("JPEG remains larger than the device 100 KiB limit".to_string())
+    Err(format!(
+        "JPEG remains larger than the negotiated {max_jpeg_bytes}-byte limit"
+    ))
 }
 
 /* Crop, scale, and letterbox a raw capture to the device canvas. PipeWire
@@ -401,23 +434,31 @@ fn prepare_image(
     image: DynamicImage,
     session: &CaptureSession,
     config: &StreamConfig,
+    target: &StreamTarget,
 ) -> Result<DynamicImage, String> {
     #[cfg(target_os = "linux")]
     if matches!(session, CaptureSession::PipeWire(_)) {
         return Ok(image);
     }
-    crop_and_letterbox(image, config)
+    crop_and_letterbox(image, config, target)
 }
 
 fn encode_prepared_frame(
     image: &DynamicImage,
     jpeg_quality: u8,
     sequence: u32,
+    target: &StreamTarget,
 ) -> Result<(Vec<u8>, usize, u8), String> {
-    let (jpeg, used_quality) = encode_jpeg(image, jpeg_quality)?;
+    let (jpeg, used_quality) = encode_jpeg(image, jpeg_quality, target.max_jpeg_bytes())?;
     let jpeg_bytes = jpeg.len();
     Ok((
-        protocol::encode_frame(sequence, &jpeg)?,
+        protocol::encode_frame(
+            sequence,
+            target.width,
+            target.height,
+            target.max_jpeg_bytes(),
+            &jpeg,
+        )?,
         jpeg_bytes,
         used_quality,
     ))
@@ -428,9 +469,11 @@ fn build_frame(
     image: DynamicImage,
     config: &StreamConfig,
     sequence: u32,
+    target: &StreamTarget,
 ) -> Result<(Vec<u8>, usize), String> {
-    let image = crop_and_letterbox(image, config)?;
-    let (frame, jpeg_bytes, _) = encode_prepared_frame(&image, config.jpeg_quality, sequence)?;
+    let image = crop_and_letterbox(image, config, target)?;
+    let (frame, jpeg_bytes, _) =
+        encode_prepared_frame(&image, config.jpeg_quality, sequence, target)?;
     Ok((frame, jpeg_bytes))
 }
 
@@ -438,11 +481,12 @@ fn open_capture_session(
     app: &AppHandle,
     config: &StreamConfig,
     stop: Arc<AtomicBool>,
+    target: &StreamTarget,
 ) -> Result<CaptureSession, String> {
     if config.source_id == STATIC_COLOR_BARS_ID {
         let (width, height) = config
             .display_orientation
-            .logical_size(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT));
+            .logical_size(u32::from(target.width), u32::from(target.height));
         return Ok(CaptureSession::StaticColorBars(static_color_bars(
             width, height,
         )));
@@ -502,8 +546,8 @@ fn open_capture_session(
                 region_y: config.region_y,
                 region_width: config.region_width,
                 region_height: config.region_height,
-                target_width: u32::from(protocol::WIDTH),
-                target_height: u32::from(protocol::HEIGHT),
+                target_width: u32::from(target.width),
+                target_height: u32::from(target.height),
                 orientation: config.display_orientation,
             },
         )));
@@ -851,6 +895,7 @@ fn reconnect_udp_control(
     stop: &AtomicBool,
     reason: &str,
     dropped_frames: u32,
+    expected_target: &StreamTarget,
 ) -> Result<(WebSocket<TcpStream>, VideoSender), String> {
     let endpoint = stream_endpoint(config);
     let mut last_error = reason.to_string();
@@ -876,7 +921,8 @@ fn reconnect_udp_control(
             return Err("Stream stopped".to_string());
         }
         match connect_wifi(&endpoint).and_then(|mut socket| {
-            let sender = negotiate_stream(&mut socket, "udp")?;
+            let (sender, target) = negotiate_stream(&mut socket, "udp")?;
+            ensure_reconnect_target(expected_target, &target)?;
             configure_udp_control_socket(&mut socket)?;
             Ok((socket, sender))
         }) {
@@ -898,6 +944,35 @@ fn reconnect_udp_control(
     Err(format!(
         "Control reconnection failed after {} attempts: {last_error}",
         CONTROL_RECONNECT_DELAYS.len()
+    ))
+}
+
+fn ensure_reconnect_target(expected: &StreamTarget, actual: &StreamTarget) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "Device stream target changed from {}x{} / {} bytes to {}x{} / {} bytes; restart the stream",
+        expected.width,
+        expected.height,
+        expected.max_frame_bytes,
+        actual.width,
+        actual.height,
+        actual.max_frame_bytes
+    ))
+}
+
+fn ensure_status_dimensions(
+    status_width: u16,
+    status_height: u16,
+    target: &StreamTarget,
+) -> Result<(), String> {
+    if status_width == target.width && status_height == target.height {
+        return Ok(());
+    }
+    Err(format!(
+        "Device status reports {status_width}x{status_height}, but hello_ack reports {}x{}",
+        target.width, target.height
     ))
 }
 
@@ -931,10 +1006,60 @@ fn control_request(
     }
 }
 
+fn validate_stream_target(
+    hello: &ControlReply,
+    requested_transport: &str,
+) -> Result<StreamTarget, String> {
+    let width = hello
+        .width
+        .ok_or_else(|| "Device hello_ack has no target width".to_string())?;
+    let height = hello
+        .height
+        .ok_or_else(|| "Device hello_ack has no target height".to_string())?;
+    let advertised_frame_bytes = hello
+        .max_frame_bytes
+        .ok_or_else(|| "Device hello_ack has no frame limit".to_string())?;
+    if width == 0 || height == 0 || width > MAX_TARGET_DIMENSION || height > MAX_TARGET_DIMENSION {
+        return Err(format!(
+            "Device provided invalid target dimensions {width}x{height}"
+        ));
+    }
+    if u64::from(width) * u64::from(height) > MAX_TARGET_PIXELS {
+        return Err(format!(
+            "Device target {width}x{height} exceeds the client pixel limit"
+        ));
+    }
+    if !(protocol::HEADER_LEN + 1..=MAX_FRAME_BYTES).contains(&advertised_frame_bytes) {
+        return Err(format!(
+            "Device provided invalid max_frame_bytes {advertised_frame_bytes}"
+        ));
+    }
+    let max_frame_bytes = if requested_transport == "udp" {
+        let udp = hello
+            .udp
+            .as_ref()
+            .ok_or_else(|| "Device did not provide UDP session parameters".to_string())?;
+        if udp.max_payload == 0 || udp.max_payload > 1200 {
+            return Err("Device provided an invalid UDP payload limit".to_string());
+        }
+        advertised_frame_bytes.min(udp.max_payload * protocol::MAX_UDP_FRAGMENTS)
+    } else {
+        advertised_frame_bytes
+    };
+    if max_frame_bytes <= protocol::HEADER_LEN {
+        return Err("Negotiated frame limit cannot contain a JPEG payload".to_string());
+    }
+    Ok(StreamTarget {
+        width,
+        height,
+        max_frame_bytes,
+    })
+}
+
 fn negotiate_stream(
     socket: &mut WebSocket<TcpStream>,
     requested_transport: &str,
-) -> Result<VideoSender, String> {
+) -> Result<(VideoSender, StreamTarget), String> {
     let hello = control_request(
         socket,
         json!({
@@ -946,13 +1071,11 @@ fn negotiate_stream(
     if hello.kind != "hello_ack" || hello.video_transport != requested_transport {
         return Err("Device did not confirm the requested video transport".to_string());
     }
+    let target = validate_stream_target(&hello, requested_transport)?;
     let sender = if requested_transport == "udp" {
         let parameters = hello
             .udp
             .ok_or_else(|| "Device did not provide UDP session parameters".to_string())?;
-        if parameters.max_payload == 0 || parameters.max_payload > 1200 {
-            return Err("Device provided an invalid UDP payload limit".to_string());
-        }
         let control = socket.get_ref();
         let local_ip = control
             .local_addr()
@@ -999,7 +1122,7 @@ fn negotiate_stream(
     if started.kind != "stream_started" || started.video_transport != requested_transport {
         return Err("Device did not start the requested video transport".to_string());
     }
-    Ok(sender)
+    Ok((sender, target))
 }
 
 fn parse_http_response(response: &[u8]) -> Result<Option<(usize, usize)>, String> {
@@ -1169,6 +1292,7 @@ fn udp_sender_stats(sender: &VideoSender) -> (u64, u64) {
 fn run_stream(
     app: AppHandle,
     config: StreamConfig,
+    target: StreamTarget,
     stop: Arc<AtomicBool>,
     live: Arc<LiveParams>,
     mut socket: WebSocket<TcpStream>,
@@ -1180,7 +1304,7 @@ fn run_stream(
     live.fps.store(fps, Ordering::Relaxed);
     live.quality.store(jpeg_quality, Ordering::Relaxed);
     let mut frame_interval = Duration::from_millis(1000 / u64::from(fps));
-    /* Start each encode near the last quality that fit the 100 KiB limit
+    /* Start each encode near the last quality that fit the negotiated limit
     instead of re-walking the ladder from the user setting every frame. */
     let mut adaptive_quality = jpeg_quality;
     let mut dropped_frames = 0_u32;
@@ -1195,7 +1319,7 @@ fn run_stream(
         None
     };
     let mut sequence = 0_u32;
-    let capture = match open_capture_session(&app, &config, stop.clone()) {
+    let capture = match open_capture_session(&app, &config, stop.clone(), &target) {
         Ok(capture) => capture,
         Err(error) => {
             emit(&app, "error", error, 0, 0, 0, video_transport);
@@ -1238,9 +1362,9 @@ fn run_stream(
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
     let encode_started = Instant::now();
     let (frame, jpeg_bytes, first_fingerprint): (Vec<u8>, usize, u32) =
-        match prepare_image(image, &capture, &config).and_then(|prepared| {
+        match prepare_image(image, &capture, &config, &target).and_then(|prepared| {
             let fingerprint = image_fingerprint(&prepared);
-            encode_prepared_frame(&prepared, adaptive_quality, sequence).map(
+            encode_prepared_frame(&prepared, adaptive_quality, sequence, &target).map(
                 |(frame, jpeg_bytes, used_quality)| (frame, jpeg_bytes, used_quality, fingerprint),
             )
         }) {
@@ -1357,7 +1481,8 @@ fn run_stream(
         }
         if let Some(heartbeat) = heartbeat.as_mut() {
             if let Err(reason) = service_udp_control(&mut socket, heartbeat) {
-                match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames) {
+                match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames, &target)
+                {
                     Ok((new_socket, new_sender)) => {
                         socket = new_socket;
                         sender = new_sender;
@@ -1391,10 +1516,10 @@ fn run_stream(
         };
         let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
         let encode_started = Instant::now();
-        /* Fingerprint the already cropped/scaled 368x448 image exactly once
+        /* Fingerprint the already cropped/scaled target image exactly once
         per captured frame; a raw desktop-sized hash costs far more. */
         let prepared = match image {
-            Some(image) => match prepare_image(image, &capture, &config) {
+            Some(image) => match prepare_image(image, &capture, &config, &target) {
                 Ok(prepared) => {
                     let fingerprint = image_fingerprint(&prepared);
                     (fingerprint != last_fingerprint).then_some((prepared, fingerprint))
@@ -1418,7 +1543,7 @@ fn run_stream(
         let static_frame = prepared.is_none();
         let (frame, jpeg_bytes): (Vec<u8>, usize) = match prepared {
             Some((prepared, fingerprint)) => {
-                match encode_prepared_frame(&prepared, adaptive_quality, sequence) {
+                match encode_prepared_frame(&prepared, adaptive_quality, sequence, &target) {
                     Ok((frame, jpeg_bytes, used_quality)) => {
                         adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
                         cached_frame = frame.clone();
@@ -1457,7 +1582,7 @@ fn run_stream(
         emit_preview(&app, &frame, &mut last_preview);
         if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
             if matches!(sender, VideoSender::Udp { .. }) {
-                match reconnect_udp_control(&app, &config, &stop, &error, dropped_frames) {
+                match reconnect_udp_control(&app, &config, &stop, &error, dropped_frames, &target) {
                     Ok((new_socket, new_sender)) => {
                         socket = new_socket;
                         sender = new_sender;
@@ -1575,7 +1700,7 @@ fn start_wifi_stream(
     app: AppHandle,
     mut config: StreamConfig,
     state: State<'_, StreamState>,
-) -> Result<(), String> {
+) -> Result<StreamTarget, String> {
     config.endpoint = config.endpoint.trim().to_owned();
     config.token = config.token.trim().to_owned();
     config.video_transport = config.video_transport.trim().to_ascii_lowercase();
@@ -1653,7 +1778,11 @@ fn start_wifi_stream(
         0,
         &config.video_transport,
     );
-    let sender = negotiate_stream(&mut socket, &config.video_transport)?;
+    let (sender, target) = negotiate_stream(&mut socket, &config.video_transport)?;
+    if let Err(error) = ensure_status_dimensions(device.width, device.height, &target) {
+        close_device_stream(&mut socket);
+        return Err(error);
+    }
     let mut guard = state.stop.lock().map_err(|_| "stream state unavailable")?;
     if let Some(error) = active_stream_error(guard.as_ref()) {
         close_device_stream(&mut socket);
@@ -1667,8 +1796,9 @@ fn start_wifi_stream(
     let final_app = app.clone();
     let final_transport = config.video_transport.clone();
     let final_stop = stop.clone();
+    let stream_target = target.clone();
     thread::spawn(move || {
-        let dropped_frames = run_stream(app, config, stop, live, socket, sender);
+        let dropped_frames = run_stream(app, config, stream_target, stop, live, socket, sender);
         if let Ok(mut active) = controller.lock() {
             *active = None;
         }
@@ -1684,7 +1814,7 @@ fn start_wifi_stream(
             );
         }
     });
-    Ok(())
+    Ok(target)
 }
 
 #[tauri::command]
@@ -1762,8 +1892,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        active_stream_error, base64_encode, build_frame, encode_jpeg, parse_http_response,
-        replay_frame, static_color_bars, DisplayOrientation, StreamConfig,
+        active_stream_error, base64_encode, build_frame, encode_jpeg, ensure_reconnect_target,
+        ensure_status_dimensions, parse_http_response, replay_frame, static_color_bars,
+        validate_stream_target, ControlReply, DisplayOrientation, StreamConfig, StreamTarget,
+        UdpParameters,
     };
     use crate::protocol;
 
@@ -1784,14 +1916,27 @@ mod tests {
         }
     }
 
+    fn s3_target() -> StreamTarget {
+        StreamTarget {
+            width: 368,
+            height: 448,
+            max_frame_bytes: 100 * 1024 + protocol::HEADER_LEN,
+        }
+    }
+
+    fn p4_target() -> StreamTarget {
+        StreamTarget {
+            width: 1024,
+            height: 600,
+            max_frame_bytes: 512 * 1024,
+        }
+    }
+
     #[test]
     fn static_color_bars_use_full_device_canvas() {
-        let image =
-            static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)).to_rgb8();
-        assert_eq!(
-            image.dimensions(),
-            (u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT))
-        );
+        let target = p4_target();
+        let image = static_color_bars(u32::from(target.width), u32::from(target.height)).to_rgb8();
+        assert_eq!(image.dimensions(), (1024, 600));
         let expected = [
             [255, 255, 255],
             [255, 255, 0],
@@ -1810,14 +1955,16 @@ mod tests {
 
     #[test]
     fn static_color_bars_build_a_valid_cdp1_jpeg_frame() {
+        let target = s3_target();
         let (frame, jpeg_bytes) = build_frame(
-            static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)),
+            static_color_bars(u32::from(target.width), u32::from(target.height)),
             &test_config(),
             42,
+            &target,
         )
         .unwrap();
         assert_eq!(jpeg_bytes, frame.len() - protocol::HEADER_LEN);
-        assert!(jpeg_bytes <= protocol::MAX_JPEG_BYTES);
+        assert!(jpeg_bytes <= target.max_jpeg_bytes());
         assert_eq!(&frame[..4], b"CDP1");
         assert_eq!(u32::from_le_bytes(frame[8..12].try_into().unwrap()), 42);
         assert_eq!(
@@ -1828,6 +1975,7 @@ mod tests {
 
     #[test]
     fn all_orientations_keep_the_native_wire_dimensions() {
+        let target = p4_target();
         for orientation in [
             DisplayOrientation::Portrait,
             DisplayOrientation::LandscapeLeft,
@@ -1837,28 +1985,33 @@ mod tests {
             let mut config = test_config();
             config.display_orientation = orientation;
             let (logical_width, logical_height) =
-                orientation.logical_size(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT));
-            let (frame, _) =
-                build_frame(static_color_bars(logical_width, logical_height), &config, 7).unwrap();
+                orientation.logical_size(u32::from(target.width), u32::from(target.height));
+            let (frame, _) = build_frame(
+                static_color_bars(logical_width, logical_height),
+                &config,
+                7,
+                &target,
+            )
+            .unwrap();
             assert_eq!(
                 u16::from_le_bytes(frame[12..14].try_into().unwrap()),
-                protocol::WIDTH
+                target.width
             );
             assert_eq!(
                 u16::from_le_bytes(frame[14..16].try_into().unwrap()),
-                protocol::HEIGHT
+                target.height
             );
             let jpeg = image::load_from_memory(&frame[protocol::HEADER_LEN..]).unwrap();
             assert_eq!(
                 jpeg.dimensions(),
-                (u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT))
+                (u32::from(target.width), u32::from(target.height))
             );
         }
     }
 
     #[test]
     fn replays_cached_frame_with_a_new_sequence() {
-        let frame = protocol::encode_frame(4, &[1, 2, 3, 4]).unwrap();
+        let frame = protocol::encode_frame(4, 368, 448, 16, &[1, 2, 3, 4]).unwrap();
         let replay = replay_frame(&frame, 9).unwrap();
         assert_eq!(u32::from_le_bytes(replay[8..12].try_into().unwrap()), 9);
         assert_eq!(&replay[..8], &frame[..8]);
@@ -1907,14 +2060,69 @@ mod tests {
 
     #[test]
     fn encode_jpeg_reports_the_quality_that_fit() {
+        let target = s3_target();
         let (jpeg, used_quality) = encode_jpeg(
-            &static_color_bars(u32::from(protocol::WIDTH), u32::from(protocol::HEIGHT)),
+            &static_color_bars(u32::from(target.width), u32::from(target.height)),
             80,
+            target.max_jpeg_bytes(),
         )
         .unwrap();
         assert!(!jpeg.is_empty());
-        assert!(jpeg.len() <= protocol::MAX_JPEG_BYTES);
+        assert!(jpeg.len() <= target.max_jpeg_bytes());
         assert!((30..=80).contains(&used_quality));
+    }
+
+    fn hello_reply(width: u16, height: u16, max_frame_bytes: usize) -> ControlReply {
+        ControlReply {
+            kind: "hello_ack".into(),
+            request_id: "hello-1".into(),
+            code: String::new(),
+            video_transport: "tcp".into(),
+            width: Some(width),
+            height: Some(height),
+            max_frame_bytes: Some(max_frame_bytes),
+            udp: None,
+        }
+    }
+
+    #[test]
+    fn validates_dynamic_tcp_and_udp_targets() {
+        let tcp = hello_reply(1024, 600, 512 * 1024);
+        assert_eq!(validate_stream_target(&tcp, "tcp").unwrap(), p4_target());
+
+        let mut udp = hello_reply(1024, 600, 512 * 1024);
+        udp.video_transport = "udp".into();
+        udp.udp = Some(UdpParameters {
+            port: 5000,
+            session_id: 1,
+            session_token: 2,
+            max_payload: 1200,
+        });
+        assert_eq!(
+            validate_stream_target(&udp, "udp").unwrap().max_frame_bytes,
+            1200 * protocol::MAX_UDP_FRAGMENTS
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_or_incomplete_targets() {
+        assert!(validate_stream_target(&hello_reply(0, 600, 1024), "tcp").is_err());
+        assert!(validate_stream_target(&hello_reply(4096, 4096, 1024), "tcp").is_err());
+        assert!(
+            validate_stream_target(&hello_reply(1024, 600, protocol::HEADER_LEN), "tcp").is_err()
+        );
+        let mut missing = hello_reply(1024, 600, 1024);
+        missing.width = None;
+        assert!(validate_stream_target(&missing, "tcp").is_err());
+    }
+
+    #[test]
+    fn rejects_status_and_reconnect_target_changes() {
+        let target = p4_target();
+        assert!(ensure_status_dimensions(1024, 600, &target).is_ok());
+        assert!(ensure_status_dimensions(368, 448, &target).is_err());
+        assert!(ensure_reconnect_target(&target, &target).is_ok());
+        assert!(ensure_reconnect_target(&target, &s3_target()).is_err());
     }
 
     #[test]

@@ -35,7 +35,7 @@
 
 ## 与 Companion Display 的关系
 
-`esp32s3/companion_display` 是针对单块 AMOLED 屏的既有协议 v2 工程，使用 WebSocket、JPEG 和私有 UDP 分片。WDP 是独立的新协议，不继承其版本号、帧结构或兼容承诺。旧工程继续独立维护；只有在 WDP 的 ESP 能力档通过实机验证后，才评估迁移或并行支持。
+`companion_display/firmware/esp32s3` 是针对单块 AMOLED 屏的既有协议 v2 固件，使用 WebSocket、JPEG 和私有 UDP 分片。WDP 是独立的新协议，不继承其版本号、帧结构或兼容承诺。旧工程继续独立维护；只有在 WDP 的 ESP 能力档通过实机验证后，才评估迁移或并行支持。
 
 ## 非目标
 

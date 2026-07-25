@@ -3,10 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useStreamStore } from "../stores/stream";
 import { useLocaleStore } from "../stores/locale";
 import { useSettingsStore } from "../stores/settings";
+import { useDeviceStore } from "../stores/device";
 
 const stream = useStreamStore();
 const locale = useLocaleStore();
 const settings = useSettingsStore();
+const device = useDeviceStore();
 const stage = ref<HTMLElement | null>(null);
 const availableWidth = ref(0);
 const availableHeight = ref(0);
@@ -14,7 +16,13 @@ const availableHeight = ref(0);
 const landscape = computed(
   () => settings.displayOrientation === "landscape_left" || settings.displayOrientation === "landscape_right",
 );
-const previewAspect = computed(() => (landscape.value ? 448 / 368 : 368 / 448));
+const physicalWidth = computed(() => stream.target?.width ?? device.info?.width ?? 368);
+const physicalHeight = computed(() => stream.target?.height ?? device.info?.height ?? 448);
+const previewAspect = computed(() =>
+  landscape.value
+    ? physicalHeight.value / physicalWidth.value
+    : physicalWidth.value / physicalHeight.value,
+);
 const frameStyle = computed(() => {
   const width = availableWidth.value;
   const height = availableHeight.value;

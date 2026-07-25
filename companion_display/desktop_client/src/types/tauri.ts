@@ -25,6 +25,12 @@ export type StreamEvent = {
   deviceReplacedFrames: number;
 };
 
+export type StreamTarget = {
+  width: number;
+  height: number;
+  maxFrameBytes: number;
+};
+
 export type UdpDiagnostics = {
   rxPackets: number;
   acceptedFragments: number;

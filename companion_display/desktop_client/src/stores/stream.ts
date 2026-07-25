@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { StreamEvent } from "../types/tauri";
+import type { StreamEvent, StreamTarget } from "../types/tauri";
 import { useSettingsStore } from "./settings";
 import { streamStateKey, useLocaleStore } from "./locale";
 
@@ -55,6 +55,7 @@ export const useStreamStore = defineStore("stream", () => {
 
   const previewSrc = ref<string>("");
   const previewReady = ref(false);
+  const target = ref<StreamTarget | null>(null);
 
   const streamStarting = ref(false);
   const stoppingStatusPollActive = ref(false);
@@ -99,6 +100,10 @@ export const useStreamStore = defineStore("stream", () => {
   function clearPreview() {
     previewSrc.value = "";
     previewReady.value = false;
+  }
+
+  function setTarget(value: StreamTarget | null) {
+    target.value = value;
   }
 
   function clearMetrics() {
@@ -188,6 +193,7 @@ export const useStreamStore = defineStore("stream", () => {
     metrics,
     previewSrc,
     previewReady,
+    target,
     streamStarting,
     stoppingStatusPollActive,
     refreshSourcesDone,
@@ -200,6 +206,7 @@ export const useStreamStore = defineStore("stream", () => {
     encodeSlow,
     deviceSlow,
     clearPreview,
+    setTarget,
     clearMetrics,
     applyMetrics,
     applyStreamStatus,

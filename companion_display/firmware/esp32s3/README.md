@@ -1,19 +1,19 @@
-# Companion Display
+# Companion Display ESP32-S3 固件
 
 `companion_display` 将 Waveshare ESP32-S3-Touch-AMOLED-1.8 用作桌面伴侣显示屏。PC 客户端采集桌面、窗口或裁剪区域，将画面压缩为 JPEG 后通过局域网发送给设备。它不是操作系统扩展显示器，不需要安装虚拟显示驱动。
 
-项目由两部分组成：
+端到端系统由设备工程和仓库公共客户端组成：
 
 - 设备端：ESP-IDF 固件，负责配网、鉴权、控制会话、视频接收、JPEG 解码和 AMOLED 显示。
-- PC 端：Tauri 2 + Vue 3 客户端，负责画面采集、裁剪缩放、JPEG 编码、发送、预览和诊断。
+- PC 端：位于本产品工程 `desktop_client` 的公共 Tauri 2 + Vue 3 客户端，可供后续 S3/P4 设备共同使用。
 
 控制通道始终使用 WebSocket/TCP。视频可选择 TCP 或 UDP：TCP 模式可靠、适合首次联调；UDP 模式允许丢弃不完整帧，以换取更低延迟。两端都采用“最新画面优先”策略，处理不过来时替换旧帧，不持续累积延迟。
 
 ## 文档导航
 
 - [设备端实现](docs/device.md)：固件构建、板级驱动、显示、帧管线、配网、控制会话和设备诊断。
-- [PC 端实现](docs/pc-client.md)：客户端构建、界面状态、画面采集、编码、传输、重连和性能诊断。
-- [通信协议 v2](PROTOCOL.md)：HTTP 接口、WebSocket 控制消息、`CDP1` 完整帧和 `CDU1` UDP 分片。
+- [PC 端实现](../../docs/pc-client.md)：客户端构建、界面状态、画面采集、编码、传输、重连和性能诊断。
+- [通信协议 v2](../../PROTOCOL.md)：S3/P4 公共 HTTP 接口、WebSocket 控制消息、`CDP1` 完整帧和 `CDU1` UDP 分片。
 - [显示颜色格式](docs/display-color-format.md)：SH8601 RGB565 字节序和颜色常量约束。
 
 ## 端到端数据流
@@ -71,7 +71,7 @@ sudo apt install build-essential pkg-config curl clang libclang-dev \
 安装 Node.js、npm 和 Rust stable 后执行：
 
 ```bash
-cd tools/desktop_client
+cd ../../desktop_client
 npm ci
 npm run tauri:dev
 ```
@@ -84,7 +84,7 @@ npm run tauri:build
 
 客户端顶部提供中英文切换。首次启动时，系统语言以 `zh` 开头则使用中文，否则使用英文；手动选择会保存在本机并在后续启动时优先恢复。按钮、面板、常用状态、校验提示和操作日志会即时切换，PipeWire、网络和协议底层错误保留英文原文以便检索排障。
 
-主区设备预览会根据窗口剩余空间等比例缩放：竖屏保持 `368:448`，横屏保持 `448:368`，画面始终使用 contain 模式完整显示。窗口宽度小于约 1100px 时预览位于上方，参数面板和日志通过页面纵向滚动访问。默认最小窗口 `720×560` 是保证完整预览的支持下限。
+主区设备预览会根据窗口剩余空间等比例缩放，并使用设备协商尺寸计算竖屏或横屏比例；当前 S3 分别为 `368:448` 和 `448:368`。画面始终使用 contain 模式完整显示。窗口宽度小于约 1100px 时预览位于上方，参数面板和日志通过页面纵向滚动访问。默认最小窗口 `720×560` 是保证完整预览的支持下限。
 
 ### 4. 首次联调
 
@@ -94,7 +94,7 @@ npm run tauri:build
 4. 确认客户端预览和设备画面一致后点击 `Stop`。
 5. Linux 默认选择 `Portal`。首次投屏在系统对话框中选择屏幕或窗口；客户端会保存 Portal restore token，桌面后端支持时后续启停和客户端重启可直接恢复。实时画面推荐 UDP、25 FPS、JPEG 质量 70。
 
-`Display orientation` 按设备实际摆放方向提供四档：顶部朝上、顶部朝左、顶部朝下、顶部朝右。横放时 PC 使用 `448x368` 逻辑画布，再旋转为设备仍可接收的 `368x448` 帧；固件和协议尺寸不变。
+`Display orientation` 按设备实际摆放方向提供四档：顶部朝上、顶部朝左、顶部朝下、顶部朝右。当前 S3 横放时 PC 使用 `448x368` 逻辑画布，再旋转为设备接收的 `368x448` 帧；其他设备使用各自协商宽高执行相同处理。
 
 流运行期间可以修改 FPS 和 JPEG 质量，约 0.3 秒后生效。设备地址、配对码、采集来源、裁剪范围、显示方向和传输方式在流运行期间锁定，修改前需要先停止流。
 
@@ -111,11 +111,11 @@ npm run tauri:build
 
 ## 默认能力与限制
 
-- 固定输出尺寸：`368x448`。
+- 本 S3 固件协商输出尺寸为 `368x448`；公共客户端不固定设备尺寸。
 - PC 端支持四向设备摆放；横屏逻辑视图为 `448x368`，线上帧仍为 `368x448`。
 - PC 最大帧率：30 FPS；默认 25 FPS。
 - JPEG 质量范围：30～95；默认 70。
-- PC JPEG payload 上限：100 KiB。
+- 本 S3 固件 JPEG payload 上限为 100 KiB；公共客户端读取 `hello_ack.max_frame_bytes`。
 - 静态画面以 1 FPS 重发最后一次成功编码的 JPEG，维持设备会话活性。
 - 设备默认完整帧无数据超时为 10 秒；超时后释放传输并回到主信息界面。
 - 主区预览由 Rust 端限制为 1 FPS，与实际投屏帧率解耦。
@@ -130,4 +130,4 @@ npm run tauri:build
 - `Replaced` 增长表示系统主动跳过旧画面以维持低延迟，不等同于连接失败。
 - `Capture`、`Encode` 或 `Device` 持续接近当前帧间隔时，降低 FPS 或 JPEG 质量。
 - Linux 客户端窗口出现固定颜色杂块时确认使用当前版本；客户端会自动设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。
-- 详细状态含义和分端排障见[设备端实现](docs/device.md#诊断与排障)与[PC 端实现](docs/pc-client.md#性能与排障)。
+- 详细状态含义和分端排障见[设备端实现](docs/device.md#诊断与排障)与[PC 端实现](../../docs/pc-client.md#性能与排障)。

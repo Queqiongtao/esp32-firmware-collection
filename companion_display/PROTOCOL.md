@@ -1,10 +1,10 @@
 # Companion Display 通信协议 v2
 
-本文只定义线上接口、控制状态机和二进制格式。固件内部实现见[设备端实现](docs/device.md)，桌面采集与发送策略见[PC 端实现](docs/pc-client.md)，首次使用流程见 [README](README.md)。
+本文是 ESP32-S3、ESP32-P4 等设备共同遵循的 v2 线上契约，只定义接口、控制状态机和二进制格式。当前 S3 固件内部实现见 [S3 设备端实现](firmware/esp32s3/docs/device.md)，桌面采集与发送策略见 [PC 端实现](docs/pc-client.md)，工程入口见 [README](README.md)。
 
 ## 总览
 
-协议 v2 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。设备同时只支持一个控制会话和一个视频流。v2 与 v1 控制协商不兼容，PC 客户端和固件必须同步升级。
+协议 v2 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。当前 S3 设备同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v2 与 v1 控制协商不兼容，PC 客户端和固件必须同步升级。
 
 默认 HTTP/WebSocket 端口为 `80`，UDP 端口为 `5000`。所有多字节二进制字段均为小端序。当前只支持 IPv4 UDP 视频。
 
@@ -59,7 +59,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 {"type":"hello_ack","request_id":"hello-1","protocol_version":2,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":true,"text_input":true}}
 ```
 
-`width`、`height` 是目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。JPEG 上限来自固件配置 `CONFIG_COMPANION_FRAME_LIMIT_KB`（默认 100 KiB，因此 `max_frame_bytes` 默认为 `102424`）；当前 PC 客户端将 JPEG 固定上限为 100 KiB，不读取该字段动态调整。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。`capabilities` 中的 `touch`、`text_input`、`audio_capture` 仅为未来能力预留，v2 没有对应可用消息，也不启用触摸注入或麦克风采集。
+`width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。`capabilities` 中的 `touch`、`text_input`、`audio_capture` 仅为未来能力预留，v2 没有对应可用消息，也不启用触摸注入或麦克风采集。
 
 ### `start_stream` 与 `stop_stream`
 
@@ -123,8 +123,8 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 5 | `format` | u8 | `1`，JPEG |
 | 6 | `header_size` | u16 | `24` |
 | 8 | `sequence` | u32 | 发送端帧序号，可回绕 |
-| 12 | `width` | u16 | 目标宽度，当前为 `368` |
-| 14 | `height` | u16 | 目标高度，当前为 `448` |
+| 12 | `width` | u16 | 必须等于当前 `hello_ack.width`；S3 默认值为 `368` |
+| 14 | `height` | u16 | 必须等于当前 `hello_ack.height`；S3 默认值为 `448` |
 | 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`（默认固件配置下为 `102400`） |
 | 20 | `crc32` | u32 | JPEG payload 的 CRC-32 |
 
@@ -158,7 +158,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 画面静止或 Portal 暂时未提供新图像时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。设备将静态保活帧视为普通视频帧，保活帧同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
 
-控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。
+控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height` 和有效 `max_frame_bytes` 必须与原会话一致；发生变化时 PC 结束当前流，用户重新启动后再建立对应尺寸的采集管线。
 
 ## 最新帧策略与 `frame_presented`
 
