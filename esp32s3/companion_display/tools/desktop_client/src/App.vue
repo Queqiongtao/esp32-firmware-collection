@@ -82,11 +82,12 @@ function onTransportChange(v: string) {
 <style scoped>
 .app {
   width: min(1480px, 100%);
+  height: 100%;
   margin: 0 auto;
   padding: 20px 22px;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
   gap: 14px;
 }
 
@@ -99,8 +100,15 @@ function onTransportChange(v: string) {
 }
 
 @media (max-width: 1100px) {
+  .app {
+    height: auto;
+    min-height: 100vh;
+  }
+
   .workspace {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(220px, 55vh) auto;
+    flex: 0 0 auto;
   }
 }
 </style>

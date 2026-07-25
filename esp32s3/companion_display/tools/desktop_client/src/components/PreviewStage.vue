@@ -1,18 +1,60 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useStreamStore } from "../stores/stream";
 import { useLocaleStore } from "../stores/locale";
+import { useSettingsStore } from "../stores/settings";
 
 const stream = useStreamStore();
 const locale = useLocaleStore();
+const settings = useSettingsStore();
+const stage = ref<HTMLElement | null>(null);
+const availableWidth = ref(0);
+const availableHeight = ref(0);
+
+const landscape = computed(
+  () => settings.displayOrientation === "landscape_left" || settings.displayOrientation === "landscape_right",
+);
+const previewAspect = computed(() => (landscape.value ? 448 / 368 : 368 / 448));
+const frameStyle = computed(() => {
+  const width = availableWidth.value;
+  const height = availableHeight.value;
+  if (width <= 0 || height <= 0) return { width: "100%", height: "100%" };
+  const containerAspect = width / height;
+  const fittedWidth = containerAspect > previewAspect.value ? height * previewAspect.value : width;
+  const fittedHeight = containerAspect > previewAspect.value ? height : width / previewAspect.value;
+  return {
+    width: `${Math.max(1, Math.floor(fittedWidth))}px`,
+    height: `${Math.max(1, Math.floor(fittedHeight))}px`,
+  };
+});
 
 const empty = computed(() => !stream.previewReady);
 const limitHint = computed(() => stream.performanceLimited && stream.active);
+
+let observer: ResizeObserver | null = null;
+
+function measure() {
+  const element = stage.value;
+  if (!element) return;
+  availableWidth.value = element.clientWidth;
+  availableHeight.value = element.clientHeight;
+}
+
+onMounted(async () => {
+  await nextTick();
+  measure();
+  if (typeof ResizeObserver !== "undefined" && stage.value) {
+    observer = new ResizeObserver(measure);
+    observer.observe(stage.value);
+  }
+});
+
+onBeforeUnmount(() => observer?.disconnect());
 </script>
 
 <template>
-  <div class="stage">
-    <div class="frame">
+  <div ref="stage" class="stage">
+    <div class="frame" :style="frameStyle">
       <img v-if="!empty" :src="stream.previewSrc" :alt="locale.t('preview.alt')" />
       <div v-else class="placeholder">
         <div class="placeholder-title">{{ locale.t("preview.title") }}</div>
@@ -25,6 +67,7 @@ const limitHint = computed(() => stream.performanceLimited && stream.active);
 
 <style scoped>
 .stage {
+  width: 100%;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -35,9 +78,9 @@ const limitHint = computed(() => stream.performanceLimited && stream.active);
 
 .frame {
   position: relative;
-  width: 100%;
-  height: 100%;
-  min-height: 260px;
+  max-width: 100%;
+  max-height: 100%;
+  flex: 0 0 auto;
   border: 1px solid var(--cd-border);
   border-radius: var(--cd-radius);
   background: var(--cd-night);

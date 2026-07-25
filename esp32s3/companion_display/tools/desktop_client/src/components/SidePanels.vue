@@ -116,4 +116,10 @@ function forgetPortalSelection() {
   min-width: 0;
   overflow-y: auto;
 }
+
+@media (max-width: 1100px) {
+  .side {
+    overflow-y: visible;
+  }
+}
 </style>
