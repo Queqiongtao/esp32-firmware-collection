@@ -13,7 +13,7 @@ export const useDeviceStore = defineStore("device", () => {
   const rawError = ref("");
 
   const online = computed(() => info.value?.wifi === "connected" && info.value?.activeTransport === "none");
-  const protocolOk = computed(() => info.value?.protocolVersion === 2);
+  const protocolOk = computed(() => info.value?.protocolVersion === 3);
   const supportedTransports = computed(() => info.value?.videoTransports ?? []);
   const ackTotalMs = computed(() => {
     const p = info.value?.performance;
@@ -77,6 +77,14 @@ export const useDeviceStore = defineStore("device", () => {
       replaced: device.performance.replacedFrames,
     });
   });
+  const touch = computed(() => {
+    const device = info.value;
+    if (!device) return "--";
+    if (!device.touch) return locale.t("device.touch.unsupported");
+    return device.touchEventsActive
+      ? locale.t("device.touch.active")
+      : locale.t("device.touch.supported");
+  });
 
   function apply(device: DeviceStatus) {
     info.value = device;
@@ -110,6 +118,7 @@ export const useDeviceStore = defineStore("device", () => {
     wifi,
     screen,
     transport,
+    touch,
     connection,
     online,
     protocolOk,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NSelect, NInputNumber, NRadioButton, NRadioGroup } from "naive-ui";
+import { NButton, NSelect, NInputNumber, NRadioButton, NRadioGroup, NSwitch } from "naive-ui";
 import type { DisplayOrientation, ProjectionMode } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 import { computed } from "vue";
@@ -19,6 +19,7 @@ const props = defineProps<{
   projectionMode: ProjectionMode;
   active: boolean;
   regionBusy: boolean;
+  touchControl: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -30,6 +31,7 @@ const emit = defineEmits<{
   (e: "start"): void;
   (e: "stop"): void;
   (e: "update:projectionMode", v: ProjectionMode): void;
+  (e: "update:touchControl", v: boolean): void;
 }>();
 
 const transportOptions = computed(() => [
@@ -98,6 +100,14 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
         />
       </div>
     </div>
+    <div class="switch-row">
+      <label>{{ locale.t("stream.touchControl") }}</label>
+      <n-switch
+        :value="touchControl"
+        :disabled="locked"
+        @update:value="(v: boolean) => emit('update:touchControl', v)"
+      />
+    </div>
     <div class="actions">
       <n-button type="primary" attr-type="button" :loading="regionBusy" :disabled="startDisabled" @click="emit('start')">
         {{ locale.t(projectionMode === "region" ? (active ? "stream.reselectRegion" : "stream.regionStart") : "stream.start") }}
@@ -154,6 +164,19 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
 }
 
 .field label {
+  color: var(--cd-subtle);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.switch-row label {
   color: var(--cd-subtle);
   font-size: 12px;
   font-weight: 700;

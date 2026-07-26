@@ -14,6 +14,7 @@ export const useSettingsStore = defineStore("settings", () => {
   const videoTransport = ref("tcp");
   const displayOrientation = ref<DisplayOrientation>("portrait");
   const portalRestoreToken = ref("");
+  const touchControl = ref(false);
 
   const normalizedEndpoint = computed(() => {
     const trimmed = endpoint.value.trim();
@@ -44,6 +45,7 @@ export const useSettingsStore = defineStore("settings", () => {
           videoTransport: videoTransport.value,
           displayOrientation: displayOrientation.value,
           portalRestoreToken: portalRestoreToken.value,
+          touchControl: touchControl.value,
         }),
       );
     } catch {
@@ -78,6 +80,7 @@ export const useSettingsStore = defineStore("settings", () => {
         displayOrientation.value = saved.displayOrientation;
       }
       if (typeof saved.portalRestoreToken === "string") portalRestoreToken.value = saved.portalRestoreToken;
+      if (typeof saved.touchControl === "boolean") touchControl.value = saved.touchControl;
     } catch {
       /* ignore */
     }
@@ -86,9 +89,15 @@ export const useSettingsStore = defineStore("settings", () => {
   }
 
   watch(
-    [endpoint, token, projectionMode, fps, quality, videoTransport, displayOrientation, portalRestoreToken],
+    [endpoint, token, projectionMode, fps, quality, videoTransport, displayOrientation, portalRestoreToken, touchControl],
     () => save(),
   );
+
+  /* On Linux the touch switch changes the portal session type (ScreenCast vs
+  RemoteDesktop); their restore tokens are not interchangeable. */
+  watch(touchControl, () => {
+    portalRestoreToken.value = "";
+  });
 
   return {
     endpoint,
@@ -100,6 +109,7 @@ export const useSettingsStore = defineStore("settings", () => {
     videoTransport,
     displayOrientation,
     portalRestoreToken,
+    touchControl,
     normalizedEndpoint,
     normalizeEndpointInPlace,
     sanitizeToken,

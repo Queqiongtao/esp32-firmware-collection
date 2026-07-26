@@ -43,7 +43,7 @@ export function useStreamLifecycle() {
     if (settings.token.length !== 6) return locale.t("validation.token");
     if (!settings.sourceId) return locale.t("validation.source");
     if (settings.projectionMode === "region" && settings.sourceId === "test:color-bars") return locale.t("validation.regionSource");
-    if (device.info && device.info.protocolVersion !== 2) return locale.t("validation.protocol");
+    if (device.info && device.info.protocolVersion !== 3) return locale.t("validation.protocol");
     const supported = device.supportedTransports;
     if (supported.length && !supported.includes(settings.videoTransport)) {
       return locale.t("validation.transport", { transport: settings.videoTransport.toUpperCase() });
@@ -183,6 +183,7 @@ export function useStreamLifecycle() {
       portalRestoreToken: settings.portalRestoreToken || undefined,
       projectionMode: settings.projectionMode,
       selectionId,
+      touchControl: settings.touchControl,
     };
   }
 

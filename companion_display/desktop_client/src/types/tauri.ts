@@ -77,6 +77,8 @@ export type DeviceStatus = {
   tokenSet: boolean;
   protocolVersion: number;
   videoTransports: string[];
+  touch: boolean;
+  touchEventsActive: boolean;
   droppedFrames: number;
   performance: Performance;
   udp: UdpDiagnostics;
@@ -97,6 +99,7 @@ export type StreamConfig = {
   portalRestoreToken?: string;
   projectionMode: ProjectionMode;
   selectionId?: string;
+  touchControl: boolean;
 };
 
 export type LogTone = "normal" | "good" | "warn" | "bad";

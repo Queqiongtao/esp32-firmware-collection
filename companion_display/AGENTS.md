@@ -2,7 +2,7 @@
 
 ## 工程边界
 
-- 本目录是 Companion Display v2 的产品工程容器，不是统一构建根；桌面客户端和各芯片固件分别使用自己的构建入口。
+- 本目录是 Companion Display v3 的产品工程容器，不是统一构建根；桌面客户端和各芯片固件分别使用自己的构建入口。
 - `PROTOCOL.md` 和 `desktop_client/` 必须保持硬件无关，不得依赖 `firmware/` 内部源码与构建产物。
 - 设备差异必须通过 `hello_ack` 和 `/api/status` 的协商字段表达，不得在客户端写死某块板卡的尺寸或帧上限。
 - 本目录不属于 WDP/WebRTC；不得引入 `wireless_display` 的消息或版本号。

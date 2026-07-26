@@ -1,25 +1,25 @@
 # Companion Display
 
-本目录统一保存 Companion Display v2 的公共协议、PC 客户端和设备固件。各端通过相同协议协作，但保留独立构建入口；公共客户端不得依赖某个设备工程的源码、构建产物或固定屏幕尺寸。
+本目录统一保存 Companion Display v3 的公共协议、PC 客户端和设备固件。各端通过相同协议协作，但保留独立构建入口；公共客户端不得依赖某个设备工程的源码、构建产物或固定屏幕尺寸。
 
 ## 目录
 
-- `PROTOCOL.md`：Companion Display v2 线上协议的权威定义。
+- `PROTOCOL.md`：Companion Display v3 线上协议的权威定义。
 - `docs/pc-client.md`：PC 客户端架构、数据流和排障说明。
 - `desktop_client/`：Tauri 2 + Vue 3 桌面客户端。
 - `firmware/esp32s3/`：当前 Waveshare ESP32-S3-Touch-AMOLED-1.8 设备固件。
 
-WDP/WebRTC 位于仓库顶层 `wireless_display/`，它与本目录的 WebSocket/JPEG/UDP v2 协议相互独立，不共享版本号或兼容承诺。
+WDP/WebRTC 位于仓库顶层 `wireless_display/`，它与本目录的 WebSocket/JPEG/UDP v3 协议相互独立，不共享版本号或兼容承诺。
 
 ## 设备适配要求
 
-兼容设备必须实现 `PROTOCOL.md` 定义的 `/api/status`、WebSocket 控制通道、`CDP1` 完整帧，以及所声明的 TCP/UDP 视频通道。设备通过 `hello_ack.width`、`height` 和 `max_frame_bytes` 声明当前会话目标，客户端据此完成采集缩放、方向处理和 JPEG 限流。
+兼容设备必须实现 `PROTOCOL.md` 定义的 `/api/status`、WebSocket 控制通道、`CDP1` 完整帧，以及所声明的 TCP/UDP 视频通道。设备通过 `hello_ack.width`、`height` 和 `max_frame_bytes` 声明当前会话目标，客户端据此完成采集缩放、方向处理和 JPEG 限流。带触摸屏的设备可以在协商后经 `touch_events` 上报原始触摸事件，由客户端完成手势识别与鼠标注入。
 
 当前 ESP32-S3 实现位于 `firmware/esp32s3`，默认协商 `368x448` 和约 100 KiB JPEG。后续 ESP32-P4 实现放入 `firmware/esp32p4`，可以协商不同尺寸和帧上限，无需复制或修改 PC 客户端；P4 工程在实际适配开始时创建，本次不放置空目录。
 
 ## PC 客户端
 
-客户端提供“实时投屏”和“区域投屏”两种模式。区域投屏先取得屏幕或窗口的冻结预览，用户鼠标框选后持续实时采集该区域；Linux 自动恢复上次来源时，可在全屏框选层直接更换屏幕或窗口。运行中可以重新框选，取消不会改变当前区域，点击 Stop 后设备恢复主页。
+客户端提供“实时投屏”和“区域投屏”两种模式。区域投屏先取得屏幕或窗口的冻结预览，用户鼠标框选后持续实时采集该区域；Linux 自动恢复上次来源时，可在全屏框选层直接更换屏幕或窗口。运行中可以重新框选，取消不会改变当前区域，点击 Stop 后设备恢复主页。开启“触摸控制”后，投屏期间在设备屏幕上单击、拖拽、长按（右键）和右缘滑动（滚轮）会反向操控 PC 鼠标，详见 [PC 客户端实现](docs/pc-client.md)。
 
 Ubuntu/Debian 首次构建需要安装 Tauri、WebKitGTK 和 PipeWire 依赖，然后执行：
 

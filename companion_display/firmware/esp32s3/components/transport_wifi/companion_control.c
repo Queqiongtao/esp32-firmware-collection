@@ -60,6 +60,21 @@ static bool parse_json_int(const char **cursor, const char *end, int *value)
     return true;
 }
 
+static bool parse_json_bool(const char **cursor, const char *end, bool *value)
+{
+    if (end - *cursor >= 4 && strncmp(*cursor, "true", 4) == 0) {
+        *cursor += 4;
+        *value = true;
+        return true;
+    }
+    if (end - *cursor >= 5 && strncmp(*cursor, "false", 5) == 0) {
+        *cursor += 5;
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
 static bool skip_json_string(const char **cursor, const char *end)
 {
     if (*cursor >= end || **cursor != '"') {
@@ -124,6 +139,50 @@ static bool skip_json_value(const char **cursor, const char *end)
     return true;
 }
 
+static bool parse_features_object(const char **cursor, const char *end,
+                                  companion_control_message_t *message)
+{
+    skip_ws(cursor, end);
+    if (*cursor >= end || **cursor != '{') {
+        return false;
+    }
+    (*cursor)++;
+    while (true) {
+        char key[24] = {};
+        skip_ws(cursor, end);
+        if (*cursor < end && **cursor == '}') {
+            (*cursor)++;
+            return true;
+        }
+        if (!parse_json_string(cursor, end, key, sizeof(key))) {
+            return false;
+        }
+        skip_ws(cursor, end);
+        if (*cursor >= end || **cursor != ':') {
+            return false;
+        }
+        (*cursor)++;
+        skip_ws(cursor, end);
+        if (strcmp(key, "touch_events") == 0) {
+            if (!parse_json_bool(cursor, end, &message->touch_subscribe)) {
+                return false;
+            }
+        } else if (!skip_json_value(cursor, end)) {
+            return false;
+        }
+        skip_ws(cursor, end);
+        if (*cursor < end && **cursor == ',') {
+            (*cursor)++;
+            continue;
+        }
+        if (*cursor < end && **cursor == '}') {
+            (*cursor)++;
+            return true;
+        }
+        return false;
+    }
+}
+
 bool companion_control_parse(const char *json, size_t length,
                              companion_control_message_t *message)
 {
@@ -178,6 +237,10 @@ bool companion_control_parse(const char *json, size_t length,
             if (!parse_json_string(&cursor, end, parsed.video_transport, sizeof(parsed.video_transport))) {
                 return false;
             }
+        } else if (strcmp(key, "features") == 0) {
+            if (!parse_features_object(&cursor, end, &parsed)) {
+                return false;
+            }
         } else {
             if (!skip_json_value(&cursor, end)) {
                 return false;
@@ -227,22 +290,28 @@ int companion_control_build_hello_ack(char *buffer, size_t buffer_size,
                                       uint16_t udp_port,
                                       uint32_t session_id,
                                       uint32_t session_token,
-                                      uint16_t udp_max_payload)
+                                      uint16_t udp_max_payload,
+                                      bool touch_enabled)
 {
+    const char *touch = touch_enabled ? "true" : "false";
     if (strcmp(video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0) {
         return snprintf(buffer, buffer_size,
-                        "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":true,\"audio_capture\":true,\"text_input\":true}}",
+                        "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false},\"touch\":{\"width\":%d,\"height\":%d,\"max_move_hz\":%d}}",
                         request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
                         COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                         (unsigned)max_frame_bytes, udp_port,
                         (unsigned long)session_id, (unsigned long)session_token,
-                        udp_max_payload);
+                        udp_max_payload, touch,
+                        COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
+                        COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
     }
     return snprintf(buffer, buffer_size,
-                    "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"tcp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":true,\"audio_capture\":true,\"text_input\":true}}",
+                    "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"tcp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false},\"touch\":{\"width\":%d,\"height\":%d,\"max_move_hz\":%d}}",
                     request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
                     COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
-                    (unsigned)max_frame_bytes);
+                    (unsigned)max_frame_bytes, touch,
+                    COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
+                    COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
 }
 
 int companion_control_build_stream_started(char *buffer, size_t buffer_size,
@@ -293,6 +362,42 @@ int companion_control_build_frame_presented(char *buffer, size_t buffer_size,
                     (unsigned long)frame->replaced_frames);
 }
 
+int companion_control_build_touch_events(char *buffer, size_t buffer_size,
+                                         uint32_t seq,
+                                         const touch_input_event_t *events,
+                                         size_t count)
+{
+    if (events == NULL || count == 0 || count > TOUCH_INPUT_MAX_BATCH) {
+        return -1;
+    }
+    static const char *kind_names[] = {"down", "move", "up"};
+    int written = snprintf(buffer, buffer_size,
+                           "{\"type\":\"touch_events\",\"seq\":%lu,\"events\":[",
+                           (unsigned long)seq);
+    if (written < 0 || (size_t)written >= buffer_size) {
+        return -1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        if (events[i].kind > TOUCH_INPUT_EVENT_UP) {
+            return -1;
+        }
+        int piece = snprintf(buffer + written, buffer_size - (size_t)written,
+                             "%s{\"kind\":\"%s\",\"x\":%u,\"y\":%u,\"t\":%lu}",
+                             i > 0 ? "," : "", kind_names[events[i].kind],
+                             events[i].x, events[i].y,
+                             (unsigned long)events[i].t_ms);
+        if (piece < 0 || (size_t)(written + piece) >= buffer_size) {
+            return -1;
+        }
+        written += piece;
+    }
+    int tail = snprintf(buffer + written, buffer_size - (size_t)written, "]}");
+    if (tail < 0 || (size_t)(written + tail) >= buffer_size) {
+        return -1;
+    }
+    return written + tail;
+}
+
 int companion_control_build_status(char *buffer, size_t buffer_size,
                                    const companion_status_snapshot_t *snapshot)
 {
@@ -300,12 +405,14 @@ int companion_control_build_status(char *buffer, size_t buffer_size,
         return -1;
     }
     return snprintf(buffer, buffer_size,
-                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":true,\"audio_capture\":true,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"lastReject\":\"%s\"}}",
+                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":%s,\"touch_events_active\":%s,\"audio_capture\":false,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"lastReject\":\"%s\"}}",
                     COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                     snapshot->wifi != NULL ? snapshot->wifi : "",
                     snapshot->ipv4 != NULL ? snapshot->ipv4 : "",
                     snapshot->active_transport != NULL ? snapshot->active_transport : "none",
                     COMPANION_CONTROL_PROTOCOL_VERSION,
+                    snapshot->touch_hw ? "true" : "false",
+                    snapshot->touch_events_active ? "true" : "false",
                     (unsigned long)snapshot->dropped_frames,
                     (unsigned long)snapshot->performance.sequence,
                     (unsigned long)snapshot->performance.queue_wait_us,

@@ -34,6 +34,23 @@ impl DisplayOrientation {
         }
     }
 
+    /* Inverse of map_logical_to_physical: turns a device panel coordinate back
+    into the pre-rotation logical canvas, e.g. for touch events. */
+    pub fn map_physical_to_logical(
+        self,
+        x: u32,
+        y: u32,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> (u32, u32) {
+        match self {
+            Self::Portrait => (x, y),
+            Self::LandscapeLeft => (y, physical_width - 1 - x),
+            Self::PortraitInverted => (physical_width - 1 - x, physical_height - 1 - y),
+            Self::LandscapeRight => (physical_height - 1 - y, x),
+        }
+    }
+
     pub fn orient_logical_image(self, image: &RgbImage) -> RgbImage {
         match self {
             Self::Portrait => image.clone(),
@@ -87,6 +104,38 @@ mod tests {
             DisplayOrientation::LandscapeRight.map_logical_to_physical(0, 0, 3, 4),
             (0, 3)
         );
+    }
+
+    #[test]
+    fn physical_mapping_round_trips_for_every_orientation() {
+        let orientations = [
+            DisplayOrientation::Portrait,
+            DisplayOrientation::LandscapeLeft,
+            DisplayOrientation::PortraitInverted,
+            DisplayOrientation::LandscapeRight,
+        ];
+        let (physical_width, physical_height) = (3, 4);
+        for orientation in orientations {
+            let (logical_width, logical_height) =
+                orientation.logical_size(physical_width, physical_height);
+            for x in 0..logical_width {
+                for y in 0..logical_height {
+                    let (px, py) =
+                        orientation.map_logical_to_physical(x, y, physical_width, physical_height);
+                    assert!(px < physical_width && py < physical_height);
+                    assert_eq!(
+                        orientation.map_physical_to_logical(
+                            px,
+                            py,
+                            physical_width,
+                            physical_height
+                        ),
+                        (x, y),
+                        "{orientation:?} ({x},{y})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

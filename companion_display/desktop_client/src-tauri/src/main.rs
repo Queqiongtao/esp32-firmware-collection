@@ -1,5 +1,8 @@
+mod inject;
 mod orientation;
 mod protocol;
+mod touch;
+mod touch_mapping;
 #[cfg(target_os = "linux")]
 mod wayland_capture;
 
@@ -52,6 +55,8 @@ struct StreamConfig {
     projection_mode: ProjectionMode,
     #[serde(default)]
     selection_id: Option<String>,
+    #[serde(default)]
+    touch_control: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -111,6 +116,10 @@ struct DeviceStatus {
     protocol_version: u8,
     #[serde(rename = "videoTransports", alias = "video_transports", default)]
     video_transports: Vec<String>,
+    #[serde(default)]
+    touch: bool,
+    #[serde(rename = "touchEventsActive", alias = "touch_events_active", default)]
+    touch_events_active: bool,
     #[serde(rename = "droppedFrames", alias = "dropped_frames", default)]
     dropped_frames: u32,
     #[serde(default)]
@@ -166,6 +175,12 @@ struct UdpParameters {
     max_payload: usize,
 }
 
+#[derive(Default, Deserialize)]
+struct HelloCapabilities {
+    #[serde(default)]
+    touch: bool,
+}
+
 #[derive(Deserialize)]
 struct ControlReply {
     #[serde(rename = "type")]
@@ -182,6 +197,8 @@ struct ControlReply {
     #[serde(default)]
     max_frame_bytes: Option<usize>,
     udp: Option<UdpParameters>,
+    #[serde(default)]
+    capabilities: HelloCapabilities,
 }
 
 #[derive(Deserialize)]
@@ -270,7 +287,10 @@ enum StreamControl {
 enum CaptureSession {
     StaticColorBars(DynamicImage),
     #[cfg(target_os = "linux")]
-    PipeWire(Arc<wayland_capture::LatestFrame>),
+    PipeWire(
+        Arc<wayland_capture::LatestFrame>,
+        Option<Arc<wayland_capture::PortalInput>>,
+    ),
     #[cfg(not(target_os = "linux"))]
     Monitor(Monitor),
     #[cfg(not(target_os = "linux"))]
@@ -278,7 +298,7 @@ enum CaptureSession {
 }
 
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTROL_PROTOCOL_VERSION: u8 = 2;
+const CONTROL_PROTOCOL_VERSION: u8 = 3;
 const STATIC_COLOR_BARS_ID: &str = "test:color-bars";
 const MAX_TARGET_DIMENSION: u16 = 4096;
 const MAX_TARGET_PIXELS: u64 = 8_294_400;
@@ -497,7 +517,7 @@ fn prepare_image(
     target: &StreamTarget,
 ) -> Result<DynamicImage, String> {
     #[cfg(target_os = "linux")]
-    if matches!(session, CaptureSession::PipeWire(_)) {
+    if matches!(session, CaptureSession::PipeWire(..)) {
         return Ok(image);
     }
     crop_and_letterbox(image, config, target)
@@ -570,6 +590,7 @@ fn open_capture_session(
         }
         let selection = tauri::async_runtime::block_on(wayland_capture::open_portal(
             config.portal_restore_token.as_deref(),
+            config.touch_control,
         ))
         .map_err(|error| format!("Screen-share request failed: {error}"))?;
         if let Some(token) = selection.restore_token.as_deref() {
@@ -600,22 +621,27 @@ fn open_capture_session(
                 &config.video_transport,
             );
         }
-        return Ok(CaptureSession::PipeWire(wayland_capture::start(
-            selection.node_id,
-            selection.remote,
-            is_window,
-            stop,
-            config.fps.clamp(1, 30),
-            wayland_capture::CaptureTransform {
-                region_x: config.region_x,
-                region_y: config.region_y,
-                region_width: config.region_width,
-                region_height: config.region_height,
-                target_width: u32::from(target.width),
-                target_height: u32::from(target.height),
-                orientation: config.display_orientation,
-            },
-        )));
+        let input = selection.input.map(Arc::new);
+        return Ok(CaptureSession::PipeWire(
+            wayland_capture::start(
+                selection.node_id,
+                selection.remote,
+                is_window,
+                stop,
+                config.fps.clamp(1, 30),
+                wayland_capture::CaptureTransform {
+                    region_x: config.region_x,
+                    region_y: config.region_y,
+                    region_width: config.region_width,
+                    region_height: config.region_height,
+                    target_width: u32::from(target.width),
+                    target_height: u32::from(target.height),
+                    orientation: config.display_orientation,
+                },
+                selection.source_size,
+            ),
+            input,
+        ));
     }
     #[cfg(not(target_os = "linux"))]
     open_xcap_source(&config.source_id)
@@ -625,7 +651,7 @@ fn capture_next(session: &CaptureSession) -> Result<DynamicImage, String> {
     match session {
         CaptureSession::StaticColorBars(image) => Ok(image.clone()),
         #[cfg(target_os = "linux")]
-        CaptureSession::PipeWire(receiver) => receiver.receive(Duration::from_secs(10)),
+        CaptureSession::PipeWire(receiver, _) => receiver.receive(Duration::from_secs(10)),
         #[cfg(not(target_os = "linux"))]
         CaptureSession::Monitor(monitor) => Ok(DynamicImage::ImageRgba8(
             monitor.capture_image().map_err(xcap_error)?,
@@ -649,7 +675,7 @@ fn capture_next_optional(
 ) -> Result<Option<DynamicImage>, String> {
     match session {
         #[cfg(target_os = "linux")]
-        CaptureSession::PipeWire(receiver) => receiver.receive_optional(timeout),
+        CaptureSession::PipeWire(receiver, _) => receiver.receive_optional(timeout),
         _ => capture_next(session).map(Some),
     }
 }
@@ -767,10 +793,198 @@ fn emit_metrics(
     let _ = app.emit("stream-status", event);
 }
 
+#[cfg(target_os = "linux")]
+struct PortalInjector {
+    input: Arc<wayland_capture::PortalInput>,
+}
+
+#[cfg(target_os = "linux")]
+impl inject::InputInjector for PortalInjector {
+    fn backend_name(&self) -> &'static str {
+        "portal"
+    }
+
+    fn pointer_move(&mut self, x: f64, y: f64) -> Result<(), String> {
+        tauri::async_runtime::block_on(self.input.pointer_move(x, y))
+    }
+
+    fn button(&mut self, button: touch::MouseButton, down: bool) -> Result<(), String> {
+        let code = match button {
+            touch::MouseButton::Left => wayland_capture::BTN_LEFT,
+            touch::MouseButton::Right => wayland_capture::BTN_RIGHT,
+        };
+        tauri::async_runtime::block_on(self.input.button(code, down))
+    }
+
+    fn wheel(&mut self, steps: i32) -> Result<(), String> {
+        /* Positive gesture steps mean the finger moved down; natural
+        scrolling sends the wheel the other way. */
+        tauri::async_runtime::block_on(self.input.wheel(-steps))
+    }
+}
+
+fn create_touch_injector(capture: &CaptureSession) -> Box<dyn inject::InputInjector> {
+    match capture {
+        CaptureSession::StaticColorBars(_) => Box::new(inject::LogInjector),
+        #[cfg(target_os = "linux")]
+        CaptureSession::PipeWire(_, Some(input)) => Box::new(PortalInjector {
+            input: input.clone(),
+        }),
+        #[cfg(target_os = "linux")]
+        CaptureSession::PipeWire(_, None) => {
+            eprintln!("Touch control: remote input portal unavailable; logging actions only");
+            Box::new(inject::LogInjector)
+        }
+        #[cfg(not(target_os = "linux"))]
+        CaptureSession::Monitor(_) | CaptureSession::Window(_) => inject::create_enigo_injector(),
+    }
+}
+
+fn initial_touch_geometry(
+    capture: &CaptureSession,
+    config: &StreamConfig,
+    target: &StreamTarget,
+) -> inject::TouchGeometry {
+    let mut geometry = inject::TouchGeometry {
+        params: touch_mapping::MappingParams {
+            panel_width: u32::from(target.width),
+            panel_height: u32::from(target.height),
+            orientation: config.display_orientation,
+            region_x: config.region_x,
+            region_y: config.region_y,
+            region_width: config.region_width,
+            region_height: config.region_height,
+            source_width: 0,
+            source_height: 0,
+        },
+        origin_x: 0.0,
+        origin_y: 0.0,
+        scale: 1.0,
+    };
+    match capture {
+        CaptureSession::StaticColorBars(image) => {
+            geometry.params.source_width = image.width();
+            geometry.params.source_height = image.height();
+        }
+        /* PipeWire geometry is refreshed per frame from the capture layout. */
+        #[cfg(target_os = "linux")]
+        CaptureSession::PipeWire(..) => {}
+        #[cfg(not(target_os = "linux"))]
+        CaptureSession::Monitor(monitor) => {
+            geometry.params.source_width = monitor.width();
+            geometry.params.source_height = monitor.height();
+            geometry.origin_x = f64::from(monitor.x());
+            geometry.origin_y = f64::from(monitor.y());
+        }
+        #[cfg(not(target_os = "linux"))]
+        CaptureSession::Window(window) => {
+            if let Ok(window) = window.lock() {
+                geometry.params.source_width = window.width();
+                geometry.params.source_height = window.height();
+                geometry.origin_x = f64::from(window.x());
+                geometry.origin_y = f64::from(window.y());
+            }
+        }
+    }
+    geometry
+}
+
+#[cfg(target_os = "linux")]
+fn refresh_touch_geometry(capture: &CaptureSession, geometry: &inject::SharedTouchGeometry) {
+    let CaptureSession::PipeWire(receiver, _) = capture else {
+        return;
+    };
+    let Some(layout) = receiver.capture_layout() else {
+        return;
+    };
+    let Ok(mut guard) = geometry.lock() else {
+        return;
+    };
+    /* The published crop already composes window content detection with the
+    projected region, so the mapping treats it as the full source and the
+    crop origin becomes the stream-space offset. */
+    guard.params.region_x = 0;
+    guard.params.region_y = 0;
+    guard.params.region_width = 0;
+    guard.params.region_height = 0;
+    guard.params.source_width = layout.crop_width;
+    guard.params.source_height = layout.crop_height;
+    guard.origin_x = f64::from(layout.crop_x);
+    guard.origin_y = f64::from(layout.crop_y);
+    if let Some((logical_width, _)) = receiver.portal_logical() {
+        if layout.frame_width > 0 {
+            guard.scale = f64::from(logical_width) / f64::from(layout.frame_width);
+        }
+    }
+}
+
+fn spawn_touch_worker(
+    rx: Receiver<touch::TouchBatch>,
+    geometry: inject::SharedTouchGeometry,
+    mut injector: Box<dyn inject::InputInjector>,
+    panel_width: u16,
+) {
+    thread::spawn(move || {
+        let mut engine = touch::GestureEngine::new(panel_width);
+        let mut expected_seq: Option<u32> = None;
+        /* Device timestamp of the last event plus its arrival time, used to
+        estimate the device clock for time-based gestures (long press). */
+        let mut device_clock: Option<(u32, Instant)> = None;
+        eprintln!("Touch control worker started ({})", injector.backend_name());
+        loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(batch) => {
+                    if let Some(expected) = expected_seq {
+                        if batch.seq != expected {
+                            eprintln!(
+                                "Touch events skipped a batch: expected {expected}, got {}",
+                                batch.seq
+                            );
+                        }
+                    }
+                    expected_seq = Some(batch.seq.wrapping_add(1));
+                    for event in &batch.events {
+                        device_clock = Some((event.t, Instant::now()));
+                        let actions = engine.handle(event);
+                        inject::dispatch_actions(&actions, &geometry, injector.as_mut());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some((t, at)) = device_clock {
+                        let estimated = t.wrapping_add(at.elapsed().as_millis() as u32);
+                        let actions = engine.tick(estimated);
+                        inject::dispatch_actions(&actions, &geometry, injector.as_mut());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+}
+
+/* Forwards a device touch_events message to the injection worker; returns
+true when the text was consumed as touch traffic. */
+fn forward_touch_message(text: &str, touch_tx: Option<&mpsc::Sender<touch::TouchBatch>>) -> bool {
+    if !text.contains("\"touch_events\"") {
+        return false;
+    }
+    let Ok(batch) = serde_json::from_str::<touch::TouchBatch>(text) else {
+        return false;
+    };
+    if batch.kind != "touch_events" {
+        return false;
+    }
+    if let Some(tx) = touch_tx {
+        let _ = tx.send(batch);
+    }
+    true
+}
+
 fn wait_for_presented(
     socket: &mut WebSocket<TcpStream>,
     sequence: u32,
     stop: &AtomicBool,
+    touch_tx: Option<&mpsc::Sender<touch::TouchBatch>>,
 ) -> Result<FramePresented, String> {
     socket
         .get_mut()
@@ -794,6 +1008,9 @@ fn wait_for_presented(
         };
         match message {
             Message::Text(text) => {
+                if forward_touch_message(&text, touch_tx) {
+                    continue;
+                }
                 if let Ok(feedback) = serde_json::from_str::<FramePresented>(&text) {
                     if feedback.kind == "frame_presented" && feedback.sequence == sequence {
                         return Ok(feedback);
@@ -905,10 +1122,14 @@ fn configure_udp_control_socket(socket: &mut WebSocket<TcpStream>) -> Result<(),
 fn service_udp_control(
     socket: &mut WebSocket<TcpStream>,
     heartbeat: &mut UdpControlHeartbeat,
+    touch_tx: Option<&mpsc::Sender<touch::TouchBatch>>,
 ) -> Result<(), String> {
     loop {
         match socket.read() {
             Ok(Message::Text(text)) => {
+                if forward_touch_message(&text, touch_tx) {
+                    continue;
+                }
                 let is_pending_pong =
                     serde_json::from_str::<Value>(&text)
                         .ok()
@@ -993,7 +1214,11 @@ fn reconnect_udp_control(
             return Err("Stream stopped".to_string());
         }
         match connect_wifi(&endpoint).and_then(|mut socket| {
-            let (sender, target) = negotiate_stream(&mut socket, "udp")?;
+            let (sender, target, touch_enabled) =
+                negotiate_stream(&mut socket, "udp", config.touch_control)?;
+            if config.touch_control && !touch_enabled {
+                eprintln!("Touch control lost after control reconnection");
+            }
             ensure_reconnect_target(expected_target, &target)?;
             configure_udp_control_socket(&mut socket)?;
             Ok((socket, sender))
@@ -1131,12 +1356,13 @@ fn validate_stream_target(
 fn negotiate_stream(
     socket: &mut WebSocket<TcpStream>,
     requested_transport: &str,
-) -> Result<(VideoSender, StreamTarget), String> {
+    subscribe_touch: bool,
+) -> Result<(VideoSender, StreamTarget, bool), String> {
     let hello = control_request(
         socket,
         json!({
             "type": "hello", "request_id": "hello-1", "protocol_version": CONTROL_PROTOCOL_VERSION,
-            "video_transport": requested_transport, "capabilities": {"touch": true, "audio_capture": true, "text_input": true}
+            "video_transport": requested_transport, "features": {"touch_events": subscribe_touch}
         }),
         "hello-1",
     )?;
@@ -1194,7 +1420,7 @@ fn negotiate_stream(
     if started.kind != "stream_started" || started.video_transport != requested_transport {
         return Err("Device did not start the requested video transport".to_string());
     }
-    Ok((sender, target))
+    Ok((sender, target, subscribe_touch && hello.capabilities.touch))
 }
 
 fn parse_http_response(response: &[u8]) -> Result<Option<(usize, usize)>, String> {
@@ -1371,6 +1597,7 @@ fn run_stream(
     mut sender: VideoSender,
     capture_override: Option<CaptureSession>,
     controls: Receiver<StreamControl>,
+    touch_enabled: bool,
 ) -> u32 {
     let video_transport = config.video_transport.as_str();
     let mut fps = config.fps.clamp(1, 30);
@@ -1406,7 +1633,7 @@ fn run_stream(
     };
     #[cfg(target_os = "linux")]
     if config.projection_mode == ProjectionMode::Region {
-        if let CaptureSession::PipeWire(receiver) = &capture {
+        if let CaptureSession::PipeWire(receiver, _) = &capture {
             if let Err(error) = receiver.set_transform(wayland_capture::CaptureTransform {
                 region_x: config.region_x,
                 region_y: config.region_y,
@@ -1422,6 +1649,21 @@ fn run_stream(
             }
         }
     }
+    let touch_geometry: inject::SharedTouchGeometry = Arc::new(Mutex::new(
+        initial_touch_geometry(&capture, &config, &target),
+    ));
+    let touch_tx = if touch_enabled {
+        let (tx, rx) = mpsc::channel();
+        spawn_touch_worker(
+            rx,
+            touch_geometry.clone(),
+            create_touch_injector(&capture),
+            target.width,
+        );
+        Some(tx)
+    } else {
+        None
+    };
     emit(
         &app,
         "capturing",
@@ -1517,7 +1759,7 @@ fn run_stream(
     let mut device_ms = 0;
     let mut device_replaced_frames = 0;
     if matches!(sender, VideoSender::Tcp) {
-        match wait_for_presented(&mut socket, sequence, &stop) {
+        match wait_for_presented(&mut socket, sequence, &stop, touch_tx.as_ref()) {
             Ok(feedback) => {
                 device_ms = (feedback.queue_wait_us
                     + feedback.jpeg_decode_us
@@ -1579,7 +1821,7 @@ fn run_stream(
                             config.region_width = region.width;
                             config.region_height = region.height;
                             #[cfg(target_os = "linux")]
-                            if let CaptureSession::PipeWire(receiver) = &capture {
+                            if let CaptureSession::PipeWire(receiver, _) = &capture {
                                 receiver.set_transform(wayland_capture::CaptureTransform {
                                     region_x: region.x,
                                     region_y: region.y,
@@ -1589,6 +1831,12 @@ fn run_stream(
                                     target_height: u32::from(target.height),
                                     orientation: config.display_orientation,
                                 })?;
+                            }
+                            if let Ok(mut guard) = touch_geometry.lock() {
+                                guard.params.region_x = region.x;
+                                guard.params.region_y = region.y;
+                                guard.params.region_width = region.width;
+                                guard.params.region_height = region.height;
                             }
                             last_fingerprint = last_fingerprint.wrapping_add(1);
                             Ok(())
@@ -1614,8 +1862,10 @@ fn run_stream(
             /* Force a re-encode so the new quality applies to a static scene too. */
             last_fingerprint = last_fingerprint.wrapping_add(1);
         }
+        #[cfg(target_os = "linux")]
+        refresh_touch_geometry(&capture, &touch_geometry);
         if let Some(heartbeat) = heartbeat.as_mut() {
-            if let Err(reason) = service_udp_control(&mut socket, heartbeat) {
+            if let Err(reason) = service_udp_control(&mut socket, heartbeat, touch_tx.as_ref()) {
                 match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames, &target)
                 {
                     Ok((new_socket, new_sender)) => {
@@ -1650,6 +1900,15 @@ fn run_stream(
             }
         };
         let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
+        /* Window sources can resize; keep the touch mapping in step with the
+        actual source dimensions. PipeWire refreshes from its layout instead. */
+        #[cfg(not(target_os = "linux"))]
+        if let Some(image) = image.as_ref() {
+            if let Ok(mut guard) = touch_geometry.lock() {
+                guard.params.source_width = image.width();
+                guard.params.source_height = image.height();
+            }
+        }
         let encode_started = Instant::now();
         /* Fingerprint the already cropped/scaled target image exactly once
         per captured frame; a raw desktop-sized hash costs far more. */
@@ -1752,7 +2011,7 @@ fn run_stream(
         }
         let capture_encode_ms = encode_started.elapsed().as_millis() as u32;
         if matches!(sender, VideoSender::Tcp) {
-            match wait_for_presented(&mut socket, sequence, &stop) {
+            match wait_for_presented(&mut socket, sequence, &stop, touch_tx.as_ref()) {
                 Ok(feedback) => {
                     device_ms = (feedback.queue_wait_us
                         + feedback.jpeg_decode_us
@@ -1823,7 +2082,7 @@ struct RawSelectionFrame {
 
 fn capture_selection_frame(capture: &CaptureSession) -> Result<RawSelectionFrame, String> {
     #[cfg(target_os = "linux")]
-    if let CaptureSession::PipeWire(receiver) = capture {
+    if let CaptureSession::PipeWire(receiver, _) = capture {
         let frame = receiver.request_preview(Duration::from_secs(10))?;
         return Ok(RawSelectionFrame {
             image: frame.image,
@@ -2088,7 +2347,19 @@ fn start_wifi_stream(
         0,
         &config.video_transport,
     );
-    let (sender, target) = negotiate_stream(&mut socket, &config.video_transport)?;
+    let (sender, target, touch_enabled) =
+        negotiate_stream(&mut socket, &config.video_transport, config.touch_control)?;
+    if config.touch_control && !touch_enabled {
+        emit(
+            &app,
+            "negotiating",
+            "Device declined touch control; continuing without it",
+            0,
+            0,
+            0,
+            &config.video_transport,
+        );
+    }
     if let Err(error) = ensure_status_dimensions(device.width, device.height, &target) {
         close_device_stream(&mut socket);
         return Err(error);
@@ -2160,6 +2431,7 @@ fn start_wifi_stream(
             sender,
             capture_override,
             control_rx,
+            touch_enabled,
         );
         if let Ok(mut active) = controller.lock() {
             *active = None;
@@ -2285,6 +2557,7 @@ mod tests {
             portal_restore_token: None,
             projection_mode: ProjectionMode::Live,
             selection_id: None,
+            touch_control: false,
         }
     }
 
@@ -2454,6 +2727,7 @@ mod tests {
             height: Some(height),
             max_frame_bytes: Some(max_frame_bytes),
             udp: None,
+            capabilities: Default::default(),
         }
     }
 

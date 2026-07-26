@@ -51,10 +51,17 @@
 | `board_amoled_1_8` | 板级 I2C、PMU、SH8601 LCD、FT3168 触摸、SD、RTC、IMU 和音频设备接口 |
 | `subscreen_display` | 主信息界面、状态栏、JPEG 解码、RGB565 转换和 LCD 提交 |
 | `frame_pipeline` | `CDP1` 校验、PSRAM 帧缓冲、传输互斥、最新帧替换和绘制任务 |
-| `transport_wifi` | AP+STA 配网、NVS、HTTP、WebSocket 控制、TCP 视频、UDP 重组和会话生命周期 |
+| `touch_input` | 触摸轮询任务：将 `board_touch_read()` 的采样事件化（down/move/up），批量回调；不感知网络 |
+| `transport_wifi` | AP+STA 配网、NVS、HTTP、WebSocket 控制、TCP 视频、UDP 重组、会话生命周期和 `touch_events` 发送 |
 | `main` | 按依赖顺序组合上述模块 |
 
-板级组件暴露的触摸、音频、SD、RTC 和 IMU 接口目前不是视频链路的组成部分。控制协议中的相关 capability 为后续扩展预留，不能据此调用尚未定义的远程功能。
+板级组件暴露的音频、SD、RTC 和 IMU 接口目前不是视频链路的组成部分，相关 capability 为后续扩展预留。
+
+### 触摸事件上报
+
+`touch_input` 在 `transport_wifi_init()` 中启动一个 10 ms 周期的轮询任务（优先级 3，栈 4 KiB）。驱动内部由中断窗口门控，空闲时轮询开销接近于零；任务同时缓存触摸硬件就绪状态供 `/api/status` 与 `hello` 协商无锁读取。事件生成规则：按下与释放立即成批发送，移动坐标合并后约 15 ms 一批（≤8 事件）；I2C 读取失败时会合成一次 `up`，避免主机端按键悬挂。
+
+`transport_wifi` 在会话满足“已订阅 `features.touch_events` + 触摸硬件就绪 + `stream_started`”时，把事件批经 `httpd_queue_work` + `httpd_ws_send_frame_async` 异步发出（与 `frame_presented` 相同模式），批序号 `seq` 每会话从 0 递增，队列失败会丢批并留下序号空洞供 PC 检测。会话释放（stop、断开、超时）后 gate 立即关闭。
 
 ## 显示链路
 
@@ -192,4 +199,4 @@ rxPackets
 
 六位配对码只保护 WebSocket 握手。UDP 依赖随机 session 值和来源 IPv4 绑定降低误收风险，但不提供加密、强认证或防重放。设备应运行在可信局域网。
 
-新增触摸、文字或音频能力时，需要先在[公共通信协议](../../../PROTOCOL.md)定义消息、鉴权、生命周期、失败处理和兼容策略，再实现设备端与 PC 端代码，且不得破坏现有 v1 互操作性边界。
+触摸事件仅在配对成功的控制会话内、且客户端显式订阅后发送，设备不解释手势语义。新增文字或音频能力时，需要先在[公共通信协议](../../../PROTOCOL.md)定义消息、鉴权、生命周期、失败处理和兼容策略，再实现设备端与 PC 端代码。

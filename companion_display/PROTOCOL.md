@@ -1,10 +1,10 @@
-# Companion Display 通信协议 v2
+# Companion Display 通信协议 v3
 
-本文是 ESP32-S3、ESP32-P4 等设备共同遵循的 v2 线上契约，只定义接口、控制状态机和二进制格式。当前 S3 固件内部实现见 [S3 设备端实现](firmware/esp32s3/docs/device.md)，桌面采集与发送策略见 [PC 端实现](docs/pc-client.md)，工程入口见 [README](README.md)。
+本文是 ESP32-S3、ESP32-P4 等设备共同遵循的 v3 线上契约，只定义接口、控制状态机和二进制格式。当前 S3 固件内部实现见 [S3 设备端实现](firmware/esp32s3/docs/device.md)，桌面采集与发送策略见 [PC 端实现](docs/pc-client.md)，工程入口见 [README](README.md)。
 
 ## 总览
 
-协议 v2 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。当前 S3 设备同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v2 与 v1 控制协商不兼容，PC 客户端和固件必须同步升级。
+协议 v3 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。v3 在 v2 之上新增设备到 PC 的触摸事件通道（`touch_events`），视频链路与 v2 完全一致。当前 S3 设备同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v3 与 v2、v1 控制协商互不兼容：固件对版本不匹配的 `hello` 返回 `unsupported_protocol`，PC 客户端对 `/api/status` 报告的其他版本拒绝启动，两端必须同步升级。
 
 默认 HTTP/WebSocket 端口为 `80`，UDP 端口为 `5000`。所有多字节二进制字段均为小端序。当前只支持 IPv4 UDP 视频。
 
@@ -18,7 +18,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 
 配对码在设备首次启动时随机生成（`100000`–`999999`），保存于 NVS，重启后保持不变；当前固件不提供重置配对码的接口，清除 NVS 分区会同时清除配对码和 Wi-Fi 凭据。
 
-`PAIRING_CODE` 必须是设备屏幕显示的六位数字配对码。未授权连接返回 HTTP `401`；已有其他活动会话时返回 HTTP `403`。控制消息是 UTF-8 JSON WebSocket 文本帧，每个请求必须包含字符串 `type` 和字符串 `request_id`。设备忽略请求中的未定义字段，以便未来扩展；当前 PC 客户端在 `hello` 中附带的 `capabilities` 对象就属于这类被忽略的字段。
+`PAIRING_CODE` 必须是设备屏幕显示的六位数字配对码。未授权连接返回 HTTP `401`；已有其他活动会话时返回 HTTP `403`。控制消息是 UTF-8 JSON WebSocket 文本帧，每个请求必须包含字符串 `type` 和字符串 `request_id`。设备忽略请求中的未定义字段，以便未来扩展。
 
 ### 状态机
 
@@ -43,23 +43,27 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 客户端请求：
 
 ```json
-{"type":"hello","request_id":"hello-1","protocol_version":2,"video_transport":"tcp"}
+{"type":"hello","request_id":"hello-1","protocol_version":3,"video_transport":"tcp","features":{"touch_events":true}}
 ```
 
 字段：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
-| `protocol_version` | 整数 | 必须为 `2` |
+| `protocol_version` | 整数 | 必须为 `3` |
 | `video_transport` | 字符串 | `tcp` 或 `udp` |
+| `features` | 对象，可选 | 客户端订阅的可选能力；缺省全部为 `false` |
+| `features.touch_events` | 布尔，可选 | `true` 表示订阅设备触摸事件 |
 
 设备成功响应为 `hello_ack`：
 
 ```json
-{"type":"hello_ack","request_id":"hello-1","protocol_version":2,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":true,"text_input":true}}
+{"type":"hello_ack","request_id":"hello-1","protocol_version":3,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":false,"text_input":false},"touch":{"width":368,"height":448,"max_move_hz":60}}
 ```
 
-`width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。`capabilities` 中的 `touch`、`text_input`、`audio_capture` 仅为未来能力预留，v2 没有对应可用消息，也不启用触摸注入或麦克风采集。
+`width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。
+
+`capabilities.touch` 在 v3 中是本次会话的运行时承诺：仅当客户端在 `hello` 中订阅 `features.touch_events` 且设备触摸硬件就绪时为 `true`，此时设备会在流启动后发送 [`touch_events`](#touch_events-设备触摸事件)。顶层 `touch` 对象声明触摸坐标空间（物理面板像素，旋转前）与 `move` 事件的最大速率，仅在 `capabilities.touch` 为 `true` 时出现。`text_input`、`audio_capture` 在 v3 固定为 `false`，仍为未来扩展预留，客户端不得据此发送未定义消息。
 
 ### `start_stream` 与 `stop_stream`
 
@@ -107,8 +111,33 @@ UDP 视频运行期间，PC 必须每 2 秒发送一个应用层心跳：
 | `device_busy` | 另一个会话或其他传输已占用显示管线 |
 | `not_negotiated` | 未成功协商即请求启动 |
 | `invalid_control_message` | 缺少 `type` 或 `request_id` |
-| `unsupported_message` | v2 不支持的控制消息 |
+| `unsupported_message` | v3 不支持的控制消息 |
 | `tcp_video_not_started` | 在 TCP 模式未启动时发送二进制视频 |
+
+## `touch_events` 设备触摸事件
+
+设备在满足以下全部条件时，通过控制通道主动发送触摸事件（WebSocket 文本帧，无 `request_id`，无回执）：
+
+- 本会话 `hello` 订阅了 `features.touch_events` 且 `hello_ack.capabilities.touch` 为 `true`；
+- 会话已收到 `stream_started`（触摸语义依赖屏幕上正在显示的画面）。
+
+```json
+{"type":"touch_events","seq":123,"events":[
+  {"kind":"down","x":184,"y":220,"t":1234567},
+  {"kind":"move","x":190,"y":224,"t":1234583},
+  {"kind":"up","x":190,"y":224,"t":1234640}]}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `seq` | 批序号，每会话从 0 递增；客户端可用空洞检测设备端发送失败 |
+| `events[].kind` | `down`、`move` 或 `up`；`up` 携带释放时的最后稳定坐标 |
+| `events[].x`/`y` | 物理面板像素坐标（旋转前），范围 `[0, hello_ack.touch.width/height)` |
+| `events[].t` | 设备单调毫秒时间戳，可回绕；仅用于事件间差值，不与 PC 时钟对齐 |
+
+发送策略：`down`/`up` 立即发送；`move` 在设备端合并，单批最多 8 个事件，`move` 速率不超过 `hello_ack.touch.max_move_hz`。TCP 与 UDP 视频模式下均可发送。会话结束（`stop_stream`、连接断开、无帧超时）后停止发送；重连后按新 `hello` 的订阅结果重新生效。
+
+手势识别（单击、拖拽、长按、滚动）与坐标反映射完全由 PC 端实现，设备只上报原始事件；未来扩展多点触控时向 `events[]` 增加字段，不改变消息骨架。客户端必须忽略 `touch_events` 中未定义的字段。
 
 ## `CDP1` 完整视频帧
 
@@ -186,7 +215,7 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 `GET /api/status` 无需配对码，返回设备可用性和诊断信息：
 
 ```json
-{"name":"companion-display","width":368,"height":448,"wifi":"connected","ipv4":"192.168.1.42","active_transport":"udp","token_set":true,"protocol_version":2,"video_transports":["tcp","udp"],"touch":true,"audio_capture":true,"dropped_frames":0,"performance":{"sequence":42,"queueWaitUs":1000,"jpegDecodeUs":18000,"lcdWaitUs":2000,"lcdSubmitUs":100,"previousDmaUs":15000,"replacedFrames":3},"udp":{"rxPackets":10,"acceptedFragments":10,"rejectedPackets":0,"completedFrames":1,"submittedFrames":1,"submitFailures":0,"reassemblyTimeouts":0,"lastReject":"none"}}
+{"name":"companion-display","width":368,"height":448,"wifi":"connected","ipv4":"192.168.1.42","active_transport":"udp","token_set":true,"protocol_version":3,"video_transports":["tcp","udp"],"touch":true,"touch_events_active":true,"audio_capture":false,"dropped_frames":0,"performance":{"sequence":42,"queueWaitUs":1000,"jpegDecodeUs":18000,"lcdWaitUs":2000,"lcdSubmitUs":100,"previousDmaUs":15000,"replacedFrames":3},"udp":{"rxPackets":10,"acceptedFragments":10,"rejectedPackets":0,"completedFrames":1,"submittedFrames":1,"submitFailures":0,"reassemblyTimeouts":0,"lastReject":"none"}}
 ```
 
 | 字段 | 含义 |
@@ -196,8 +225,9 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 | `token_set` | 设备已生成并保存六位配对码；当前实现固定为 `true` |
 | `protocol_version` | 当前控制协议版本 |
 | `video_transports` | 设备支持的视频传输方式 |
-| `touch` | 触摸硬件或未来能力标记，不表示 v2 存在可用的触摸消息 |
-| `audio_capture` | 音频采集硬件或未来能力标记，不表示 v2 存在可用的音频消息 |
+| `touch` | 触摸硬件当前可用；是否发送事件仍取决于会话协商 |
+| `touch_events_active` | 当前会话已订阅并正在推送 `touch_events`，用于排障 |
+| `audio_capture` | 未来能力预留，v3 固定为 `false` |
 | `dropped_frames` | 当前 UDP 会话中因重组超时或被新帧替换而丢弃的未完成帧数；TCP 模式不增加此计数 |
 | `performance` | 最近一帧的设备耗时；字段使用 camelCase |
 | `performance.replacedFrames` | 设备本次启动期间累计的、被较新帧替换且尚未开始绘制的帧数；建立新会话不会清零，与 `dropped_frames` 含义不同 |
@@ -212,7 +242,7 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 
 UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submittedFrames`。`acceptedFragments` 增长而 `completedFrames` 不增长表示分片未收齐；`completedFrames` 增长而 `submittedFrames` 不增长表示完整帧未通过 `CDP1` 校验或无法提交显示管线。`reassemblyTimeouts` 统计 250 ms 超时以及被较新帧替换的未完成重组，少量增长是 UDP 的预期行为，持续增长表示链路或发送节奏不稳定。
 
-`touch`、`audio_capture` 以及 `hello_ack.capabilities.text_input` 只描述硬件或后续协议扩展方向，不是运行时可用性或授权结果。v2 没有对应控制消息、数据格式和生命周期；客户端不得依据这些字段发送未定义消息。
+`audio_capture` 与 `hello_ack.capabilities.text_input` 仍是预留字段，v3 没有对应消息；客户端不得依据这些字段发送未定义消息。触摸能力以 `hello_ack.capabilities.touch` 的会话级协商结果为准，`/api/status` 的 `touch` 只反映硬件可用性。
 
 设备屏幕和串口同时提供状态。关键屏幕状态包括 `WS CONNECTED`、`NEGOTIATING`、`TCP VIDEO`、`UDP VIDEO`、`RECEIVING FRAME`、`BAD CRC`、`UDP REJECTED`、`UDP DROPPED`、`SESSION EXPIRED`、`STREAM TIMEOUT` 与 `DEVICE BUSY`。会话结束（`stop_stream`、控制连接断开或无帧超时）后设备回到主信息界面，显示 IP 地址与配对码。UDP 活动期间，串口每秒输出一次 `UDP stats: rx=... accepted=... rejected=... completed=... submitted=... timeout=... failed=... last=...`。
 
@@ -229,4 +259,6 @@ HTTP 服务同时提供两个配网端点，配网和已联网状态下均可访
 
 本版本面向可信局域网。六位配对码保护 WebSocket 建连；UDP session 值和来源 IPv4 绑定用于降低误收和无关数据报风险，但不提供加密、身份认证强度保证或防重放保护。DTLS/TLS 尚未实现。
 
-未来的触摸、文本输入和音频能力必须继续经可靠控制通道协商，并在新协议版本中明确消息、权限、数据方向、生命周期和兼容策略。不得复用 v2 未定义的消息而改变既有客户端行为。
+触摸事件会转化为 PC 上的真实鼠标输入，属于敏感能力：它只在客户端显式订阅后启用，PC 端由用户在界面开关控制（默认关闭），操作系统一侧还受各平台注入权限约束（Linux RemoteDesktop portal 授权、macOS 辅助功能授权）。设备只上报坐标，不解释语义，注入策略由 PC 端决定。
+
+未来的文本输入和音频能力必须继续经可靠控制通道协商，并在新协议版本中明确消息、权限、数据方向、生命周期和兼容策略。不得复用 v3 未定义的消息而改变既有客户端行为。

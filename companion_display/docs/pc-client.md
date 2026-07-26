@@ -11,7 +11,8 @@
 - 后端：Rust；
 - Linux 采集：XDG Desktop Portal + PipeWire；
 - 非 Linux 采集：XCap 枚举显示器和窗口；
-- 编码与传输：`image`、`tungstenite`、`crc32fast`。
+- 编码与传输：`image`、`tungstenite`、`crc32fast`；
+- 触摸注入：Linux 走 XDG RemoteDesktop Portal（与采集同一会话）；Windows/macOS 走 `enigo`（SendInput / CGEvent）。
 
 Ubuntu/Debian 依赖：
 
@@ -206,6 +207,27 @@ WebSocket 控制连接保持非阻塞：
 
 设备允许同一 PC IPv4 的新 WebSocket 替换遗留会话，因此异常断线后通常不需要手工重启设备。
 
+## 触摸反向控制
+
+`Stream` 面板的“触摸控制”开关（默认关闭，持久化保存）决定客户端是否在 `hello` 中订阅设备触摸事件。设备接受订阅后（`hello_ack.capabilities.touch` 为 `true`），流启动期间在设备屏幕上的触摸会转化为 PC 上的鼠标操作：
+
+| 手势 | 注入动作 |
+| --- | --- |
+| 单击（按下抬起 <500 ms，位移 <8 px） | 左键单击 |
+| 按住移动（位移 ≥8 px） | 按住左键拖动 |
+| 长按约 500 ms 不动 | 右键单击 |
+| 从屏幕右缘 28 px 竖条起始的竖向滑动 | 滚轮（自然滚动方向），每 24 px 一格 |
+
+坐标链路：设备上报物理面板坐标 → 客户端按显示方向反旋转 → 去除黑边并按缩放比例还原 → 叠加区域投屏选区偏移 → 平台注入。落在黑边中的触摸被忽略。手势阈值目前为内置常量（`src-tauri/src/touch.rs`）。
+
+平台差异：
+
+- **Linux**：开启触摸后，portal 会话从纯 ScreenCast 变为 RemoteDesktop+ScreenCast 合并会话，系统弹窗从“共享屏幕”变为“允许远程控制”。两种会话的 restore token 不通用，切换开关会自动清除已保存的 portal 选择，下次启动需重新授权。注入坐标使用流内逻辑坐标，无需全局屏幕坐标；窗口源存在透明边裁剪时，注入位置可能有偏移。
+- **macOS**：首次注入需要在 系统设置 → 隐私与安全性 → 辅助功能 中授权客户端；未授权时注入失败但视频继续。
+- **Windows**：绝对坐标基于虚拟桌面；多显示器负坐标与非 100% DPI 场景请以实测为准。
+
+注入后端不可用（portal 被拒、权限缺失）时，客户端仅在终端日志打印动作（`touch inject (log)`），视频不受影响。`Static color bars` 测试源始终只打印日志，适合核对坐标映射。设备侧是否在推送可通过 `Device` 面板的“触摸”行或 `/api/status` 的 `touch_events_active` 判断。
+
 ## 指标与前端判定
 
 指标含义：
@@ -248,6 +270,6 @@ threshold_ms = floor(1000 / fps * 0.9)
 
 ## 安全与兼容性
 
-客户端仅支持控制协议 v2，并会拒绝不匹配设备。配对码和 UDP session 参数均为明文，WebSocket 使用 `ws://`，UDP 不加密；只应在可信局域网使用。
+客户端仅支持控制协议 v3，并会拒绝不匹配设备。配对码和 UDP session 参数均为明文，WebSocket 使用 `ws://`，UDP 不加密；只应在可信局域网使用。触摸控制会向操作系统注入真实输入，默认关闭，且受各平台注入权限约束。
 
-新增触摸、文字或音频能力时，必须先更新 [`PROTOCOL.md`](../PROTOCOL.md)，再同步实现设备端与 PC 端的鉴权、生命周期、失败处理和兼容策略。
+新增文字或音频能力时，必须先更新 [`PROTOCOL.md`](../PROTOCOL.md)，再同步实现设备端与 PC 端的鉴权、生命周期、失败处理和兼容策略。

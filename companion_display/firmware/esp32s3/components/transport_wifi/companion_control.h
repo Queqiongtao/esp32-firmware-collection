@@ -5,14 +5,16 @@
 #include <stdint.h>
 
 #include "frame_pipeline.h"
+#include "touch_input.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define COMPANION_CONTROL_PROTOCOL_VERSION 2
+#define COMPANION_CONTROL_PROTOCOL_VERSION 3
 #define COMPANION_CONTROL_WIDTH 368
 #define COMPANION_CONTROL_HEIGHT 448
+#define COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ 60
 #define COMPANION_CONTROL_TRANSPORT_TCP "tcp"
 #define COMPANION_CONTROL_TRANSPORT_UDP "udp"
 
@@ -21,12 +23,15 @@ typedef struct {
     char request_id[48];
     int protocol_version;
     char video_transport[8];
+    bool touch_subscribe;
 } companion_control_message_t;
 
 typedef struct {
     const char *wifi;
     const char *ipv4;
     const char *active_transport;
+    bool touch_hw;
+    bool touch_events_active;
     uint32_t dropped_frames;
     frame_pipeline_presented_frame_t performance;
     uint32_t udp_rx_packets;
@@ -52,7 +57,8 @@ int companion_control_build_hello_ack(char *buffer, size_t buffer_size,
                                       uint16_t udp_port,
                                       uint32_t session_id,
                                       uint32_t session_token,
-                                      uint16_t udp_max_payload);
+                                      uint16_t udp_max_payload,
+                                      bool touch_enabled);
 int companion_control_build_stream_started(char *buffer, size_t buffer_size,
                                            const char *request_id,
                                            const char *video_transport);
@@ -63,6 +69,10 @@ int companion_control_build_pong(char *buffer, size_t buffer_size,
                                  const char *request_id);
 int companion_control_build_frame_presented(char *buffer, size_t buffer_size,
                                             const frame_pipeline_presented_frame_t *frame);
+int companion_control_build_touch_events(char *buffer, size_t buffer_size,
+                                         uint32_t seq,
+                                         const touch_input_event_t *events,
+                                         size_t count);
 int companion_control_build_status(char *buffer, size_t buffer_size,
                                    const companion_status_snapshot_t *snapshot);
 

@@ -15,6 +15,7 @@
 #include "companion_control.h"
 #include "companion_udp.h"
 #include "frame_pipeline.h"
+#include "touch_input.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -35,6 +36,8 @@ typedef struct {
     bool active;
     bool negotiated;
     bool started;
+    bool touch_enabled;
+    uint32_t touch_seq;
     uint32_t generation;
     int ws_fd;
     video_transport_t video_transport;
@@ -91,6 +94,13 @@ typedef struct {
 } frame_feedback_work_t;
 
 typedef struct {
+    int ws_fd;
+    uint32_t seq;
+    size_t count;
+    touch_input_event_t events[TOUCH_INPUT_MAX_BATCH];
+} touch_events_work_t;
+
+typedef struct {
     bool released;
     bool started;
     video_transport_t transport;
@@ -140,6 +150,41 @@ static void frame_presented(const frame_pipeline_presented_frame_t *frame, void 
     work->ws_fd = ws_fd;
     work->frame = *frame;
     if (httpd_queue_work(s_server, send_frame_feedback_work, work) != ESP_OK) free(work);
+}
+
+static void send_touch_events_work(void *arg)
+{
+    touch_events_work_t *work = arg;
+    char message[512];
+    int written = companion_control_build_touch_events(message, sizeof(message), work->seq,
+                                                       work->events, work->count);
+    if (written > 0) {
+        httpd_ws_frame_t frame = {.type = HTTPD_WS_TYPE_TEXT, .payload = (uint8_t *)message, .len = (size_t)written};
+        esp_err_t err = httpd_ws_send_frame_async(s_server, work->ws_fd, &frame);
+        if (err != ESP_OK) ESP_LOGW(TAG, "touch events send failed: %s", esp_err_to_name(err));
+    }
+    free(work);
+}
+
+static void touch_events_ready(const touch_input_event_t *events, size_t count, void *context)
+{
+    (void)context;
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    const bool send = s_session.active && s_session.started && s_session.touch_enabled;
+    const int ws_fd = s_session.ws_fd;
+    const uint32_t seq = send ? s_session.touch_seq++ : 0;
+    xSemaphoreGive(s_session_lock);
+    if (!send || s_server == NULL) return;
+    touch_events_work_t *work = malloc(sizeof(*work));
+    if (work == NULL) return;
+    work->ws_fd = ws_fd;
+    work->seq = seq;
+    work->count = count > TOUCH_INPUT_MAX_BATCH ? TOUCH_INPUT_MAX_BATCH : count;
+    memcpy(work->events, events, work->count * sizeof(*events));
+    if (httpd_queue_work(s_server, send_touch_events_work, work) != ESP_OK) {
+        ESP_LOGW(TAG, "touch events queue failed: seq=%lu dropped", (unsigned long)seq);
+        free(work);
+    }
 }
 
 static companion_transport_t pipeline_transport(video_transport_t transport)
@@ -397,12 +442,17 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
     s_session.peer_addr_bound = peer_addr_valid;
     s_session.session_id = esp_random();
     s_session.session_token = esp_random();
+    s_session.touch_enabled = message->touch_subscribe && touch_input_hw_ready();
     s_session.last_control_us = esp_timer_get_time();
     uint32_t session_id = s_session.session_id;
     uint32_t session_token = s_session.session_token;
     video_transport_t transport = s_session.video_transport;
+    const bool touch_enabled = s_session.touch_enabled;
     xSemaphoreGive(s_session_lock);
     xSemaphoreGive(s_stream_transition_lock);
+    if (message->touch_subscribe && !touch_enabled) {
+        ESP_LOGW(TAG, "touch subscription refused: touch hardware not ready");
+    }
     if (peer_addr_valid) {
         ESP_LOGI(TAG, "hello: peer=%s fd=%d transport=%s session=%08lx", inet_ntoa(peer_addr), ws_fd,
                  video_transport_name(transport), (unsigned long)session_id);
@@ -410,12 +460,12 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
         ESP_LOGW(TAG, "hello: fd=%d transport=%s has no usable TCP peer IPv4; waiting for authenticated UDP source",
                  ws_fd, video_transport_name(transport));
     }
-    char response[420];
+    char response[512];
     companion_control_build_hello_ack(response, sizeof(response), message->request_id,
                                       video_transport_name(transport),
                                       FRAME_LIMIT + sizeof(companion_frame_header_t),
                                       CONFIG_COMPANION_UDP_PORT, session_id, session_token,
-                                      COMPANION_UDP_MAX_PAYLOAD);
+                                      COMPANION_UDP_MAX_PAYLOAD, touch_enabled);
     update_transport_status(SUBSCREEN_TRANSPORT_NEGOTIATING);
     send_control(req, response);
 }
@@ -775,6 +825,7 @@ static esp_err_t status_get(httpd_req_t *req)
     companion_status_snapshot_t snapshot = {};
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     snapshot.active_transport = s_session.started ? video_transport_name(s_session.video_transport) : "none";
+    snapshot.touch_events_active = s_session.started && s_session.touch_enabled;
     snapshot.dropped_frames = s_session.dropped_frames;
     snapshot.udp_rx_packets = s_session.udp_rx_packets;
     snapshot.udp_accepted_fragments = s_session.udp_accepted_fragments;
@@ -786,6 +837,7 @@ static esp_err_t status_get(httpd_req_t *req)
     snapshot.udp_last_reject = companion_udp_reject_reason_name(s_session.udp_last_reject);
     snapshot.performance = s_session.last_presented;
     xSemaphoreGive(s_session_lock);
+    snapshot.touch_hw = touch_input_hw_ready();
     snapshot.wifi = s_network_status == SUBSCREEN_NETWORK_CONNECTED ? "connected" : s_network_status == SUBSCREEN_NETWORK_CONNECTING ? "connecting" : "setup_required";
     snapshot.ipv4 = s_ipv4;
     companion_control_build_status(response, sizeof(response), &snapshot);
@@ -868,6 +920,7 @@ esp_err_t transport_wifi_init(subscreen_display_t *display)
     if (nvs_get_string("ssid", ssid, sizeof(ssid)) == ESP_OK) { s_has_credentials = true; nvs_get_string("password", password, sizeof(password)); wifi_config_t sta = {}; strlcpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid)); strlcpy((char *)sta.sta.password, password, sizeof(sta.sta.password)); esp_wifi_set_config(WIFI_IF_STA, &sta); } else update_network_status(SUBSCREEN_NETWORK_SETUP_REQUIRED, NULL);
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "wifi start"); ESP_RETURN_ON_ERROR(start_server(), TAG, "HTTP start"); ESP_RETURN_ON_ERROR(start_udp_server(), TAG, "UDP start");
     frame_pipeline_set_presented_callback(frame_presented, NULL);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(touch_input_start(touch_events_ready, NULL));
     ESP_LOGI(TAG, "control ready; UDP port=%d", CONFIG_COMPANION_UDP_PORT);
     return ESP_OK;
 }

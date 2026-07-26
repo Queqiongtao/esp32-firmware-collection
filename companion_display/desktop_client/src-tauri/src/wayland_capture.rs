@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use crate::orientation::DisplayOrientation;
 use ashpd::desktop::{
+    remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop},
     screencast::{CursorMode, Screencast, SourceType, Stream as PortalStream},
-    PersistMode,
+    PersistMode, Session,
 };
 use image::{DynamicImage, ImageBuffer, Rgb};
 use pipewire as pw;
@@ -107,6 +108,59 @@ pub struct PortalSelection {
     pub source_type: Option<SourceType>,
     pub source_size: Option<(u32, u32)>,
     pub restore_token: Option<String>,
+    pub input: Option<PortalInput>,
+}
+
+/* Keeps the merged RemoteDesktop+ScreenCast session alive so pointer events
+can be injected into the shared stream. All notify calls are async; callers
+run them on the app's async runtime. */
+pub struct PortalInput {
+    remote_desktop: RemoteDesktop<'static>,
+    session: Session<'static, RemoteDesktop<'static>>,
+    node_id: u32,
+}
+
+pub const BTN_LEFT: i32 = 0x110;
+pub const BTN_RIGHT: i32 = 0x111;
+
+impl PortalInput {
+    pub async fn pointer_move(&self, x: f64, y: f64) -> Result<(), String> {
+        self.remote_desktop
+            .notify_pointer_motion_absolute(&self.session, self.node_id, x, y)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn button(&self, button: i32, pressed: bool) -> Result<(), String> {
+        let state = if pressed {
+            KeyState::Pressed
+        } else {
+            KeyState::Released
+        };
+        self.remote_desktop
+            .notify_pointer_button(&self.session, button, state)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn wheel(&self, steps: i32) -> Result<(), String> {
+        self.remote_desktop
+            .notify_pointer_axis_discrete(&self.session, Axis::Vertical, steps)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+/* The region of the PipeWire frame that is currently scaled onto the device
+canvas, in stream pixel coordinates, plus the negotiated frame size. */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaptureLayout {
+    pub crop_x: u32,
+    pub crop_y: u32,
+    pub crop_width: u32,
+    pub crop_height: u32,
+    pub frame_width: u32,
+    pub frame_height: u32,
 }
 
 pub struct LatestFrame {
@@ -116,6 +170,8 @@ pub struct LatestFrame {
     preview_ready: Condvar,
     preview_requested: AtomicBool,
     transform: Mutex<CaptureTransform>,
+    layout: Mutex<Option<CaptureLayout>>,
+    portal_logical: Option<(u32, u32)>,
 }
 
 pub struct SelectionFrame {
@@ -174,6 +230,24 @@ impl LatestFrame {
         *self.frame.lock().map_err(|_| "capture frame lock failed")? = None;
         Ok(())
     }
+
+    /* The crop rectangle the PipeWire thread most recently rendered from,
+    published for touch coordinate mapping. */
+    pub fn capture_layout(&self) -> Option<CaptureLayout> {
+        self.layout.lock().ok().and_then(|layout| *layout)
+    }
+
+    /* Portal logical size of the shared stream; differs from the PipeWire
+    pixel size under fractional scaling. */
+    pub fn portal_logical(&self) -> Option<(u32, u32)> {
+        self.portal_logical
+    }
+
+    fn publish_layout(&self, layout: CaptureLayout) {
+        if let Ok(mut slot) = self.layout.lock() {
+            *slot = Some(layout);
+        }
+    }
 }
 
 fn require_embedded_cursor(supported: bool) -> Result<CursorMode, String> {
@@ -189,13 +263,19 @@ fn valid_source_size(size: Option<(i32, i32)>) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-pub async fn open_portal(restore_token: Option<&str>) -> Result<PortalSelection, String> {
+pub async fn open_portal(
+    restore_token: Option<&str>,
+    with_input: bool,
+) -> Result<PortalSelection, String> {
     let portal = Screencast::new().await.map_err(|error| error.to_string())?;
     let cursor_modes = portal
         .available_cursor_modes()
         .await
         .map_err(|error| format!("Cannot query desktop cursor support: {error}"))?;
     let cursor_mode = require_embedded_cursor(cursor_modes.contains(CursorMode::Embedded))?;
+    if with_input {
+        return open_portal_with_input(&portal, cursor_mode, restore_token).await;
+    }
     let session = portal
         .create_session()
         .await
@@ -233,6 +313,72 @@ pub async fn open_portal(restore_token: Option<&str>) -> Result<PortalSelection,
         source_type: stream.source_type(),
         source_size: valid_source_size(stream.size()),
         restore_token,
+        input: None,
+    })
+}
+
+/* Touch control needs a RemoteDesktop session that also carries the screen
+cast: NotifyPointerMotionAbsolute only accepts a stream of its own session.
+The restore token travels through SelectDevices here, so tokens from plain
+ScreenCast sessions are not interchangeable with these. */
+async fn open_portal_with_input(
+    portal: &Screencast<'_>,
+    cursor_mode: CursorMode,
+    restore_token: Option<&str>,
+) -> Result<PortalSelection, String> {
+    let remote_desktop = RemoteDesktop::new().await.map_err(|error| error.to_string())?;
+    let session = remote_desktop
+        .create_session()
+        .await
+        .map_err(|error| error.to_string())?;
+    remote_desktop
+        .select_devices(
+            &session,
+            DeviceType::Pointer.into(),
+            restore_token,
+            PersistMode::ExplicitlyRevoked,
+        )
+        .await
+        .map_err(|error| format!("Remote input request failed: {error}"))?;
+    portal
+        .select_sources(
+            &session,
+            cursor_mode,
+            SourceType::Monitor | SourceType::Window,
+            false,
+            None,
+            PersistMode::DoNot,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let response = remote_desktop
+        .start(&session, None)
+        .await
+        .map_err(|error| error.to_string())?
+        .response()
+        .map_err(|error| format!("Remote control was not approved: {error}"))?;
+    let stream: PortalStream = response
+        .streams()
+        .and_then(|streams| streams.first())
+        .ok_or_else(|| "no screen or window was selected".to_string())?
+        .to_owned();
+    let restore_token = response.restore_token().map(ToOwned::to_owned);
+    let remote = portal
+        .open_pipe_wire_remote(&session)
+        .await
+        .map_err(|error| error.to_string())?;
+    let node_id = stream.pipe_wire_node_id();
+    Ok(PortalSelection {
+        node_id,
+        remote,
+        source_type: stream.source_type(),
+        source_size: valid_source_size(stream.size()),
+        restore_token,
+        input: Some(PortalInput {
+            remote_desktop,
+            session,
+            node_id,
+        }),
     })
 }
 
@@ -243,6 +389,7 @@ pub fn start(
     stop: Arc<AtomicBool>,
     fps: u8,
     transform: CaptureTransform,
+    portal_logical: Option<(u32, u32)>,
 ) -> Arc<LatestFrame> {
     let frames = Arc::new(LatestFrame {
         frame: Mutex::new(None),
@@ -251,6 +398,8 @@ pub fn start(
         preview_ready: Condvar::new(),
         preview_requested: AtomicBool::new(false),
         transform: Mutex::new(transform),
+        layout: Mutex::new(None),
+        portal_logical,
     });
     let producer = frames.clone();
     let transform_control = frames.clone();
@@ -414,6 +563,17 @@ fn run(
                         );
                     }
                     user_data.layout_logged = true;
+                    {
+                        let size = user_data.format.size();
+                        user_data.frames.publish_layout(CaptureLayout {
+                            crop_x: prepared.crop.x as u32,
+                            crop_y: prepared.crop.y as u32,
+                            crop_width: prepared.crop.width as u32,
+                            crop_height: prepared.crop.height as u32,
+                            frame_width: size.width,
+                            frame_height: size.height,
+                        });
+                    }
                     if wants_preview {
                         let size = user_data.format.size();
                         let preview_transform = CaptureTransform {
@@ -959,6 +1119,8 @@ mod tests {
                 target_height: 1,
                 orientation: DisplayOrientation::Portrait,
             }),
+            layout: Mutex::new(None),
+            portal_logical: None,
         };
         let first = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([1, 0, 0])));
         let latest = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([2, 0, 0])));

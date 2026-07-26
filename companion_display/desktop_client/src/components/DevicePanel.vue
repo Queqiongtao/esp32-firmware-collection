@@ -59,6 +59,7 @@ const emit = defineEmits<{
       <div><dt>{{ locale.t("device.wifi") }}</dt><dd>{{ device.wifi }}</dd></div>
       <div><dt>{{ locale.t("device.screen") }}</dt><dd>{{ device.screen }}</dd></div>
       <div><dt>{{ locale.t("device.transport") }}</dt><dd>{{ device.transport }}</dd></div>
+      <div><dt>{{ locale.t("device.touch") }}</dt><dd>{{ device.touch }}</dd></div>
     </dl>
   </div>
 </template>
