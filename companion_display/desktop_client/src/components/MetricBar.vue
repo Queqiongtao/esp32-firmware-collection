@@ -6,9 +6,18 @@ import { computed } from "vue";
 const stream = useStreamStore();
 const locale = useLocaleStore();
 
+const jpegMetric = computed(() => {
+  if (!stream.metrics.jpegQualityUsed || !stream.target) return "--";
+  const usedKiB = Math.ceil(stream.metrics.jpegBytes / 1024);
+  const limitKiB = Math.floor((stream.target.maxFrameBytes - 24) / 1024);
+  return `Q${stream.metrics.jpegQualityUsed} ${usedKiB}/${limitKiB}K`;
+});
+
 const items = computed(() => [
   { key: "transport", name: locale.t("metric.transport"), get: () => (stream.metrics.videoTransport === "none" ? "--" : stream.metrics.videoTransport.toUpperCase()) },
   { key: "fps", name: "FPS", get: () => String(stream.metrics.fps) },
+  { key: "scale", name: "SCALE", get: () => (stream.metrics.sourceScalePercent ? `${stream.metrics.sourceScalePercent}%` : "--") },
+  { key: "jpeg", name: "JPEG", get: () => jpegMetric.value },
   { key: "capture", name: locale.t("metric.capture"), get: () => `${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },
   { key: "encode", name: locale.t("metric.encode"), get: () => `${stream.metrics.captureEncodeMs} ms`, slow: () => stream.encodeSlow },
   { key: "device", name: locale.t("metric.device"), get: () => `${stream.metrics.deviceMs} ms`, slow: () => stream.deviceSlow },

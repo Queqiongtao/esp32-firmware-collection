@@ -30,7 +30,7 @@ esp32-firmware-collection/
 | Companion Display 设备 | 网络 | 默认协商尺寸 | TCP / UDP 完整帧上限 |
 | --- | --- | --- | --- |
 | ESP32-S3 Waveshare AMOLED 1.8 | 内置 Wi-Fi | `368x448` | `102424` / `102424` 字节 |
-| ESP32-P4 JC1060P470 | ESP32-C6 Hosted Wi-Fi | `1024x600` | `262168` / `153600` 字节 |
+| ESP32-P4 JC1060P470 | ESP32-C6 Hosted Wi-Fi | `1024x600` | `393240` / `153600` 字节 |
 
 设备能力、协议约束和各构建入口见 [Companion Display](companion_display/README.md)。
 

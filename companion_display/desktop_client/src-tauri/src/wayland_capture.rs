@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use crate::image_quality::{scale_percent, ImageRect, PreparedImage};
 use crate::orientation::DisplayOrientation;
 use ashpd::desktop::{
     remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop},
@@ -164,7 +165,7 @@ pub struct CaptureLayout {
 }
 
 pub struct LatestFrame {
-    frame: Mutex<Option<Result<DynamicImage, String>>>,
+    frame: Mutex<Option<Result<PreparedImage, String>>>,
     ready: Condvar,
     preview: Mutex<Option<Result<SelectionFrame, String>>>,
     preview_ready: Condvar,
@@ -185,18 +186,18 @@ pub struct SelectionFrame {
 }
 
 impl LatestFrame {
-    fn publish(&self, frame: Result<DynamicImage, String>) {
+    fn publish(&self, frame: Result<PreparedImage, String>) {
         if let Ok(mut pending) = self.frame.lock() {
             *pending = Some(frame);
             self.ready.notify_one();
         }
     }
 
-    pub fn receive(&self, timeout: Duration) -> Result<DynamicImage, String> {
+    pub fn receive(&self, timeout: Duration) -> Result<PreparedImage, String> {
         self.receive_optional(timeout)?.ok_or_else(|| "PipeWire did not provide a frame within 10 seconds after screen sharing was approved".to_string())
     }
 
-    pub fn receive_optional(&self, timeout: Duration) -> Result<Option<DynamicImage>, String> {
+    pub fn receive_optional(&self, timeout: Duration) -> Result<Option<PreparedImage>, String> {
         let pending = self
             .frame
             .lock()
@@ -326,7 +327,9 @@ async fn open_portal_with_input(
     cursor_mode: CursorMode,
     restore_token: Option<&str>,
 ) -> Result<PortalSelection, String> {
-    let remote_desktop = RemoteDesktop::new().await.map_err(|error| error.to_string())?;
+    let remote_desktop = RemoteDesktop::new()
+        .await
+        .map_err(|error| error.to_string())?;
     let session = remote_desktop
         .create_session()
         .await
@@ -611,7 +614,26 @@ fn run(
                             user_data.transform.preview_ready.notify_one();
                         }
                     }
-                    user_data.frames.publish(Ok(prepared.image));
+                    let content_rect = transform.orientation.map_logical_rect_to_physical(
+                        ImageRect {
+                            x: prepared.offset_x as u32,
+                            y: prepared.offset_y as u32,
+                            width: prepared.draw_width as u32,
+                            height: prepared.draw_height as u32,
+                        },
+                        transform.target_width,
+                        transform.target_height,
+                    );
+                    user_data.frames.publish(Ok(PreparedImage {
+                        image: prepared.image,
+                        source_scale_percent: scale_percent(
+                            prepared.crop.width as u32,
+                            prepared.crop.height as u32,
+                            prepared.draw_width as u32,
+                            prepared.draw_height as u32,
+                        ),
+                        content_rect: Some(content_rect),
+                    }));
                 }
                 Ok(None) => {
                     user_data.last_layout_issue = None;
@@ -1122,14 +1144,33 @@ mod tests {
             layout: Mutex::new(None),
             portal_logical: None,
         };
-        let first = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([1, 0, 0])));
-        let latest = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([2, 0, 0])));
+        let first = PreparedImage {
+            image: DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([1, 0, 0]))),
+            source_scale_percent: 100,
+            content_rect: Some(ImageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+        };
+        let latest = PreparedImage {
+            image: DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([2, 0, 0]))),
+            source_scale_percent: 100,
+            content_rect: Some(ImageRect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            }),
+        };
         frames.publish(Ok(first));
         frames.publish(Ok(latest));
         assert_eq!(
             frames
                 .receive(Duration::from_millis(1))
                 .unwrap()
+                .image
                 .to_rgb8()
                 .get_pixel(0, 0)[0],
             2

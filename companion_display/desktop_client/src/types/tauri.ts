@@ -31,6 +31,8 @@ export type StreamEvent = {
   detail: string;
   fps: number;
   jpegBytes: number;
+  jpegQualityUsed: number;
+  sourceScalePercent: number;
   droppedFrames: number;
   videoTransport: string;
   captureEncodeMs: number;

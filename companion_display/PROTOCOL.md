@@ -23,14 +23,14 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 ### 状态机
 
 ```text
-已连接 -> hello -> hello_ack -> start_stream -> stream_started -> 发送视频
-                                                     |
-                                                stop_stream
-                                                     v
-                                               stream_stopped
+已连接 -> hello -> hello_ack -> 准备首帧 -> start_stream -> stream_started -> 发送视频
+                                                                 |
+                                                            stop_stream
+                                                                 v
+                                                           stream_stopped
 ```
 
-视频只能在收到 `stream_started` 后发送。客户端应在关闭连接前发送 `stop_stream`；WebSocket `CLOSE` 同样会释放会话和显示管线。未协商即开始、`start_stream` 不属于当前会话、协议版本或传输方式不支持时，设备以 `error` 响应。`stop_stream` 是幂等的：即使没有活动会话或请求来自其他连接，设备也返回 `stream_stopped`，只释放属于该连接的会话。同一连接可以再次发送 `hello` 重新协商：设备会释放已启动的显示管线、生成新的 UDP `session_id` 与 `session_token`，客户端必须重新执行 `start_stream`。
+视频只能在收到 `stream_started` 后发送。设备的无帧超时从 `stream_started` 开始计算；客户端可以在 `hello_ack` 后完成 Portal 授权、首帧采集和编码，再发送 `start_stream`。当前 PC 客户端采用该顺序，确保设备开始计时后能立即收到首帧。客户端应在关闭连接前发送 `stop_stream`；WebSocket `CLOSE` 同样会释放会话和显示管线。未协商即开始、`start_stream` 不属于当前会话、协议版本或传输方式不支持时，设备以 `error` 响应。`stop_stream` 是幂等的：即使没有活动会话或请求来自其他连接，设备也返回 `stream_stopped`，只释放属于该连接的会话。同一连接可以再次发送 `hello` 重新协商：设备会释放已启动的显示管线、生成新的 UDP `session_id` 与 `session_token`，客户端必须重新执行 `start_stream`。
 
 会话在以下任一情况结束，设备释放显示管线并回到主信息界面：
 
@@ -79,7 +79,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 {"type":"stream_stopped","request_id":"stop-1"}
 ```
 
-`start_stream` 必须在成功的 `hello` 后执行。设备在响应 `stream_started` 后开始接受所选视频通道的数据。
+`start_stream` 必须在成功的 `hello` 后执行。设备在响应 `stream_started` 后开始接受所选视频通道的数据并启动无完整帧超时；发送端应在首帧已可发送时再请求启动。
 
 设备在无帧超时结束会话时还会主动发送一条非请求式 `stream_stopped`，它没有 `request_id`，携带 `reason` 字段：
 
@@ -154,7 +154,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 8 | `sequence` | u32 | 发送端帧序号，可回绕 |
 | 12 | `width` | u16 | 必须等于当前 `hello_ack.width`；S3/P4 默认值分别为 `368`/`1024` |
 | 14 | `height` | u16 | 必须等于当前 `hello_ack.height`；S3/P4 默认值分别为 `448`/`600` |
-| 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`；S3/P4 TCP 默认上限分别为 `102400`/`262144` |
+| 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`；S3/P4 TCP 默认上限分别为 `102400`/`393216` |
 | 20 | `crc32` | u32 | JPEG payload 的 CRC-32 |
 
 帧头之后紧跟 `payload_size` 字节 JPEG 数据。总帧大小必须严格为 `24 + payload_size`。CRC 使用与 Rust `crc32fast::hash()` 和 ESP-IDF `esp_crc32_le(0, payload, payload_size)` 相同的 CRC-32 值，只覆盖 JPEG payload，不覆盖帧头。
@@ -179,7 +179,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 32 | `payload_length` | u16 | 当前 UDP 负载长度，必须等于数据报中的实际负载且不超过 `1200` |
 | 34 | `reserved` | u16 | 保留字段，当前接收端忽略 |
 
-发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备校验头、会话、索引、长度和来源地址后重组，并且只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP 有效完整帧上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；P4 的 TCP 完整帧上限为 `262168` 字节。
+发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备校验头、会话、索引、长度和来源地址后重组，并且只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的有效完整帧上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；P4 的 TCP 完整帧上限为 `393240` 字节。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
@@ -208,7 +208,7 @@ TCP 模式在每帧 JPEG 解码完成并提交显示后端后，设备主动发�
 | `previous_dma_us` | 兼容字段名；上一帧从提交到传输或刷新完成的耗时 |
 | `replaced_frames` | 设备本次启动期间累计的、被较新帧替换的待绘制帧数；建立新会话不会清零 |
 
-UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；PC 按手动 FPS 发送最新编码帧，并在 UDP 流活动期间每 2 秒通过 `/api/status` 轮询一次设备诊断（TCP 模式的设备耗时已由 `frame_presented` 逐帧提供，不额外轮询）。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，在回调中直接裁剪并双线性缩放为设备尺寸，采集槽只保留最新图像；默认发送配置为 25 FPS、JPEG 质量 70。
+UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；PC 按手动 FPS 发送最新编码帧，并在 UDP 流活动期间每 2 秒通过 `/api/status` 轮询一次设备诊断（TCP 模式的设备耗时已由 `frame_presented` 逐帧提供，不额外轮询）。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，在回调中直接裁剪并双线性缩放为设备尺寸，采集槽只保留最新图像；发送线程只对发生变化且缩小超过 10% 的有效内容区域执行轻量整数亮度锐化，黑边不参与处理。新安装默认发送配置为 TCP、20 FPS、JPEG 质量 85，已有持久化设置保持不变。
 
 ## HTTP 状态与诊断
 

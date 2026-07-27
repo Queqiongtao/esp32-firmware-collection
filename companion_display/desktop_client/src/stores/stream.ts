@@ -44,6 +44,9 @@ export const useStreamStore = defineStore("stream", () => {
   const metrics = ref({
     videoTransport: "none",
     fps: 0,
+    jpegBytes: 0,
+    jpegQualityUsed: 0,
+    sourceScalePercent: 0,
     captureWaitMs: 0,
     captureEncodeMs: 0,
     deviceMs: 0,
@@ -82,7 +85,7 @@ export const useStreamStore = defineStore("stream", () => {
 
   /* 帧预算按用户当前 FPS 自适应：1000/fps * 0.9。10FPS→90ms、25FPS→36ms、30FPS→30ms。 */
   const frameBudgetMs = computed(() => {
-    const fps = settings.fps > 0 ? settings.fps : 25;
+    const fps = settings.fps > 0 ? settings.fps : 20;
     return Math.floor((1000 / fps) * STAGE_MARGIN);
   });
 
@@ -112,6 +115,9 @@ export const useStreamStore = defineStore("stream", () => {
     metrics.value = {
       videoTransport: "none",
       fps: 0,
+      jpegBytes: 0,
+      jpegQualityUsed: 0,
+      sourceScalePercent: 0,
       captureWaitMs: 0,
       captureEncodeMs: 0,
       deviceMs: 0,
@@ -127,6 +133,9 @@ export const useStreamStore = defineStore("stream", () => {
     metrics.value = {
       videoTransport: payload.videoTransport,
       fps: payload.fps,
+      jpegBytes: payload.jpegBytes,
+      jpegQualityUsed: payload.jpegQualityUsed,
+      sourceScalePercent: payload.sourceScalePercent,
       captureWaitMs: payload.captureWaitMs,
       captureEncodeMs: payload.captureEncodeMs,
       deviceMs: payload.deviceMs,

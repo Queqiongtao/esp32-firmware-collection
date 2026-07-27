@@ -165,10 +165,7 @@ pub fn dispatch_actions(
             },
         };
         if let Err(error) = result {
-            eprintln!(
-                "touch inject ({}) failed: {error}",
-                injector.backend_name()
-            );
+            eprintln!("touch inject ({}) failed: {error}", injector.backend_name());
         }
     }
 }

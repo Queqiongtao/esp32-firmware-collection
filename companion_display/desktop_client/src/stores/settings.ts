@@ -9,8 +9,8 @@ export const useSettingsStore = defineStore("settings", () => {
   const token = ref("");
   const sourceId = ref("");
   const projectionMode = ref<ProjectionMode>("live");
-  const fps = ref(25);
-  const quality = ref(70);
+  const fps = ref(20);
+  const quality = ref(85);
   const videoTransport = ref("tcp");
   const displayOrientation = ref<DisplayOrientation>("portrait");
   const portalRestoreToken = ref("");

@@ -67,6 +67,7 @@ const STREAM_STATE_KEYS: Record<string, TranslationKey> = {
   "waiting for pipewire frames": "status.waitingPipeWire",
   "waiting first screenshot": "status.waitingFirstFrame",
   capturing: "status.capturing",
+  "starting device stream": "status.startingDeviceStream",
   "frame ready": "status.frameReady",
 };
 

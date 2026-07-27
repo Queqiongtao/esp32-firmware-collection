@@ -136,8 +136,8 @@ export function useStreamLifecycle() {
     paramsTimer = window.setTimeout(() => {
       paramsTimer = null;
       if (!stream.active || stream.stopping) return;
-      const nextFps = clamp(settings.fps, 1, 30, 25);
-      const nextQuality = clamp(settings.quality, 30, 95, 70);
+      const nextFps = clamp(settings.fps, 1, 30, 20);
+      const nextQuality = clamp(settings.quality, 30, 95, 85);
       invoke("set_stream_params", { fps: nextFps, jpegQuality: nextQuality }).catch((error) =>
         logs.pushRaw(String(error), "warn"),
       );

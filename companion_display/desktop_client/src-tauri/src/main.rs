@@ -1,3 +1,4 @@
+mod image_quality;
 mod inject;
 mod orientation;
 mod protocol;
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageBuffer, Rgb};
+use image_quality::{scale_percent, ImageRect, PreparedImage};
 use orientation::DisplayOrientation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -74,6 +76,8 @@ struct StreamEvent {
     detail: String,
     fps: u8,
     jpeg_bytes: usize,
+    jpeg_quality_used: u8,
+    source_scale_percent: u16,
     dropped_frames: u32,
     video_transport: String,
     capture_encode_ms: u32,
@@ -90,6 +94,8 @@ impl Default for StreamEvent {
             detail: "Disconnected".into(),
             fps: 0,
             jpeg_bytes: 0,
+            jpeg_quality_used: 0,
+            source_scale_percent: 0,
             dropped_frames: 0,
             video_transport: "none".into(),
             capture_encode_ms: 0,
@@ -442,7 +448,7 @@ fn crop_and_letterbox(
     image: DynamicImage,
     config: &StreamConfig,
     target: &StreamTarget,
-) -> Result<DynamicImage, String> {
+) -> Result<PreparedImage, String> {
     let source_width = image.width();
     let source_height = image.height();
     if source_width == 0 || source_height == 0 {
@@ -474,6 +480,8 @@ fn crop_and_letterbox(
     let resized = cropped
         .resize(logical_width, logical_height, FilterType::Triangle)
         .to_rgb8();
+    let source_scale_percent =
+        scale_percent(crop_width, crop_height, resized.width(), resized.height());
     let mut canvas = ImageBuffer::from_pixel(logical_width, logical_height, Rgb([0, 0, 0]));
     let offset_x = (canvas.width() - resized.width()) / 2;
     let offset_y = (canvas.height() - resized.height()) / 2;
@@ -483,46 +491,63 @@ fn crop_and_letterbox(
         i64::from(offset_x),
         i64::from(offset_y),
     );
-    Ok(DynamicImage::ImageRgb8(
-        config.display_orientation.orient_logical_image(&canvas),
-    ))
+    let content_rect = config.display_orientation.map_logical_rect_to_physical(
+        ImageRect {
+            x: offset_x,
+            y: offset_y,
+            width: resized.width(),
+            height: resized.height(),
+        },
+        physical_width,
+        physical_height,
+    );
+    Ok(PreparedImage {
+        image: DynamicImage::ImageRgb8(config.display_orientation.orient_logical_image(&canvas)),
+        source_scale_percent,
+        content_rect: Some(content_rect),
+    })
 }
 
-/* Returns the encoded JPEG and the quality that fit the device limit, so the
-next frame can start near it instead of re-walking the ladder from the top. */
+fn encode_jpeg_at_quality(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut output), quality)
+        .encode_image(image)
+        .map_err(|error| format!("JPEG encoding failed: {error}"))?;
+    Ok(output)
+}
+
+/* Search in coarse five-point steps, then refine only the final bracket. */
 fn encode_jpeg(
     image: &DynamicImage,
     requested_quality: u8,
     max_jpeg_bytes: usize,
 ) -> Result<(Vec<u8>, u8), String> {
-    for quality in (30..=requested_quality.clamp(30, 95)).rev().step_by(5) {
-        let mut output = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut Cursor::new(&mut output), quality)
-            .encode_image(image)
-            .map_err(|error| format!("JPEG encoding failed: {error}"))?;
+    let requested_quality = requested_quality.clamp(30, 95);
+    let mut quality = requested_quality;
+    let mut failed_quality: Option<u8> = None;
+    loop {
+        let output = encode_jpeg_at_quality(image, quality)?;
         if output.len() <= max_jpeg_bytes {
+            let Some(failed_quality) = failed_quality else {
+                return Ok((output, quality));
+            };
+            for candidate in (quality.saturating_add(1)..failed_quality).rev() {
+                let candidate_output = encode_jpeg_at_quality(image, candidate)?;
+                if candidate_output.len() <= max_jpeg_bytes {
+                    return Ok((candidate_output, candidate));
+                }
+            }
             return Ok((output, quality));
         }
+        failed_quality = Some(quality);
+        if quality == 30 {
+            break;
+        }
+        quality = quality.saturating_sub(5).max(30);
     }
     Err(format!(
         "JPEG remains larger than the negotiated {max_jpeg_bytes}-byte limit"
     ))
-}
-
-/* Crop, scale, and letterbox a raw capture to the device canvas. PipeWire
-frames arrive already transformed, so they pass through untouched. */
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-fn prepare_image(
-    image: DynamicImage,
-    session: &CaptureSession,
-    config: &StreamConfig,
-    target: &StreamTarget,
-) -> Result<DynamicImage, String> {
-    #[cfg(target_os = "linux")]
-    if matches!(session, CaptureSession::PipeWire(..)) {
-        return Ok(image);
-    }
-    crop_and_letterbox(image, config, target)
 }
 
 fn encode_prepared_frame(
@@ -553,9 +578,10 @@ fn build_frame(
     sequence: u32,
     target: &StreamTarget,
 ) -> Result<(Vec<u8>, usize), String> {
-    let image = crop_and_letterbox(image, config, target)?;
+    let mut prepared = crop_and_letterbox(image, config, target)?;
+    prepared.apply_quality_filter();
     let (frame, jpeg_bytes, _) =
-        encode_prepared_frame(&image, config.jpeg_quality, sequence, target)?;
+        encode_prepared_frame(&prepared.image, config.jpeg_quality, sequence, target)?;
     Ok((frame, jpeg_bytes))
 }
 
@@ -649,11 +675,13 @@ fn open_capture_session(
     open_xcap_source(&config.source_id)
 }
 
-fn capture_next(session: &CaptureSession) -> Result<DynamicImage, String> {
+fn capture_raw_next(session: &CaptureSession) -> Result<DynamicImage, String> {
     match session {
         CaptureSession::StaticColorBars(image) => Ok(image.clone()),
         #[cfg(target_os = "linux")]
-        CaptureSession::PipeWire(receiver, _) => receiver.receive(Duration::from_secs(10)),
+        CaptureSession::PipeWire(receiver, _) => {
+            Ok(receiver.receive(Duration::from_secs(10))?.image)
+        }
         #[cfg(not(target_os = "linux"))]
         CaptureSession::Monitor(monitor) => Ok(DynamicImage::ImageRgba8(
             monitor.capture_image().map_err(xcap_error)?,
@@ -671,18 +699,35 @@ fn capture_next(session: &CaptureSession) -> Result<DynamicImage, String> {
     }
 }
 
+fn capture_next(
+    session: &CaptureSession,
+    config: &StreamConfig,
+    target: &StreamTarget,
+) -> Result<PreparedImage, String> {
+    #[cfg(target_os = "linux")]
+    if let CaptureSession::PipeWire(receiver, _) = session {
+        return receiver.receive(Duration::from_secs(10));
+    }
+    crop_and_letterbox(capture_raw_next(session)?, config, target)
+}
+
 fn capture_next_optional(
     session: &CaptureSession,
+    config: &StreamConfig,
+    target: &StreamTarget,
     timeout: Duration,
-) -> Result<Option<DynamicImage>, String> {
+) -> Result<Option<PreparedImage>, String> {
     match session {
         #[cfg(target_os = "linux")]
         CaptureSession::PipeWire(receiver, _) => receiver.receive_optional(timeout),
-        _ => capture_next(session).map(Some),
+        _ => capture_next(session, config, target).map(Some),
     }
 }
 
 fn image_fingerprint(image: &DynamicImage) -> u32 {
+    if let Some(image) = image.as_rgb8() {
+        return crc32fast::hash(image.as_raw());
+    }
     crc32fast::hash(image.to_rgb8().as_raw())
 }
 
@@ -748,6 +793,8 @@ fn emit(
         detail,
         fps,
         jpeg_bytes,
+        0,
+        0,
         dropped_frames,
         video_transport,
         0,
@@ -763,6 +810,8 @@ fn emit_metrics(
     detail: impl Into<String>,
     fps: u8,
     jpeg_bytes: usize,
+    jpeg_quality_used: u8,
+    source_scale_percent: u16,
     dropped_frames: u32,
     video_transport: &str,
     capture_encode_ms: u32,
@@ -781,6 +830,8 @@ fn emit_metrics(
         detail: detail.into(),
         fps,
         jpeg_bytes,
+        jpeg_quality_used,
+        source_scale_percent,
         dropped_frames,
         video_transport: video_transport.into(),
         capture_encode_ms,
@@ -1400,12 +1451,14 @@ fn validate_touch_descriptor(
         || u64::from(descriptor.width) * u64::from(descriptor.height) > MAX_TARGET_PIXELS
         || !(1..=1000).contains(&descriptor.max_move_hz)
     {
-        return Err(format!("Device provided invalid touch parameters {descriptor:?}"));
+        return Err(format!(
+            "Device provided invalid touch parameters {descriptor:?}"
+        ));
     }
     Ok(Some(descriptor))
 }
 
-fn negotiate_stream(
+fn negotiate_transport(
     socket: &mut WebSocket<TcpStream>,
     requested_transport: &str,
     subscribe_touch: bool,
@@ -1465,6 +1518,13 @@ fn negotiate_stream(
     } else {
         VideoSender::Tcp
     };
+    Ok((sender, target, touch_descriptor))
+}
+
+fn start_device_stream(
+    socket: &mut WebSocket<TcpStream>,
+    requested_transport: &str,
+) -> Result<(), String> {
     let started = control_request(
         socket,
         json!({"type": "start_stream", "request_id": "start-1"}),
@@ -1473,7 +1533,17 @@ fn negotiate_stream(
     if started.kind != "stream_started" || started.video_transport != requested_transport {
         return Err("Device did not start the requested video transport".to_string());
     }
-    Ok((sender, target, touch_descriptor))
+    Ok(())
+}
+
+fn negotiate_stream(
+    socket: &mut WebSocket<TcpStream>,
+    requested_transport: &str,
+    subscribe_touch: bool,
+) -> Result<(VideoSender, StreamTarget, Option<touch::TouchDescriptor>), String> {
+    let negotiated = negotiate_transport(socket, requested_transport, subscribe_touch)?;
+    start_device_stream(socket, requested_transport)?;
+    Ok(negotiated)
 }
 
 fn parse_http_response(response: &[u8]) -> Result<Option<(usize, usize)>, String> {
@@ -1662,16 +1732,7 @@ fn run_stream(
     instead of re-walking the ladder from the user setting every frame. */
     let mut adaptive_quality = jpeg_quality;
     let mut dropped_frames = 0_u32;
-    let mut heartbeat = if matches!(sender, VideoSender::Udp { .. }) {
-        if let Err(error) = configure_udp_control_socket(&mut socket) {
-            emit(&app, "error", error, 0, 0, 0, video_transport);
-            close_device_stream(&mut socket);
-            return dropped_frames;
-        }
-        Some(UdpControlHeartbeat::new())
-    } else {
-        None
-    };
+    let mut heartbeat = None;
     let mut sequence = 0_u32;
     let capture = match capture_override.map_or_else(
         || open_capture_session(&app, &config, stop.clone(), &target, true),
@@ -1702,9 +1763,9 @@ fn run_stream(
             }
         }
     }
-    let touch_geometry: inject::SharedTouchGeometry = Arc::new(Mutex::new(
-        initial_touch_geometry(&capture, &config, &target),
-    ));
+    let touch_geometry: inject::SharedTouchGeometry = Arc::new(Mutex::new(initial_touch_geometry(
+        &capture, &config, &target,
+    )));
     let touch_tx = if let Some(descriptor) = touch_descriptor {
         let (tx, rx) = mpsc::channel();
         spawn_touch_worker(
@@ -1729,8 +1790,8 @@ fn run_stream(
         video_transport,
     );
     let capture_wait_started = Instant::now();
-    let image = match capture_next(&capture) {
-        Ok(image) => image,
+    let prepared = match capture_next(&capture, &config, &target) {
+        Ok(prepared) => prepared,
         Err(error) => {
             if !stop.load(Ordering::Relaxed) {
                 emit(
@@ -1753,34 +1814,82 @@ fn run_stream(
     }
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
     let encode_started = Instant::now();
-    let (frame, jpeg_bytes, first_fingerprint): (Vec<u8>, usize, u32) =
-        match prepare_image(image, &capture, &config, &target).and_then(|prepared| {
-            let fingerprint = image_fingerprint(&prepared);
-            encode_prepared_frame(&prepared, adaptive_quality, sequence, &target).map(
-                |(frame, jpeg_bytes, used_quality)| (frame, jpeg_bytes, used_quality, fingerprint),
-            )
-        }) {
-            Ok((frame, jpeg_bytes, used_quality, fingerprint)) => {
-                adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
-                (frame, jpeg_bytes, fingerprint)
+    let first_encoded = {
+        let fingerprint = image_fingerprint(&prepared.image);
+        let mut prepared = prepared;
+        prepared.apply_quality_filter();
+        encode_prepared_frame(&prepared.image, adaptive_quality, sequence, &target).map(
+            |(frame, jpeg_bytes, used_quality)| {
+                (
+                    frame,
+                    jpeg_bytes,
+                    used_quality,
+                    fingerprint,
+                    prepared.source_scale_percent,
+                )
+            },
+        )
+    };
+    let (frame, jpeg_bytes, first_fingerprint, mut last_used_quality, mut source_scale_percent): (
+        Vec<u8>,
+        usize,
+        u32,
+        u8,
+        u16,
+    ) = match first_encoded {
+        Ok((frame, jpeg_bytes, used_quality, fingerprint, scale_percent)) => {
+            adaptive_quality = used_quality.saturating_add(2).min(jpeg_quality);
+            (frame, jpeg_bytes, fingerprint, used_quality, scale_percent)
+        }
+        Err(error) => {
+            if !stop.load(Ordering::Relaxed) {
+                emit(
+                    &app,
+                    "error",
+                    format!("First screenshot failed: {error}"),
+                    0,
+                    0,
+                    0,
+                    video_transport,
+                );
             }
-            Err(error) => {
-                if !stop.load(Ordering::Relaxed) {
-                    emit(
-                        &app,
-                        "error",
-                        format!("First screenshot failed: {error}"),
-                        0,
-                        0,
-                        0,
-                        video_transport,
-                    );
-                }
-                close_device_stream(&mut socket);
-                return dropped_frames;
-            }
-        };
+            close_device_stream(&mut socket);
+            return dropped_frames;
+        }
+    };
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
+    emit(
+        &app,
+        "starting device stream",
+        "First frame is ready; starting the device video session",
+        0,
+        jpeg_bytes,
+        0,
+        video_transport,
+    );
+    if let Err(error) = start_device_stream(&mut socket, video_transport) {
+        if !stop.load(Ordering::Relaxed) {
+            emit(
+                &app,
+                "error",
+                format!("Device stream start failed: {error}"),
+                0,
+                jpeg_bytes,
+                0,
+                video_transport,
+            );
+        }
+        close_device_stream(&mut socket);
+        return dropped_frames;
+    }
+    if matches!(sender, VideoSender::Udp { .. }) {
+        if let Err(error) = configure_udp_control_socket(&mut socket) {
+            emit(&app, "error", error, 0, jpeg_bytes, 0, video_transport);
+            close_device_stream(&mut socket);
+            return dropped_frames;
+        }
+        heartbeat = Some(UdpControlHeartbeat::new());
+    }
     let mut cached_frame = frame.clone();
     let mut last_fingerprint = first_fingerprint;
     let mut last_preview = Instant::now() - PREVIEW_INTERVAL;
@@ -1845,6 +1954,8 @@ fn run_stream(
         },
         0,
         jpeg_bytes,
+        last_used_quality,
+        source_scale_percent,
         0,
         video_transport,
         first_capture_encode_ms,
@@ -1945,7 +2056,7 @@ fn run_stream(
             }
         }
         let capture_wait_started = Instant::now();
-        let image = match capture_next_optional(&capture, frame_interval) {
+        let image = match capture_next_optional(&capture, &config, &target, frame_interval) {
             Ok(image) => image,
             Err(error) => {
                 dropped_frames += 1;
@@ -1975,35 +2086,23 @@ fn run_stream(
         /* Fingerprint the already cropped/scaled target image exactly once
         per captured frame; a raw desktop-sized hash costs far more. */
         let prepared = match image {
-            Some(image) => match prepare_image(image, &capture, &config, &target) {
-                Ok(prepared) => {
-                    let fingerprint = image_fingerprint(&prepared);
-                    (fingerprint != last_fingerprint).then_some((prepared, fingerprint))
-                }
-                Err(error) => {
-                    dropped_frames += 1;
-                    emit(
-                        &app,
-                        "dropping",
-                        error,
-                        0,
-                        0,
-                        dropped_frames,
-                        video_transport,
-                    );
-                    continue;
-                }
-            },
+            Some(prepared) => {
+                let fingerprint = image_fingerprint(&prepared.image);
+                (fingerprint != last_fingerprint).then_some((prepared, fingerprint))
+            }
             None => None,
         };
         let static_frame = prepared.is_none();
         let (frame, jpeg_bytes): (Vec<u8>, usize) = match prepared {
-            Some((prepared, fingerprint)) => {
-                match encode_prepared_frame(&prepared, adaptive_quality, sequence, &target) {
+            Some((mut prepared, fingerprint)) => {
+                prepared.apply_quality_filter();
+                match encode_prepared_frame(&prepared.image, adaptive_quality, sequence, &target) {
                     Ok((frame, jpeg_bytes, used_quality)) => {
-                        adaptive_quality = used_quality.saturating_add(5).min(jpeg_quality);
+                        adaptive_quality = used_quality.saturating_add(2).min(jpeg_quality);
                         cached_frame = frame.clone();
                         last_fingerprint = fingerprint;
+                        last_used_quality = used_quality;
+                        source_scale_percent = prepared.source_scale_percent;
                         static_frames = 0;
                         (frame, jpeg_bytes)
                     }
@@ -2098,6 +2197,8 @@ fn run_stream(
                             error,
                             0,
                             jpeg_bytes,
+                            last_used_quality,
+                            source_scale_percent,
                             dropped_frames,
                             video_transport,
                             capture_encode_ms,
@@ -2128,6 +2229,8 @@ fn run_stream(
             },
             fps,
             jpeg_bytes,
+            last_used_quality,
+            source_scale_percent,
             dropped_frames,
             video_transport,
             capture_encode_ms,
@@ -2164,7 +2267,7 @@ fn capture_selection_frame(capture: &CaptureSession) -> Result<RawSelectionFrame
             source_height: frame.source_height,
         });
     }
-    let image = capture_next(capture)?;
+    let image = capture_raw_next(capture)?;
     let width = image.width();
     let height = image.height();
     Ok(RawSelectionFrame {
@@ -2418,7 +2521,7 @@ fn start_wifi_stream(
         &config.video_transport,
     );
     let (sender, target, touch_descriptor) =
-        negotiate_stream(&mut socket, &config.video_transport, config.touch_control)?;
+        negotiate_transport(&mut socket, &config.video_transport, config.touch_control)?;
     if config.touch_control && touch_descriptor.is_none() {
         emit(
             &app,
@@ -2599,16 +2702,16 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use image::GenericImageView;
+    use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
     use super::{
-        active_stream_error, base64_encode, build_frame, encode_jpeg, ensure_reconnect_target,
-        ensure_reconnect_touch, ensure_status_dimensions, parse_http_response, replay_frame,
-        static_color_bars, validate_region, validate_stream_target, validate_touch_descriptor,
-        CaptureRegionConfig, ControlReply, DisplayOrientation, ProjectionMode, StreamConfig,
-        StreamTarget, UdpParameters,
+        active_stream_error, base64_encode, build_frame, encode_jpeg, encode_jpeg_at_quality,
+        ensure_reconnect_target, ensure_reconnect_touch, ensure_status_dimensions,
+        parse_http_response, replay_frame, static_color_bars, validate_region,
+        validate_stream_target, validate_touch_descriptor, CaptureRegionConfig, ControlReply,
+        DisplayOrientation, ProjectionMode, StreamConfig, StreamTarget, UdpParameters,
     };
     use crate::{protocol, touch};
 
@@ -2644,7 +2747,7 @@ mod tests {
         StreamTarget {
             width: 1024,
             height: 600,
-            max_frame_bytes: 512 * 1024,
+            max_frame_bytes: 384 * 1024 + protocol::HEADER_LEN,
         }
     }
 
@@ -2788,6 +2891,34 @@ mod tests {
         assert!((30..=80).contains(&used_quality));
     }
 
+    #[test]
+    fn encode_jpeg_refines_to_the_highest_quality_within_limit() {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(160, 90, |x, y| {
+            Rgb([
+                ((x * 13 + y * 3) & 0xff) as u8,
+                ((x * 5 + y * 17) & 0xff) as u8,
+                ((x * 11 + y * 7) & 0xff) as u8,
+            ])
+        }));
+        let sizes: Vec<(u8, usize)> = (30..=85)
+            .map(|quality| {
+                (
+                    quality,
+                    encode_jpeg_at_quality(&image, quality).unwrap().len(),
+                )
+            })
+            .collect();
+        let limit = sizes.iter().find(|(quality, _)| *quality == 72).unwrap().1;
+        let expected = sizes
+            .iter()
+            .filter(|(_, size)| *size <= limit)
+            .map(|(quality, _)| *quality)
+            .max()
+            .unwrap();
+        let (_, used_quality) = encode_jpeg(&image, 85, limit).unwrap();
+        assert_eq!(used_quality, expected);
+    }
+
     fn hello_reply(width: u16, height: u16, max_frame_bytes: usize) -> ControlReply {
         ControlReply {
             kind: "hello_ack".into(),
@@ -2805,10 +2936,10 @@ mod tests {
 
     #[test]
     fn validates_dynamic_tcp_and_udp_targets() {
-        let tcp = hello_reply(1024, 600, 512 * 1024);
+        let tcp = hello_reply(1024, 600, 384 * 1024 + protocol::HEADER_LEN);
         assert_eq!(validate_stream_target(&tcp, "tcp").unwrap(), p4_target());
 
-        let mut udp = hello_reply(1024, 600, 512 * 1024);
+        let mut udp = hello_reply(1024, 600, 1200 * protocol::MAX_UDP_FRAGMENTS);
         udp.video_transport = "udp".into();
         udp.udp = Some(UdpParameters {
             port: 5000,
@@ -2880,7 +3011,7 @@ mod tests {
             "video_transport": "tcp",
             "width": 1024,
             "height": 600,
-            "max_frame_bytes": 262168,
+            "max_frame_bytes": 393240,
             "capabilities": {"touch": true},
             "touch": {"width": 800, "height": 480, "max_move_hz": 60}
         }))

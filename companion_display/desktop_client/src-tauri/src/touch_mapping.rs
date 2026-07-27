@@ -65,8 +65,8 @@ pub fn map_panel_to_source(
     let (logical_width, logical_height) = params
         .orientation
         .logical_size(params.panel_width, params.panel_height);
-    let scale = (logical_width as f32 / crop_width as f32)
-        .min(logical_height as f32 / crop_height as f32);
+    let scale =
+        (logical_width as f32 / crop_width as f32).min(logical_height as f32 / crop_height as f32);
     let draw_width = ((crop_width as f32 * scale).round() as u32)
         .max(1)
         .min(logical_width);
@@ -133,8 +133,16 @@ mod tests {
         assert!(top.x > 0.0 && top.x < 6.0, "top.x = {}", top.x);
         assert!(top.y > 0.0 && top.y < 6.0, "top.y = {}", top.y);
         let bottom = map_panel_to_source(&params, 367, 326).unwrap();
-        assert!(bottom.x < 1920.0 && bottom.x > 1914.0, "bottom.x = {}", bottom.x);
-        assert!(bottom.y < 1080.0 && bottom.y > 1074.0, "bottom.y = {}", bottom.y);
+        assert!(
+            bottom.x < 1920.0 && bottom.x > 1914.0,
+            "bottom.x = {}",
+            bottom.x
+        );
+        assert!(
+            bottom.y < 1080.0 && bottom.y > 1074.0,
+            "bottom.y = {}",
+            bottom.y
+        );
     }
 
     #[test]

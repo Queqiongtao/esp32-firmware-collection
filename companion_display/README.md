@@ -21,13 +21,15 @@ WDP/WebRTC 位于仓库顶层 `wireless_display/`，它与本目录的 WebSocket
 | 设备 | 网络 | 视频 / 触摸坐标 | TCP 完整帧上限 | UDP 有效完整帧上限 | 构建根 |
 | --- | --- | --- | --- | --- | --- |
 | ESP32-S3 Waveshare AMOLED 1.8 | 芯片内置 2.4 GHz Wi-Fi | `368x448` / `368x448` | `102424` 字节 | `102424` 字节 | `firmware/esp32s3` |
-| ESP32-P4 JC1060P470 | ESP32-C6 + ESP-Hosted SDIO | `1024x600` / `1024x600` | `262168` 字节 | `153600` 字节 | `firmware/esp32p4` |
+| ESP32-P4 JC1060P470 | ESP32-C6 + ESP-Hosted SDIO | `1024x600` / `1024x600` | `393240` 字节 | `153600` 字节 | `firmware/esp32p4` |
 
-公共客户端从 `hello_ack` 读取视频尺寸、帧上限和触摸坐标空间，不识别或写死具体板卡。P4 的 TCP JPEG payload 上限为 256 KiB；UDP 还受 128 个、每个 1200 字节分片的限制。
+公共客户端从 `hello_ack` 读取视频尺寸、帧上限和触摸坐标空间，不识别或写死具体板卡。P4 的 TCP JPEG payload 上限为 384 KiB；UDP 仍受 128 个、每个 1200 字节分片的限制。
 
 ## PC 客户端
 
 客户端提供“实时投屏”和“区域投屏”两种模式。区域投屏先取得屏幕或窗口的冻结预览，用户鼠标框选后持续实时采集该区域；Linux 自动恢复上次来源时，可在全屏框选层直接更换屏幕或窗口。运行中可以重新框选，取消不会改变当前区域，点击 Stop 后设备恢复主页。开启“触摸控制”后，投屏期间在设备屏幕上单击、拖拽、长按（右键）和右缘滑动（滚轮）会反向操控 PC 鼠标，详见 [PC 客户端实现](docs/pc-client.md)。
+
+Linux 首次授权或重新选屏时，客户端在 `hello_ack` 后先取得并编码首帧，首帧就绪后才发送 `start_stream`，避免 Portal 操作消耗设备的 10 秒无帧超时。PipeWire 回调只负责裁剪、缩放和发布最新画面；变化画面的锐化与 JPEG 编码在发送线程执行。
 
 Ubuntu/Debian 首次构建需要安装 Tauri、WebKitGTK 和 PipeWire 依赖，然后执行：
 

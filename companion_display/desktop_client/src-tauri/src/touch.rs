@@ -154,13 +154,7 @@ impl GestureEngine {
                 t0: event.t,
             },
             (GestureState::Pending { x0, y0, t0 }, TouchEventKind::Move) => {
-                let moved = moved_beyond_threshold(
-                    x0,
-                    y0,
-                    event.x,
-                    event.y,
-                    self.move_threshold,
-                );
+                let moved = moved_beyond_threshold(x0, y0, event.x, event.y, self.move_threshold);
                 if !moved && event.t.wrapping_sub(t0) >= LONG_PRESS_MS {
                     actions.push(GestureAction::Click {
                         x: x0,
@@ -199,7 +193,11 @@ impl GestureEngine {
                 } else {
                     MouseButton::Left
                 };
-                actions.push(GestureAction::Click { x: x0, y: y0, button });
+                actions.push(GestureAction::Click {
+                    x: x0,
+                    y: y0,
+                    button,
+                });
                 GestureState::Idle
             }
             (GestureState::Dragging, TouchEventKind::Move) => {
@@ -456,12 +454,10 @@ mod tests {
             height: 480,
             max_move_hz: 60,
         };
-        let corner = event(TouchEventKind::Move, 799, 479, 10)
-            .normalize(descriptor, 1024, 600);
+        let corner = event(TouchEventKind::Move, 799, 479, 10).normalize(descriptor, 1024, 600);
         assert_eq!((corner.x, corner.y), (1023, 599));
 
-        let center = event(TouchEventKind::Move, 400, 240, 10)
-            .normalize(descriptor, 1024, 600);
+        let center = event(TouchEventKind::Move, 400, 240, 10).normalize(descriptor, 1024, 600);
         assert!((511..=513).contains(&center.x));
         assert!((299..=301).contains(&center.y));
     }

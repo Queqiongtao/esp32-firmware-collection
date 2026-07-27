@@ -83,7 +83,7 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
           :max="30"
           :disabled="false"
           :show-button="false"
-          @update:value="(v: number | null) => emit('update:fps', v ?? 25)"
+          @update:value="(v: number | null) => emit('update:fps', v ?? 20)"
           @input="() => emit('input-params')"
         />
       </div>
@@ -95,7 +95,7 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
           :max="95"
           :disabled="false"
           :show-button="false"
-          @update:value="(v: number | null) => emit('update:quality', v ?? 70)"
+          @update:value="(v: number | null) => emit('update:quality', v ?? 85)"
           @input="() => emit('input-params')"
         />
       </div>

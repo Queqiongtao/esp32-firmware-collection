@@ -28,6 +28,11 @@
 #define UDP_SESSION_TIMEOUT_US (5 * 1000 * 1000)
 #define FRAME_TIMEOUT_US ((int64_t)CONFIG_COMPANION_FRAME_TIMEOUT_MS * 1000)
 #define FRAME_LIMIT ((size_t)CONFIG_COMPANION_FRAME_LIMIT_KB * 1024U)
+#define COMPLETE_FRAME_LIMIT (FRAME_LIMIT + sizeof(companion_frame_header_t))
+#define UDP_FRAME_LIMIT \
+    ((COMPLETE_FRAME_LIMIT < COMPANION_UDP_FRAGMENTED_FRAME_LIMIT) \
+         ? COMPLETE_FRAME_LIMIT \
+         : COMPANION_UDP_FRAGMENTED_FRAME_LIMIT)
 
 typedef enum { VIDEO_TRANSPORT_NONE, VIDEO_TRANSPORT_TCP, VIDEO_TRANSPORT_UDP } video_transport_t;
 
@@ -460,9 +465,12 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
                  ws_fd, video_transport_name(transport));
     }
     char response[512];
+    const size_t session_frame_limit = transport == VIDEO_TRANSPORT_UDP
+        ? UDP_FRAME_LIMIT
+        : COMPLETE_FRAME_LIMIT;
     companion_control_build_hello_ack(response, sizeof(response), message->request_id,
                                       video_transport_name(transport),
-                                      FRAME_LIMIT + sizeof(companion_frame_header_t),
+                                      session_frame_limit,
                                       CONFIG_COMPANION_UDP_PORT, session_id, session_token,
                                       COMPANION_UDP_MAX_PAYLOAD, touch_enabled);
     update_transport_status(SUBSCREEN_TRANSPORT_NEGOTIATING);
@@ -613,7 +621,7 @@ static esp_err_t stream_ws(httpd_req_t *req)
         return httpd_ws_send_frame(req, &pong);
     }
     if (frame.type == HTTPD_WS_TYPE_PONG && frame.len == 0) return ESP_OK;
-    if (frame.len > FRAME_LIMIT + sizeof(companion_frame_header_t) || frame.len == 0) return ESP_ERR_INVALID_SIZE;
+    if (frame.len > COMPLETE_FRAME_LIMIT || frame.len == 0) return ESP_ERR_INVALID_SIZE;
     uint8_t *data = malloc(frame.len + (frame.type == HTTPD_WS_TYPE_TEXT ? 1 : 0));
     if (data == NULL) return ESP_ERR_NO_MEM;
     frame.payload = data;
@@ -678,7 +686,7 @@ static void udp_task(void *arg)
             const bool session_active = s_session.active && s_session.started &&
                                         s_session.video_transport == VIDEO_TRANSPORT_UDP;
             companion_udp_reject_reason_t reject = companion_udp_validate_packet(
-                header, packet_payload, FRAME_LIMIT + sizeof(companion_frame_header_t),
+                header, packet_payload, UDP_FRAME_LIMIT,
                 session_active, s_session.session_id, s_session.session_token,
                 s_session.peer_addr_bound, s_session.peer_addr.s_addr,
                 source.sin_addr.s_addr);
@@ -886,7 +894,7 @@ static esp_err_t start_server(void)
 
 static esp_err_t start_udp_server(void)
 {
-    s_udp_reassembly = heap_caps_malloc(FRAME_LIMIT + sizeof(companion_frame_header_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_udp_reassembly = heap_caps_malloc(UDP_FRAME_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(s_udp_reassembly != NULL, ESP_ERR_NO_MEM, TAG, "UDP reassembly buffer");
     s_udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     ESP_RETURN_ON_FALSE(s_udp_socket >= 0, ESP_FAIL, TAG, "UDP socket");

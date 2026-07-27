@@ -1,6 +1,8 @@
 use image::{imageops, RgbImage};
 use serde::Deserialize;
 
+use crate::image_quality::ImageRect;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DisplayOrientation {
@@ -48,6 +50,37 @@ impl DisplayOrientation {
             Self::LandscapeLeft => (y, physical_width - 1 - x),
             Self::PortraitInverted => (physical_width - 1 - x, physical_height - 1 - y),
             Self::LandscapeRight => (physical_height - 1 - y, x),
+        }
+    }
+
+    pub fn map_logical_rect_to_physical(
+        self,
+        rect: ImageRect,
+        physical_width: u32,
+        physical_height: u32,
+    ) -> ImageRect {
+        let corners = [
+            (rect.x, rect.y),
+            (rect.x + rect.width - 1, rect.y),
+            (rect.x, rect.y + rect.height - 1),
+            (rect.x + rect.width - 1, rect.y + rect.height - 1),
+        ];
+        let mut min_x = physical_width;
+        let mut min_y = physical_height;
+        let mut max_x = 0;
+        let mut max_y = 0;
+        for (x, y) in corners {
+            let (x, y) = self.map_logical_to_physical(x, y, physical_width, physical_height);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        ImageRect {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x + 1,
+            height: max_y - min_y + 1,
         }
     }
 
@@ -147,5 +180,46 @@ mod tests {
         assert_eq!(right.dimensions(), (3, 4));
         assert_eq!(left.get_pixel(2, 0)[0], 0);
         assert_eq!(right.get_pixel(0, 3)[0], 0);
+    }
+
+    #[test]
+    fn logical_content_rect_maps_for_every_orientation() {
+        let rect = ImageRect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        assert_eq!(
+            DisplayOrientation::Portrait.map_logical_rect_to_physical(rect, 10, 8),
+            rect
+        );
+        assert_eq!(
+            DisplayOrientation::PortraitInverted.map_logical_rect_to_physical(rect, 10, 8),
+            ImageRect {
+                x: 6,
+                y: 2,
+                width: 3,
+                height: 4,
+            }
+        );
+        assert_eq!(
+            DisplayOrientation::LandscapeLeft.map_logical_rect_to_physical(rect, 10, 8),
+            ImageRect {
+                x: 4,
+                y: 1,
+                width: 4,
+                height: 3,
+            }
+        );
+        assert_eq!(
+            DisplayOrientation::LandscapeRight.map_logical_rect_to_physical(rect, 10, 8),
+            ImageRect {
+                x: 2,
+                y: 4,
+                width: 4,
+                height: 3,
+            }
+        );
     }
 }
