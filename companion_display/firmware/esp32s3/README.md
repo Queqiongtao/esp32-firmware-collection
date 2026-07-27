@@ -5,13 +5,14 @@
 端到端系统由设备工程和仓库公共客户端组成：
 
 - 设备端：ESP-IDF 固件，负责配网、鉴权、控制会话、视频接收、JPEG 解码和 AMOLED 显示。
-- PC 端：位于本产品工程 `desktop_client` 的公共 Tauri 2 + Vue 3 客户端，可供后续 S3/P4 设备共同使用。
+- PC 端：位于本产品工程 `desktop_client` 的公共 Tauri 2 + Vue 3 客户端，由 S3/P4 设备共同使用。
 
 控制通道始终使用 WebSocket/TCP。视频可选择 TCP 或 UDP：TCP 模式可靠、适合首次联调；UDP 模式允许丢弃不完整帧，以换取更低延迟。两端都采用“最新画面优先”策略，处理不过来时替换旧帧，不持续累积延迟。
 
 ## 文档导航
 
 - [设备端实现](docs/device.md)：固件构建、板级驱动、显示、帧管线、配网、控制会话和设备诊断。
+- [ESP32-P4 设备固件](../esp32p4/README.md)：同一产品协议下的 JC1060P470 实现。
 - [PC 端实现](../../docs/pc-client.md)：客户端构建、界面状态、画面采集、编码、传输、重连和性能诊断。
 - [通信协议 v3](../../PROTOCOL.md)：S3/P4 公共 HTTP 接口、WebSocket 控制消息、`CDP1` 完整帧、`CDU1` UDP 分片和 `touch_events` 触摸事件。
 - [显示颜色格式](docs/display-color-format.md)：SH8601 RGB565 字节序和颜色常量约束。
@@ -35,6 +36,8 @@ PC 采集 -> Crop/等比缩放/补黑边 -> JPEG 编码 -> CDP1 封装
 ```
 
 WebSocket 不仅用于 TCP 视频，也负责 UDP 模式的鉴权、协商、启停、心跳和会话生命周期。UDP 数据不能脱离控制连接独立建立视频会话。
+
+`frame_pipeline`、`touch_input` 和 `transport_wifi` 位于 `firmware/common/components`，由 S3/P4 固件共同编译；本目录的 `companion_board` 与 `subscreen_display` 只负责 S3 板级硬件和显示后端。
 
 ## 快速开始
 

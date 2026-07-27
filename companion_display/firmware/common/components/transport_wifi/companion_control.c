@@ -294,24 +294,41 @@ int companion_control_build_hello_ack(char *buffer, size_t buffer_size,
                                       bool touch_enabled)
 {
     const char *touch = touch_enabled ? "true" : "false";
+    const char *touch_description = touch_enabled
+        ? ",\"touch\":{\"width\":%d,\"height\":%d,\"max_move_hz\":%d}"
+        : "";
     if (strcmp(video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0) {
-        return snprintf(buffer, buffer_size,
-                        "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false},\"touch\":{\"width\":%d,\"height\":%d,\"max_move_hz\":%d}}",
-                        request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
-                        COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
-                        (unsigned)max_frame_bytes, udp_port,
-                        (unsigned long)session_id, (unsigned long)session_token,
-                        udp_max_payload, touch,
-                        COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
-                        COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
+        int written = snprintf(buffer, buffer_size,
+                               "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
+                               request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
+                               COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
+                               (unsigned)max_frame_bytes, udp_port,
+                               (unsigned long)session_id, (unsigned long)session_token,
+                               udp_max_payload, touch);
+        if (touch_enabled && written > 0 && (size_t)written < buffer_size) {
+            written += snprintf(buffer + written, buffer_size - (size_t)written,
+                                touch_description, COMPANION_CONTROL_WIDTH,
+                                COMPANION_CONTROL_HEIGHT, COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
+        }
+        if (written > 0 && (size_t)written < buffer_size) {
+            written += snprintf(buffer + written, buffer_size - (size_t)written, "}");
+        }
+        return written;
     }
-    return snprintf(buffer, buffer_size,
-                    "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"tcp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false},\"touch\":{\"width\":%d,\"height\":%d,\"max_move_hz\":%d}}",
-                    request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
-                    COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
-                    (unsigned)max_frame_bytes, touch,
-                    COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
-                    COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
+    int written = snprintf(buffer, buffer_size,
+                           "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"tcp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
+                           request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
+                           COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
+                           (unsigned)max_frame_bytes, touch);
+    if (touch_enabled && written > 0 && (size_t)written < buffer_size) {
+        written += snprintf(buffer + written, buffer_size - (size_t)written,
+                            touch_description, COMPANION_CONTROL_WIDTH,
+                            COMPANION_CONTROL_HEIGHT, COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ);
+    }
+    if (written > 0 && (size_t)written < buffer_size) {
+        written += snprintf(buffer + written, buffer_size - (size_t)written, "}");
+    }
+    return written;
 }
 
 int companion_control_build_stream_started(char *buffer, size_t buffer_size,

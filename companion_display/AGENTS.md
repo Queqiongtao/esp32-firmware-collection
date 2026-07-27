@@ -19,3 +19,4 @@
 - 前端执行 `npm run build`。
 - Rust 后端在 `desktop_client/src-tauri` 执行 `cargo test` 和 `cargo clippy --all-targets`。
 - ESP32-S3 固件在 `firmware/esp32s3` 执行 `./dev.sh build`。
+- ESP32-P4 固件在 `firmware/esp32p4` 执行 `./dev.sh build`。

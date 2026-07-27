@@ -1,4 +1,18 @@
 menu "Companion Display Wi-Fi"
+config COMPANION_DISPLAY_WIDTH
+    int "Negotiated display width (px)"
+    default 368
+    help
+        Physical panel width advertised in hello_ack and /api/status. The PC
+        client scales, letterboxes and encodes to exactly this size, and the
+        board's display module must accept frames of this width. Must match
+        the board component's panel resolution.
+config COMPANION_DISPLAY_HEIGHT
+    int "Negotiated display height (px)"
+    default 448
+    help
+        Physical panel height advertised in hello_ack and /api/status. See
+        COMPANION_DISPLAY_WIDTH.
 config COMPANION_HTTP_PORT
     int "HTTP and WebSocket port"
     default 80

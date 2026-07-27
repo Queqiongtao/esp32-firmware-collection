@@ -1,11 +1,20 @@
 use serde::Deserialize;
 
-/* Gesture tuning in device panel pixels / device milliseconds. The engine only
-uses differences of the device timestamps, so clock bases never matter. */
+/* S3 reference tuning. Other panel sizes scale these distances while time
+thresholds remain in device milliseconds. */
 pub const LONG_PRESS_MS: u32 = 500;
-pub const MOVE_THRESHOLD_PX: i32 = 8;
-pub const SCROLL_EDGE_PX: u16 = 28;
-pub const SCROLL_STEP_PX: i32 = 24;
+const REFERENCE_SHORT_EDGE: u32 = 368;
+const REFERENCE_HEIGHT: u32 = 448;
+const REFERENCE_MOVE_THRESHOLD: u32 = 8;
+const REFERENCE_SCROLL_EDGE: u32 = 28;
+const REFERENCE_SCROLL_STEP: u32 = 24;
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+pub struct TouchDescriptor {
+    pub width: u16,
+    pub height: u16,
+    pub max_move_hz: u16,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -21,6 +30,30 @@ pub struct TouchEvent {
     pub x: u16,
     pub y: u16,
     pub t: u32,
+}
+
+fn normalize_axis(value: u16, source_size: u16, target_size: u16) -> u16 {
+    if source_size <= 1 || target_size <= 1 {
+        return 0;
+    }
+    let source_max = u32::from(source_size - 1);
+    let target_max = u32::from(target_size - 1);
+    ((u32::from(value).min(source_max) * target_max + source_max / 2) / source_max) as u16
+}
+
+impl TouchEvent {
+    pub fn normalize(
+        &self,
+        descriptor: TouchDescriptor,
+        target_width: u16,
+        target_height: u16,
+    ) -> Self {
+        Self {
+            x: normalize_axis(self.x, descriptor.width, target_width),
+            y: normalize_axis(self.y, descriptor.height, target_height),
+            ..*self
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,31 +93,53 @@ enum GestureState {
 
 pub struct GestureEngine {
     panel_width: u16,
+    move_threshold: i32,
+    scroll_edge: u16,
+    scroll_step: i32,
     state: GestureState,
 }
 
-fn moved_beyond_threshold(x0: u16, y0: u16, x: u16, y: u16) -> bool {
+fn scale_distance(size: u32, reference_distance: u32, reference_size: u32) -> u32 {
+    ((size * reference_distance + reference_size / 2) / reference_size).max(1)
+}
+
+fn moved_beyond_threshold(x0: u16, y0: u16, x: u16, y: u16, threshold: i32) -> bool {
     let dx = (i32::from(x) - i32::from(x0)).abs();
     let dy = (i32::from(y) - i32::from(y0)).abs();
-    dx > MOVE_THRESHOLD_PX || dy > MOVE_THRESHOLD_PX
+    dx > threshold || dy > threshold
 }
 
 impl GestureEngine {
-    pub fn new(panel_width: u16) -> Self {
+    pub fn new(panel_width: u16, panel_height: u16) -> Self {
         Self {
             panel_width,
+            move_threshold: scale_distance(
+                u32::from(panel_width.min(panel_height)),
+                REFERENCE_MOVE_THRESHOLD,
+                REFERENCE_SHORT_EDGE,
+            ) as i32,
+            scroll_edge: scale_distance(
+                u32::from(panel_width),
+                REFERENCE_SCROLL_EDGE,
+                REFERENCE_SHORT_EDGE,
+            ) as u16,
+            scroll_step: scale_distance(
+                u32::from(panel_height),
+                REFERENCE_SCROLL_STEP,
+                REFERENCE_HEIGHT,
+            ) as i32,
             state: GestureState::Idle,
         }
     }
 
     fn in_scroll_zone(&self, x: u16) -> bool {
-        x >= self.panel_width.saturating_sub(SCROLL_EDGE_PX)
+        x >= self.panel_width.saturating_sub(self.scroll_edge)
     }
 
-    fn drain_scroll(x0: u16, y: u16, accum: &mut i32, actions: &mut Vec<GestureAction>) {
-        let steps = *accum / SCROLL_STEP_PX;
+    fn drain_scroll(&self, x0: u16, y: u16, accum: &mut i32, actions: &mut Vec<GestureAction>) {
+        let steps = *accum / self.scroll_step;
         if steps != 0 {
-            *accum -= steps * SCROLL_STEP_PX;
+            *accum -= steps * self.scroll_step;
             actions.push(GestureAction::Scroll { x: x0, y, steps });
         }
     }
@@ -99,7 +154,13 @@ impl GestureEngine {
                 t0: event.t,
             },
             (GestureState::Pending { x0, y0, t0 }, TouchEventKind::Move) => {
-                let moved = moved_beyond_threshold(x0, y0, event.x, event.y);
+                let moved = moved_beyond_threshold(
+                    x0,
+                    y0,
+                    event.x,
+                    event.y,
+                    self.move_threshold,
+                );
                 if !moved && event.t.wrapping_sub(t0) >= LONG_PRESS_MS {
                     actions.push(GestureAction::Click {
                         x: x0,
@@ -110,7 +171,7 @@ impl GestureEngine {
                 } else if moved {
                     if self.in_scroll_zone(x0) {
                         let mut accum = i32::from(event.y) - i32::from(y0);
-                        Self::drain_scroll(x0, event.y, &mut accum, &mut actions);
+                        self.drain_scroll(x0, event.y, &mut accum, &mut actions);
                         GestureState::Scrolling {
                             x0,
                             last_y: event.y,
@@ -165,7 +226,7 @@ impl GestureEngine {
                 TouchEventKind::Move,
             ) => {
                 accum += i32::from(event.y) - i32::from(last_y);
-                Self::drain_scroll(x0, event.y, &mut accum, &mut actions);
+                self.drain_scroll(x0, event.y, &mut accum, &mut actions);
                 GestureState::Scrolling {
                     x0,
                     last_y: event.y,
@@ -217,6 +278,11 @@ mod tests {
     use super::*;
 
     const PANEL_WIDTH: u16 = 368;
+    const PANEL_HEIGHT: u16 = 448;
+
+    fn engine() -> GestureEngine {
+        GestureEngine::new(PANEL_WIDTH, PANEL_HEIGHT)
+    }
 
     fn event(kind: TouchEventKind, x: u16, y: u16, t: u32) -> TouchEvent {
         TouchEvent { kind, x, y, t }
@@ -239,7 +305,7 @@ mod tests {
 
     #[test]
     fn quick_tap_clicks_left_at_the_down_position() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         assert!(engine
             .handle(&event(TouchEventKind::Down, 100, 120, 1000))
             .is_empty());
@@ -256,7 +322,7 @@ mod tests {
 
     #[test]
     fn movement_starts_a_left_drag_from_the_down_position() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         engine.handle(&event(TouchEventKind::Down, 100, 120, 1000));
         let actions = engine.handle(&event(TouchEventKind::Move, 120, 140, 1030));
         assert_eq!(
@@ -284,7 +350,7 @@ mod tests {
 
     #[test]
     fn long_press_fires_a_right_click_from_tick() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         engine.handle(&event(TouchEventKind::Down, 50, 60, 1000));
         assert!(engine.tick(1400).is_empty());
         assert_eq!(
@@ -303,7 +369,7 @@ mod tests {
 
     #[test]
     fn slow_release_without_tick_still_right_clicks() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         engine.handle(&event(TouchEventKind::Down, 50, 60, 1000));
         assert_eq!(
             engine.handle(&event(TouchEventKind::Up, 51, 61, 1700)),
@@ -317,7 +383,7 @@ mod tests {
 
     #[test]
     fn edge_swipe_scrolls_instead_of_dragging() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         let edge_x = PANEL_WIDTH - 10;
         engine.handle(&event(TouchEventKind::Down, edge_x, 200, 1000));
         /* 30 px downward: one step, 6 px remainder. */
@@ -347,7 +413,7 @@ mod tests {
 
     #[test]
     fn edge_swipe_up_scrolls_the_other_way() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         let edge_x = PANEL_WIDTH - 1;
         engine.handle(&event(TouchEventKind::Down, edge_x, 300, 1000));
         let actions = engine.handle(&event(TouchEventKind::Move, edge_x, 250, 1030));
@@ -363,7 +429,7 @@ mod tests {
 
     #[test]
     fn stray_down_restarts_tracking() {
-        let mut engine = GestureEngine::new(PANEL_WIDTH);
+        let mut engine = engine();
         engine.handle(&event(TouchEventKind::Down, 10, 10, 1000));
         engine.handle(&event(TouchEventKind::Move, 40, 40, 1020));
         /* Missed release: a new down must first end the held drag. */
@@ -381,5 +447,30 @@ mod tests {
                 button: MouseButton::Left
             }]
         );
+    }
+
+    #[test]
+    fn touch_coordinates_normalize_to_video_space() {
+        let descriptor = TouchDescriptor {
+            width: 800,
+            height: 480,
+            max_move_hz: 60,
+        };
+        let corner = event(TouchEventKind::Move, 799, 479, 10)
+            .normalize(descriptor, 1024, 600);
+        assert_eq!((corner.x, corner.y), (1023, 599));
+
+        let center = event(TouchEventKind::Move, 400, 240, 10)
+            .normalize(descriptor, 1024, 600);
+        assert!((511..=513).contains(&center.x));
+        assert!((299..=301).contains(&center.y));
+    }
+
+    #[test]
+    fn p4_gesture_distances_scale_from_the_s3_reference() {
+        let engine = GestureEngine::new(1024, 600);
+        assert_eq!(engine.move_threshold, 13);
+        assert_eq!(engine.scroll_edge, 78);
+        assert_eq!(engine.scroll_step, 32);
     }
 }

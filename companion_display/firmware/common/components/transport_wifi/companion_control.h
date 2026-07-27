@@ -12,8 +12,10 @@ extern "C" {
 #endif
 
 #define COMPANION_CONTROL_PROTOCOL_VERSION 3
-#define COMPANION_CONTROL_WIDTH 368
-#define COMPANION_CONTROL_HEIGHT 448
+/* Advertised panel size comes from the per-project sdkconfig so the shared
+ * protocol code serves boards with different displays. */
+#define COMPANION_CONTROL_WIDTH CONFIG_COMPANION_DISPLAY_WIDTH
+#define COMPANION_CONTROL_HEIGHT CONFIG_COMPANION_DISPLAY_HEIGHT
 #define COMPANION_CONTROL_TOUCH_MAX_MOVE_HZ 60
 #define COMPANION_CONTROL_TRANSPORT_TCP "tcp"
 #define COMPANION_CONTROL_TRANSPORT_UDP "udp"

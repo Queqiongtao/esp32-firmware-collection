@@ -259,6 +259,12 @@ frame_pipeline_submit_result_t frame_pipeline_submit(companion_transport_t sourc
 esp_err_t frame_pipeline_init(subscreen_display_t *display)
 {
     ESP_RETURN_ON_FALSE(display != NULL, ESP_ERR_INVALID_ARG, TAG, "display is null");
+    ESP_RETURN_ON_FALSE(subscreen_display_supports_frame_size(
+                            display, CONFIG_COMPANION_DISPLAY_WIDTH,
+                            CONFIG_COMPANION_DISPLAY_HEIGHT),
+                        ESP_ERR_INVALID_SIZE, TAG,
+                        "configured frame size %dx%d is not supported by display",
+                        CONFIG_COMPANION_DISPLAY_WIDTH, CONFIG_COMPANION_DISPLAY_HEIGHT);
     const size_t count = CONFIG_COMPANION_FRAME_BUFFER_COUNT;
     s_pipeline.display = display;
     s_pipeline.empty = xQueueCreate(count, sizeof(frame_t *));

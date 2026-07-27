@@ -6,10 +6,11 @@
 
 ```text
 esp32-firmware-collection/
-├── companion_display/         Companion Display v2 复合工程
+├── companion_display/         Companion Display v3 复合工程
 │   ├── desktop_client/        Tauri 2 + Vue 3 PC 客户端
 │   ├── firmware/
-│   │   └── esp32s3/           S3 AMOLED Wi-Fi 设备固件
+│   │   ├── esp32s3/           S3 AMOLED Wi-Fi 设备固件
+│   │   └── esp32p4/           P4 JC1060P470 Hosted Wi-Fi 设备固件
 │   ├── docs/
 │   └── PROTOCOL.md
 ├── esp32s3/
@@ -24,7 +25,14 @@ esp32-firmware-collection/
 └── wireless_display/          独立的 WDP/WebRTC 协议设计
 ```
 
-`companion_display` 延续现有 WebSocket + JPEG + UDP 的 Companion Display v2，将公共协议、PC 客户端和设备固件放在同一产品目录。未来 ESP32-P4 固件放入 `companion_display/firmware/esp32p4`，与当前 S3 固件保持独立构建。`wireless_display` 是不兼容的 WDP/WebRTC 新协议，两者不共享版本号或实现。
+`companion_display` 使用 WebSocket + JPEG + UDP 的 Companion Display v3，将公共协议、PC 客户端和 S3/P4 设备固件放在同一产品目录。两个固件保持独立构建，设备差异通过协议协商。`wireless_display` 是不兼容的 WDP/WebRTC 新协议，两者不共享版本号或实现。
+
+| Companion Display 设备 | 网络 | 默认协商尺寸 | TCP / UDP 完整帧上限 |
+| --- | --- | --- | --- |
+| ESP32-S3 Waveshare AMOLED 1.8 | 内置 Wi-Fi | `368x448` | `102424` / `102424` 字节 |
+| ESP32-P4 JC1060P470 | ESP32-C6 Hosted Wi-Fi | `1024x600` | `262168` / `153600` 字节 |
+
+设备能力、协议约束和各构建入口见 [Companion Display](companion_display/README.md)。
 
 ## 构建
 
@@ -32,6 +40,9 @@ esp32-firmware-collection/
 
 ```bash
 cd companion_display/firmware/esp32s3
+./dev.sh build
+
+cd ../esp32p4
 ./dev.sh build
 ```
 
@@ -45,7 +56,7 @@ npm ci
 npm run tauri:dev
 ```
 
-协议、适配要求和验证命令见 [Companion Display](companion_display/README.md)。
+协议、适配要求和验证命令同样以产品目录中的文档为准。
 
 ## 新增工程
 

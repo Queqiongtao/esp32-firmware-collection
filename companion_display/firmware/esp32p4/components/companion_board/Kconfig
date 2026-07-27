@@ -1,0 +1,26 @@
+menu "Companion Board (JC1060P470)"
+config BOARD_JC1060_DSI_LANE_BITRATE_MBPS
+    int "MIPI DSI lane bitrate (Mbps)"
+    default 600
+    help
+        Per-lane DSI bitrate. 600 Mbps matches the reference project default;
+        boards that fail to initialize the panel at 600 have been validated at
+        750 Mbps.
+config BOARD_JC1060_TOUCH_NATIVE_H_RES
+    int "GT911 native horizontal resolution"
+    default 800
+    help
+        The GT911 firmware on this panel batch reports an 800x480 coordinate
+        space that the board component scales to the 1024x600 panel. Adjust if
+        a different panel batch reports native coordinates.
+config BOARD_JC1060_TOUCH_NATIVE_V_RES
+    int "GT911 native vertical resolution"
+    default 480
+config BOARD_JC1060_BACKLIGHT_PERCENT
+    int "Backlight brightness after init (percent)"
+    range 1 100
+    default 80
+config BOARD_JC1060_NETWORK_READY_TIMEOUT_MS
+    int "ESP-Hosted transport ready timeout (ms)"
+    default 15000
+endmenu

@@ -1,6 +1,6 @@
 #include "touch_input.h"
 
-#include "board_amoled_1_8.h"
+#include "companion_board.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_timer.h"

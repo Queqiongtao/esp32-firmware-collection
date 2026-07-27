@@ -7,7 +7,6 @@
 #include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "esp_timer.h"
@@ -910,11 +909,17 @@ esp_err_t transport_wifi_init(subscreen_display_t *display)
     s_session_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_stream_transition_lock != NULL && s_session_lock != NULL,
                         ESP_ERR_NO_MEM, TAG, "stream synchronization locks");
-    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif"); ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
+    /* Boards with a network co-processor (ESP32-P4 + hosted) create the
+     * default event loop before this init runs; tolerate that. */
+    esp_err_t loop_err = esp_event_loop_create_default();
+    ESP_RETURN_ON_FALSE(loop_err == ESP_OK || loop_err == ESP_ERR_INVALID_STATE, loop_err, TAG, "event loop");
     s_sta_netif = esp_netif_create_default_wifi_sta(); esp_netif_create_default_wifi_ap();
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT(); ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "wifi init");
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, NULL)); ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL, NULL));
-    wifi_config_t ap = {}; uint8_t mac[6]; esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP); snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid), "Companion-%02X%02X", mac[4], mac[5]); ap.ap.ssid_len = strlen((char *)ap.ap.ssid); strlcpy((char *)ap.ap.password, CONFIG_COMPANION_AP_PASSWORD, sizeof(ap.ap.password)); ap.ap.authmode = WIFI_AUTH_WPA2_PSK; ap.ap.max_connection = 2; ap.ap.channel = 1;
+    wifi_config_t ap = {}; uint8_t mac[6];
+    ESP_RETURN_ON_ERROR(esp_wifi_get_mac(WIFI_IF_AP, mac), TAG, "read SoftAP MAC");
+    snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid), "Companion-%02X%02X", mac[4], mac[5]); ap.ap.ssid_len = strlen((char *)ap.ap.ssid); strlcpy((char *)ap.ap.password, CONFIG_COMPANION_AP_PASSWORD, sizeof(ap.ap.password)); ap.ap.authmode = WIFI_AUTH_WPA2_PSK; ap.ap.max_connection = 2; ap.ap.channel = 1;
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_APSTA), TAG, "wifi mode"); ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &ap), TAG, "AP config");
     char ssid[33] = {}, password[65] = {};
     if (nvs_get_string("ssid", ssid, sizeof(ssid)) == ESP_OK) { s_has_credentials = true; nvs_get_string("password", password, sizeof(password)); wifi_config_t sta = {}; strlcpy((char *)sta.sta.ssid, ssid, sizeof(sta.sta.ssid)); strlcpy((char *)sta.sta.password, password, sizeof(sta.sta.password)); esp_wifi_set_config(WIFI_IF_STA, &sta); } else update_network_status(SUBSCREEN_NETWORK_SETUP_REQUIRED, NULL);

@@ -199,6 +199,8 @@ struct ControlReply {
     udp: Option<UdpParameters>,
     #[serde(default)]
     capabilities: HelloCapabilities,
+    #[serde(default)]
+    touch: Option<touch::TouchDescriptor>,
 }
 
 #[derive(Deserialize)]
@@ -922,15 +924,25 @@ fn spawn_touch_worker(
     rx: Receiver<touch::TouchBatch>,
     geometry: inject::SharedTouchGeometry,
     mut injector: Box<dyn inject::InputInjector>,
-    panel_width: u16,
+    descriptor: touch::TouchDescriptor,
+    target_width: u16,
+    target_height: u16,
 ) {
     thread::spawn(move || {
-        let mut engine = touch::GestureEngine::new(panel_width);
+        let mut engine = touch::GestureEngine::new(target_width, target_height);
         let mut expected_seq: Option<u32> = None;
         /* Device timestamp of the last event plus its arrival time, used to
         estimate the device clock for time-based gestures (long press). */
         let mut device_clock: Option<(u32, Instant)> = None;
-        eprintln!("Touch control worker started ({})", injector.backend_name());
+        eprintln!(
+            "Touch control worker started ({}; touch={}x{}@{}Hz video={}x{})",
+            injector.backend_name(),
+            descriptor.width,
+            descriptor.height,
+            descriptor.max_move_hz,
+            target_width,
+            target_height
+        );
         loop {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(batch) => {
@@ -943,9 +955,10 @@ fn spawn_touch_worker(
                         }
                     }
                     expected_seq = Some(batch.seq.wrapping_add(1));
-                    for event in &batch.events {
+                    for raw_event in &batch.events {
+                        let event = raw_event.normalize(descriptor, target_width, target_height);
                         device_clock = Some((event.t, Instant::now()));
-                        let actions = engine.handle(event);
+                        let actions = engine.handle(&event);
                         inject::dispatch_actions(&actions, &geometry, injector.as_mut());
                     }
                 }
@@ -1189,6 +1202,7 @@ fn reconnect_udp_control(
     reason: &str,
     dropped_frames: u32,
     expected_target: &StreamTarget,
+    expected_touch: Option<touch::TouchDescriptor>,
 ) -> Result<(WebSocket<TcpStream>, VideoSender), String> {
     let endpoint = stream_endpoint(config);
     let mut last_error = reason.to_string();
@@ -1214,12 +1228,10 @@ fn reconnect_udp_control(
             return Err("Stream stopped".to_string());
         }
         match connect_wifi(&endpoint).and_then(|mut socket| {
-            let (sender, target, touch_enabled) =
+            let (sender, target, touch_descriptor) =
                 negotiate_stream(&mut socket, "udp", config.touch_control)?;
-            if config.touch_control && !touch_enabled {
-                eprintln!("Touch control lost after control reconnection");
-            }
             ensure_reconnect_target(expected_target, &target)?;
+            ensure_reconnect_touch(expected_touch, touch_descriptor)?;
             configure_udp_control_socket(&mut socket)?;
             Ok((socket, sender))
         }) {
@@ -1256,6 +1268,18 @@ fn ensure_reconnect_target(expected: &StreamTarget, actual: &StreamTarget) -> Re
         actual.width,
         actual.height,
         actual.max_frame_bytes
+    ))
+}
+
+fn ensure_reconnect_touch(
+    expected: Option<touch::TouchDescriptor>,
+    actual: Option<touch::TouchDescriptor>,
+) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "Device touch description changed from {expected:?} to {actual:?}; restart the stream"
     ))
 }
 
@@ -1353,11 +1377,39 @@ fn validate_stream_target(
     })
 }
 
+fn validate_touch_descriptor(
+    hello: &ControlReply,
+    subscribe_touch: bool,
+) -> Result<Option<touch::TouchDescriptor>, String> {
+    if !hello.capabilities.touch {
+        if hello.touch.is_some() {
+            return Err("Device provided touch parameters without touch capability".to_string());
+        }
+        return Ok(None);
+    }
+    if !subscribe_touch {
+        return Err("Device enabled touch events that the client did not subscribe to".to_string());
+    }
+    let descriptor = hello
+        .touch
+        .ok_or_else(|| "Device enabled touch without a touch description".to_string())?;
+    if descriptor.width < 2
+        || descriptor.height < 2
+        || descriptor.width > MAX_TARGET_DIMENSION
+        || descriptor.height > MAX_TARGET_DIMENSION
+        || u64::from(descriptor.width) * u64::from(descriptor.height) > MAX_TARGET_PIXELS
+        || !(1..=1000).contains(&descriptor.max_move_hz)
+    {
+        return Err(format!("Device provided invalid touch parameters {descriptor:?}"));
+    }
+    Ok(Some(descriptor))
+}
+
 fn negotiate_stream(
     socket: &mut WebSocket<TcpStream>,
     requested_transport: &str,
     subscribe_touch: bool,
-) -> Result<(VideoSender, StreamTarget, bool), String> {
+) -> Result<(VideoSender, StreamTarget, Option<touch::TouchDescriptor>), String> {
     let hello = control_request(
         socket,
         json!({
@@ -1370,6 +1422,7 @@ fn negotiate_stream(
         return Err("Device did not confirm the requested video transport".to_string());
     }
     let target = validate_stream_target(&hello, requested_transport)?;
+    let touch_descriptor = validate_touch_descriptor(&hello, subscribe_touch)?;
     let sender = if requested_transport == "udp" {
         let parameters = hello
             .udp
@@ -1420,7 +1473,7 @@ fn negotiate_stream(
     if started.kind != "stream_started" || started.video_transport != requested_transport {
         return Err("Device did not start the requested video transport".to_string());
     }
-    Ok((sender, target, subscribe_touch && hello.capabilities.touch))
+    Ok((sender, target, touch_descriptor))
 }
 
 fn parse_http_response(response: &[u8]) -> Result<Option<(usize, usize)>, String> {
@@ -1597,7 +1650,7 @@ fn run_stream(
     mut sender: VideoSender,
     capture_override: Option<CaptureSession>,
     controls: Receiver<StreamControl>,
-    touch_enabled: bool,
+    touch_descriptor: Option<touch::TouchDescriptor>,
 ) -> u32 {
     let video_transport = config.video_transport.as_str();
     let mut fps = config.fps.clamp(1, 30);
@@ -1652,13 +1705,15 @@ fn run_stream(
     let touch_geometry: inject::SharedTouchGeometry = Arc::new(Mutex::new(
         initial_touch_geometry(&capture, &config, &target),
     ));
-    let touch_tx = if touch_enabled {
+    let touch_tx = if let Some(descriptor) = touch_descriptor {
         let (tx, rx) = mpsc::channel();
         spawn_touch_worker(
             rx,
             touch_geometry.clone(),
             create_touch_injector(&capture),
+            descriptor,
             target.width,
+            target.height,
         );
         Some(tx)
     } else {
@@ -1866,8 +1921,15 @@ fn run_stream(
         refresh_touch_geometry(&capture, &touch_geometry);
         if let Some(heartbeat) = heartbeat.as_mut() {
             if let Err(reason) = service_udp_control(&mut socket, heartbeat, touch_tx.as_ref()) {
-                match reconnect_udp_control(&app, &config, &stop, &reason, dropped_frames, &target)
-                {
+                match reconnect_udp_control(
+                    &app,
+                    &config,
+                    &stop,
+                    &reason,
+                    dropped_frames,
+                    &target,
+                    touch_descriptor,
+                ) {
                     Ok((new_socket, new_sender)) => {
                         socket = new_socket;
                         sender = new_sender;
@@ -1976,7 +2038,15 @@ fn run_stream(
         emit_preview(&app, &frame, &mut last_preview);
         if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
             if matches!(sender, VideoSender::Udp { .. }) {
-                match reconnect_udp_control(&app, &config, &stop, &error, dropped_frames, &target) {
+                match reconnect_udp_control(
+                    &app,
+                    &config,
+                    &stop,
+                    &error,
+                    dropped_frames,
+                    &target,
+                    touch_descriptor,
+                ) {
                     Ok((new_socket, new_sender)) => {
                         socket = new_socket;
                         sender = new_sender;
@@ -2347,9 +2417,9 @@ fn start_wifi_stream(
         0,
         &config.video_transport,
     );
-    let (sender, target, touch_enabled) =
+    let (sender, target, touch_descriptor) =
         negotiate_stream(&mut socket, &config.video_transport, config.touch_control)?;
-    if config.touch_control && !touch_enabled {
+    if config.touch_control && touch_descriptor.is_none() {
         emit(
             &app,
             "negotiating",
@@ -2431,7 +2501,7 @@ fn start_wifi_stream(
             sender,
             capture_override,
             control_rx,
-            touch_enabled,
+            touch_descriptor,
         );
         if let Ok(mut active) = controller.lock() {
             *active = None;
@@ -2535,11 +2605,12 @@ mod tests {
 
     use super::{
         active_stream_error, base64_encode, build_frame, encode_jpeg, ensure_reconnect_target,
-        ensure_status_dimensions, parse_http_response, replay_frame, static_color_bars,
-        validate_region, validate_stream_target, CaptureRegionConfig, ControlReply,
-        DisplayOrientation, ProjectionMode, StreamConfig, StreamTarget, UdpParameters,
+        ensure_reconnect_touch, ensure_status_dimensions, parse_http_response, replay_frame,
+        static_color_bars, validate_region, validate_stream_target, validate_touch_descriptor,
+        CaptureRegionConfig, ControlReply, DisplayOrientation, ProjectionMode, StreamConfig,
+        StreamTarget, UdpParameters,
     };
-    use crate::protocol;
+    use crate::{protocol, touch};
 
     fn test_config() -> StreamConfig {
         StreamConfig {
@@ -2728,6 +2799,7 @@ mod tests {
             max_frame_bytes: Some(max_frame_bytes),
             udp: None,
             capabilities: Default::default(),
+            touch: None,
         }
     }
 
@@ -2769,6 +2841,58 @@ mod tests {
         assert!(ensure_status_dimensions(368, 448, &target).is_err());
         assert!(ensure_reconnect_target(&target, &target).is_ok());
         assert!(ensure_reconnect_target(&target, &s3_target()).is_err());
+        let touch = touch::TouchDescriptor {
+            width: 1024,
+            height: 600,
+            max_move_hz: 60,
+        };
+        assert!(ensure_reconnect_touch(Some(touch), Some(touch)).is_ok());
+        assert!(ensure_reconnect_touch(Some(touch), None).is_err());
+    }
+
+    #[test]
+    fn validates_conditional_touch_description() {
+        let mut hello = hello_reply(1024, 600, 512 * 1024);
+        assert_eq!(validate_touch_descriptor(&hello, true).unwrap(), None);
+
+        hello.capabilities.touch = true;
+        assert!(validate_touch_descriptor(&hello, true).is_err());
+        hello.touch = Some(touch::TouchDescriptor {
+            width: 800,
+            height: 480,
+            max_move_hz: 60,
+        });
+        assert_eq!(
+            validate_touch_descriptor(&hello, true).unwrap(),
+            hello.touch
+        );
+        assert!(validate_touch_descriptor(&hello, false).is_err());
+
+        hello.capabilities.touch = false;
+        assert!(validate_touch_descriptor(&hello, true).is_err());
+    }
+
+    #[test]
+    fn parses_touch_description_from_hello_ack() {
+        let hello: ControlReply = serde_json::from_value(serde_json::json!({
+            "type": "hello_ack",
+            "request_id": "hello-1",
+            "video_transport": "tcp",
+            "width": 1024,
+            "height": 600,
+            "max_frame_bytes": 262168,
+            "capabilities": {"touch": true},
+            "touch": {"width": 800, "height": 480, "max_move_hz": 60}
+        }))
+        .unwrap();
+        assert_eq!(
+            validate_touch_descriptor(&hello, true).unwrap(),
+            Some(touch::TouchDescriptor {
+                width: 800,
+                height: 480,
+                max_move_hz: 60,
+            })
+        );
     }
 
     #[test]

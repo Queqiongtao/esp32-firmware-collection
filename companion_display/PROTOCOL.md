@@ -1,10 +1,10 @@
 # Companion Display 通信协议 v3
 
-本文是 ESP32-S3、ESP32-P4 等设备共同遵循的 v3 线上契约，只定义接口、控制状态机和二进制格式。当前 S3 固件内部实现见 [S3 设备端实现](firmware/esp32s3/docs/device.md)，桌面采集与发送策略见 [PC 端实现](docs/pc-client.md)，工程入口见 [README](README.md)。
+本文是 ESP32-S3、ESP32-P4 等设备共同遵循的 v3 线上契约，只定义接口、控制状态机和二进制格式。当前固件实现见 [S3 设备端实现](firmware/esp32s3/docs/device.md) 和 [P4 设备固件](firmware/esp32p4/README.md)，桌面采集与发送策略见 [PC 端实现](docs/pc-client.md)，工程入口见 [README](README.md)。
 
 ## 总览
 
-协议 v3 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。v3 在 v2 之上新增设备到 PC 的触摸事件通道（`touch_events`），视频链路与 v2 完全一致。当前 S3 设备同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v3 与 v2、v1 控制协商互不兼容：固件对版本不匹配的 `hello` 返回 `unsupported_protocol`，PC 客户端对 `/api/status` 报告的其他版本拒绝启动，两端必须同步升级。
+协议 v3 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。v3 在 v2 之上新增设备到 PC 的触摸事件通道（`touch_events`），视频链路与 v2 完全一致。当前 S3/P4 实现同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v3 与 v2、v1 控制协商互不兼容：固件对版本不匹配的 `hello` 返回 `unsupported_protocol`，PC 客户端对 `/api/status` 报告的其他版本拒绝启动，两端必须同步升级。
 
 默认 HTTP/WebSocket 端口为 `80`，UDP 端口为 `5000`。所有多字节二进制字段均为小端序。当前只支持 IPv4 UDP 视频。
 
@@ -63,7 +63,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 
 `width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。
 
-`capabilities.touch` 在 v3 中是本次会话的运行时承诺：仅当客户端在 `hello` 中订阅 `features.touch_events` 且设备触摸硬件就绪时为 `true`，此时设备会在流启动后发送 [`touch_events`](#touch_events-设备触摸事件)。顶层 `touch` 对象声明触摸坐标空间（物理面板像素，旋转前）与 `move` 事件的最大速率，仅在 `capabilities.touch` 为 `true` 时出现。`text_input`、`audio_capture` 在 v3 固定为 `false`，仍为未来扩展预留，客户端不得据此发送未定义消息。
+`capabilities.touch` 在 v3 中是本次会话的运行时承诺：仅当客户端在 `hello` 中订阅 `features.touch_events` 且设备触摸硬件就绪时为 `true`，此时设备会在流启动后发送 [`touch_events`](#touch_events-设备触摸事件)。顶层 `touch` 对象声明触摸坐标空间（物理面板像素，旋转前）与 `move` 事件的最大速率，仅在 `capabilities.touch` 为 `true` 时出现。客户端要求 `touch.width/height` 均至少为 2、单边不超过 4096、总像素不超过 8,294,400，且 `max_move_hz` 为 `1..=1000`；描述缺失、越界或与 capability 矛盾时拒绝启动。`text_input`、`audio_capture` 在 v3 固定为 `false`，仍为未来扩展预留，客户端不得据此发送未定义消息。
 
 ### `start_stream` 与 `stop_stream`
 
@@ -107,7 +107,7 @@ UDP 视频运行期间，PC 必须每 2 秒发送一个应用层心跳：
 
 | `code` | 含义 |
 | --- | --- |
-| `unsupported_protocol` | 版本不是 2，或视频传输方式不是 `tcp`/`udp` |
+| `unsupported_protocol` | 版本不是 3，或视频传输方式不是 `tcp`/`udp` |
 | `device_busy` | 另一个会话或其他传输已占用显示管线 |
 | `not_negotiated` | 未成功协商即请求启动 |
 | `invalid_control_message` | 缺少 `type` 或 `request_id` |
@@ -152,9 +152,9 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 5 | `format` | u8 | `1`，JPEG |
 | 6 | `header_size` | u16 | `24` |
 | 8 | `sequence` | u32 | 发送端帧序号，可回绕 |
-| 12 | `width` | u16 | 必须等于当前 `hello_ack.width`；S3 默认值为 `368` |
-| 14 | `height` | u16 | 必须等于当前 `hello_ack.height`；S3 默认值为 `448` |
-| 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`（默认固件配置下为 `102400`） |
+| 12 | `width` | u16 | 必须等于当前 `hello_ack.width`；S3/P4 默认值分别为 `368`/`1024` |
+| 14 | `height` | u16 | 必须等于当前 `hello_ack.height`；S3/P4 默认值分别为 `448`/`600` |
+| 16 | `payload_size` | u32 | JPEG 字节数，最小为 `1`，上限为 `hello_ack.max_frame_bytes - 24`；S3/P4 TCP 默认上限分别为 `102400`/`262144` |
 | 20 | `crc32` | u32 | JPEG payload 的 CRC-32 |
 
 帧头之后紧跟 `payload_size` 字节 JPEG 数据。总帧大小必须严格为 `24 + payload_size`。CRC 使用与 Rust `crc32fast::hash()` 和 ESP-IDF `esp_crc32_le(0, payload, payload_size)` 相同的 CRC-32 值，只覆盖 JPEG payload，不覆盖帧头。
@@ -179,7 +179,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 | 32 | `payload_length` | u16 | 当前 UDP 负载长度，必须等于数据报中的实际负载且不超过 `1200` |
 | 34 | `reserved` | u16 | 保留字段，当前接收端忽略 |
 
-发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。设备的 UDP 接收邮箱为 24 包；它校验头、会话、索引、长度和来源地址后重组。它只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。
+发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 为分片序号乘以协商的 `max_payload`。桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备校验头、会话、索引、长度和来源地址后重组，并且只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐则丢弃；无重传和乱序恢复保证。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP 有效完整帧上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；P4 的 TCP 完整帧上限为 `262168` 字节。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
@@ -187,13 +187,13 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 画面静止或 Portal 暂时未提供新图像时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。设备将静态保活帧视为普通视频帧，保活帧同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
 
-控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height` 和有效 `max_frame_bytes` 必须与原会话一致；发生变化时 PC 结束当前流，用户重新启动后再建立对应尺寸的采集管线。
+控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height`、有效 `max_frame_bytes` 和可选 `touch` 描述必须与原会话一致；尺寸变化、触摸能力丢失或触摸坐标空间变化时，PC 结束当前流，用户重新启动后再建立对应采集和输入管线。
 
 ## 最新帧策略与 `frame_presented`
 
-设备显示管线只有一个待绘制槽位。新完整帧到达时会替换仍在等待绘制的旧帧；正在 JPEG 解码或已提交 LCD DMA 的帧不会被中断。该策略用于限制设备端等待时间，替换数量通过 `replaced_frames` 报告。
+设备显示管线只有一个待绘制槽位。新完整帧到达时会替换仍在等待绘制的旧帧；正在 JPEG 解码或已提交显示后端的帧不会被中断。该策略用于限制设备端等待时间，替换数量通过 `replaced_frames` 报告。
 
-TCP 模式在每帧 JPEG 解码完成并提交 LCD DMA 后，设备主动发送以下 WebSocket 文本消息。PC 必须等待与已发送帧相同 `sequence` 的回执后再发送下一帧，因此可靠传输不会在内核或设备队列中堆积旧画面。
+TCP 模式在每帧 JPEG 解码完成并提交显示后端后，设备主动发送以下 WebSocket 文本消息。PC 必须等待与已发送帧相同 `sequence` 的回执后再发送下一帧，因此可靠传输不会在内核或设备队列中堆积旧画面。
 
 ```json
 {"type":"frame_presented","sequence":42,"queue_wait_us":1000,"jpeg_decode_us":18000,"lcd_wait_us":2000,"lcd_submit_us":100,"previous_dma_us":15000,"replaced_frames":3}
@@ -203,9 +203,9 @@ TCP 模式在每帧 JPEG 解码完成并提交 LCD DMA 后，设备主动发送�
 | --- | --- |
 | `queue_wait_us` | 帧进入设备显示管线到开始 JPEG 解码前的排队时间 |
 | `jpeg_decode_us` | JPEG 解码耗时 |
-| `lcd_wait_us` | 等待上一帧 LCD DMA 完成的耗时 |
-| `lcd_submit_us` | 提交当前帧 LCD DMA 的耗时 |
-| `previous_dma_us` | 上一帧 LCD DMA 从提交到完成的耗时 |
+| `lcd_wait_us` | 等待上一帧显示提交达到可安全复用缓冲状态的耗时 |
+| `lcd_submit_us` | 显示后端准备并提交当前帧的耗时；P4 包含 PPA 复制和 framebuffer 提交 |
+| `previous_dma_us` | 兼容字段名；上一帧从提交到传输或刷新完成的耗时 |
 | `replaced_frames` | 设备本次启动期间累计的、被较新帧替换的待绘制帧数；建立新会话不会清零 |
 
 UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；PC 按手动 FPS 发送最新编码帧，并在 UDP 流活动期间每 2 秒通过 `/api/status` 轮询一次设备诊断（TCP 模式的设备耗时已由 `frame_presented` 逐帧提供，不额外轮询）。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，在回调中直接裁剪并双线性缩放为设备尺寸，采集槽只保留最新图像；默认发送配置为 25 FPS、JPEG 质量 70。
