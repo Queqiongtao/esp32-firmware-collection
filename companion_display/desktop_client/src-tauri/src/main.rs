@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use image::imageops::{overlay, FilterType};
 use image::{DynamicImage, ImageBuffer, Rgb};
-use image_quality::{scale_percent, ImageRect, PreparedImage};
+use image_quality::{scale_percent, ImageRect, PreparedImage, SharpenWorkspace};
 use orientation::DisplayOrientation;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -82,6 +82,9 @@ struct StreamEvent {
     video_transport: String,
     capture_encode_ms: u32,
     capture_wait_ms: u32,
+    capture_process_ms: u32,
+    send_ms: u32,
+    jpeg_encode_attempts: u8,
     device_ms: u32,
     device_replaced_frames: u32,
     projection_mode: ProjectionMode,
@@ -100,6 +103,9 @@ impl Default for StreamEvent {
             video_transport: "none".into(),
             capture_encode_ms: 0,
             capture_wait_ms: 0,
+            capture_process_ms: 0,
+            send_ms: 0,
+            jpeg_encode_attempts: 0,
             device_ms: 0,
             device_replaced_frames: 0,
             projection_mode: ProjectionMode::Live,
@@ -505,6 +511,7 @@ fn crop_and_letterbox(
         image: DynamicImage::ImageRgb8(config.display_orientation.orient_logical_image(&canvas)),
         source_scale_percent,
         content_rect: Some(content_rect),
+        capture_process_ms: 0,
     })
 }
 
@@ -521,23 +528,26 @@ fn encode_jpeg(
     image: &DynamicImage,
     requested_quality: u8,
     max_jpeg_bytes: usize,
-) -> Result<(Vec<u8>, u8), String> {
+) -> Result<(Vec<u8>, u8, u8), String> {
     let requested_quality = requested_quality.clamp(30, 95);
     let mut quality = requested_quality;
     let mut failed_quality: Option<u8> = None;
+    let mut attempts = 0_u8;
     loop {
+        attempts = attempts.saturating_add(1);
         let output = encode_jpeg_at_quality(image, quality)?;
         if output.len() <= max_jpeg_bytes {
             let Some(failed_quality) = failed_quality else {
-                return Ok((output, quality));
+                return Ok((output, quality, attempts));
             };
             for candidate in (quality.saturating_add(1)..failed_quality).rev() {
+                attempts = attempts.saturating_add(1);
                 let candidate_output = encode_jpeg_at_quality(image, candidate)?;
                 if candidate_output.len() <= max_jpeg_bytes {
-                    return Ok((candidate_output, candidate));
+                    return Ok((candidate_output, candidate, attempts));
                 }
             }
-            return Ok((output, quality));
+            return Ok((output, quality, attempts));
         }
         failed_quality = Some(quality);
         if quality == 30 {
@@ -550,13 +560,90 @@ fn encode_jpeg(
     ))
 }
 
+const JPEG_QUALITY_PROBE_INTERVAL: Duration = Duration::from_secs(1);
+const JPEG_QUALITY_PROBE_HEADROOM_PERCENT: usize = 90;
+
+struct AdaptiveJpegEncoder {
+    requested_quality: u8,
+    quality: u8,
+    last_size: usize,
+    last_probe: Instant,
+}
+
+impl AdaptiveJpegEncoder {
+    fn new(requested_quality: u8, quality: u8, last_size: usize) -> Self {
+        Self {
+            requested_quality: requested_quality.clamp(30, 95),
+            quality: quality.clamp(30, 95),
+            last_size,
+            last_probe: Instant::now(),
+        }
+    }
+
+    fn set_requested_quality(&mut self, requested_quality: u8) {
+        let requested_quality = requested_quality.clamp(30, 95);
+        if self.requested_quality != requested_quality {
+            self.requested_quality = requested_quality;
+            self.quality = requested_quality;
+            self.last_size = 0;
+            self.last_probe = Instant::now();
+        }
+    }
+
+    fn encode(
+        &mut self,
+        image: &DynamicImage,
+        max_jpeg_bytes: usize,
+    ) -> Result<(Vec<u8>, u8, u8), String> {
+        let previous_quality = self.quality.min(self.requested_quality).max(30);
+        let should_probe = previous_quality < self.requested_quality
+            && self.last_size > 0
+            && self.last_size.saturating_mul(100)
+                <= max_jpeg_bytes.saturating_mul(JPEG_QUALITY_PROBE_HEADROOM_PERCENT)
+            && self.last_probe.elapsed() >= JPEG_QUALITY_PROBE_INTERVAL;
+        let mut quality = if should_probe {
+            previous_quality
+                .saturating_add(1)
+                .min(self.requested_quality)
+        } else {
+            previous_quality
+        };
+        if should_probe {
+            self.last_probe = Instant::now();
+        }
+
+        let mut attempts = 0_u8;
+        loop {
+            attempts = attempts.saturating_add(1);
+            let output = encode_jpeg_at_quality(image, quality)?;
+            if output.len() <= max_jpeg_bytes {
+                self.quality = quality;
+                self.last_size = output.len();
+                return Ok((output, quality, attempts));
+            }
+            self.last_probe = Instant::now();
+            if quality == 30 {
+                break;
+            }
+            quality = if quality > previous_quality {
+                previous_quality
+            } else {
+                quality.saturating_sub(5).max(30)
+            };
+        }
+        Err(format!(
+            "JPEG remains larger than the negotiated {max_jpeg_bytes}-byte limit"
+        ))
+    }
+}
+
 fn encode_prepared_frame(
     image: &DynamicImage,
     jpeg_quality: u8,
     sequence: u32,
     target: &StreamTarget,
-) -> Result<(Vec<u8>, usize, u8), String> {
-    let (jpeg, used_quality) = encode_jpeg(image, jpeg_quality, target.max_jpeg_bytes())?;
+) -> Result<(Vec<u8>, usize, u8, u8), String> {
+    let (jpeg, used_quality, attempts) = encode_jpeg(image, jpeg_quality, target.max_jpeg_bytes())?;
     let jpeg_bytes = jpeg.len();
     Ok((
         protocol::encode_frame(
@@ -568,6 +655,29 @@ fn encode_prepared_frame(
         )?,
         jpeg_bytes,
         used_quality,
+        attempts,
+    ))
+}
+
+fn encode_adaptive_prepared_frame(
+    image: &DynamicImage,
+    encoder: &mut AdaptiveJpegEncoder,
+    sequence: u32,
+    target: &StreamTarget,
+) -> Result<(Vec<u8>, usize, u8, u8), String> {
+    let (jpeg, used_quality, attempts) = encoder.encode(image, target.max_jpeg_bytes())?;
+    let jpeg_bytes = jpeg.len();
+    Ok((
+        protocol::encode_frame(
+            sequence,
+            target.width,
+            target.height,
+            target.max_jpeg_bytes(),
+            &jpeg,
+        )?,
+        jpeg_bytes,
+        used_quality,
+        attempts,
     ))
 }
 
@@ -579,8 +689,8 @@ fn build_frame(
     target: &StreamTarget,
 ) -> Result<(Vec<u8>, usize), String> {
     let mut prepared = crop_and_letterbox(image, config, target)?;
-    prepared.apply_quality_filter();
-    let (frame, jpeg_bytes, _) =
+    prepared.apply_quality_filter(&mut SharpenWorkspace::default());
+    let (frame, jpeg_bytes, _, _) =
         encode_prepared_frame(&prepared.image, config.jpeg_quality, sequence, target)?;
     Ok((frame, jpeg_bytes))
 }
@@ -791,33 +901,67 @@ fn emit(
         app,
         state,
         detail,
-        fps,
-        jpeg_bytes,
-        0,
-        0,
-        dropped_frames,
         video_transport,
-        0,
-        0,
-        0,
-        0,
+        FrameMetrics {
+            fps,
+            jpeg_bytes,
+            dropped_frames,
+            ..FrameMetrics::default()
+        },
     );
+}
+
+#[derive(Default)]
+struct FrameMetrics {
+    fps: u8,
+    jpeg_bytes: usize,
+    jpeg_quality_used: u8,
+    source_scale_percent: u16,
+    dropped_frames: u32,
+    capture_encode_ms: u32,
+    capture_wait_ms: u32,
+    capture_process_ms: u32,
+    send_ms: u32,
+    jpeg_encode_attempts: u8,
+    device_ms: u32,
+    device_replaced_frames: u32,
+}
+
+impl StreamEvent {
+    fn from_metrics(
+        state: impl Into<String>,
+        detail: impl Into<String>,
+        video_transport: &str,
+        projection_mode: ProjectionMode,
+        metrics: FrameMetrics,
+    ) -> Self {
+        Self {
+            state: state.into(),
+            detail: detail.into(),
+            fps: metrics.fps,
+            jpeg_bytes: metrics.jpeg_bytes,
+            jpeg_quality_used: metrics.jpeg_quality_used,
+            source_scale_percent: metrics.source_scale_percent,
+            dropped_frames: metrics.dropped_frames,
+            video_transport: video_transport.into(),
+            capture_encode_ms: metrics.capture_encode_ms,
+            capture_wait_ms: metrics.capture_wait_ms,
+            capture_process_ms: metrics.capture_process_ms,
+            send_ms: metrics.send_ms,
+            jpeg_encode_attempts: metrics.jpeg_encode_attempts,
+            device_ms: metrics.device_ms,
+            device_replaced_frames: metrics.device_replaced_frames,
+            projection_mode,
+        }
+    }
 }
 
 fn emit_metrics(
     app: &AppHandle,
     state: &str,
     detail: impl Into<String>,
-    fps: u8,
-    jpeg_bytes: usize,
-    jpeg_quality_used: u8,
-    source_scale_percent: u16,
-    dropped_frames: u32,
     video_transport: &str,
-    capture_encode_ms: u32,
-    capture_wait_ms: u32,
-    device_ms: u32,
-    device_replaced_frames: u32,
+    metrics: FrameMetrics,
 ) {
     let projection_mode = app
         .state::<StreamState>()
@@ -825,21 +969,7 @@ fn emit_metrics(
         .lock()
         .map(|mode| *mode)
         .unwrap_or_default();
-    let event = StreamEvent {
-        state: state.into(),
-        detail: detail.into(),
-        fps,
-        jpeg_bytes,
-        jpeg_quality_used,
-        source_scale_percent,
-        dropped_frames,
-        video_transport: video_transport.into(),
-        capture_encode_ms,
-        capture_wait_ms,
-        device_ms,
-        device_replaced_frames,
-        projection_mode,
-    };
+    let event = StreamEvent::from_metrics(state, detail, video_transport, projection_mode, metrics);
     if let Ok(mut current) = app.state::<StreamState>().event.lock() {
         *current = event.clone();
     }
@@ -1728,9 +1858,6 @@ fn run_stream(
     live.fps.store(fps, Ordering::Relaxed);
     live.quality.store(jpeg_quality, Ordering::Relaxed);
     let mut frame_interval = Duration::from_millis(1000 / u64::from(fps));
-    /* Start each encode near the last quality that fit the negotiated limit
-    instead of re-walking the ladder from the user setting every frame. */
-    let mut adaptive_quality = jpeg_quality;
     let mut dropped_frames = 0_u32;
     let mut heartbeat = None;
     let mut sequence = 0_u32;
@@ -1745,6 +1872,7 @@ fn run_stream(
             return dropped_frames;
         }
     };
+    let mut sharpen_workspace = SharpenWorkspace::default();
     #[cfg(target_os = "linux")]
     if config.projection_mode == ProjectionMode::Region {
         if let CaptureSession::PipeWire(receiver, _) = &capture {
@@ -1813,34 +1941,41 @@ fn run_stream(
         return dropped_frames;
     }
     let first_capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
+    let first_capture_process_ms = prepared.capture_process_ms;
     let encode_started = Instant::now();
     let first_encoded = {
         let fingerprint = image_fingerprint(&prepared.image);
         let mut prepared = prepared;
-        prepared.apply_quality_filter();
-        encode_prepared_frame(&prepared.image, adaptive_quality, sequence, &target).map(
-            |(frame, jpeg_bytes, used_quality)| {
+        prepared.apply_quality_filter(&mut sharpen_workspace);
+        encode_prepared_frame(&prepared.image, jpeg_quality, sequence, &target).map(
+            |(frame, jpeg_bytes, used_quality, attempts)| {
                 (
                     frame,
                     jpeg_bytes,
                     used_quality,
+                    attempts,
                     fingerprint,
                     prepared.source_scale_percent,
                 )
             },
         )
     };
-    let (frame, jpeg_bytes, first_fingerprint, mut last_used_quality, mut source_scale_percent): (
-        Vec<u8>,
-        usize,
-        u32,
-        u8,
-        u16,
-    ) = match first_encoded {
-        Ok((frame, jpeg_bytes, used_quality, fingerprint, scale_percent)) => {
-            adaptive_quality = used_quality.saturating_add(2).min(jpeg_quality);
-            (frame, jpeg_bytes, fingerprint, used_quality, scale_percent)
-        }
+    let (
+        frame,
+        jpeg_bytes,
+        first_fingerprint,
+        mut last_used_quality,
+        mut source_scale_percent,
+        first_jpeg_encode_attempts,
+    ): (Vec<u8>, usize, u32, u8, u16, u8) = match first_encoded {
+        Ok((frame, jpeg_bytes, used_quality, attempts, fingerprint, scale_percent)) => (
+            frame,
+            jpeg_bytes,
+            fingerprint,
+            used_quality,
+            scale_percent,
+            attempts,
+        ),
         Err(error) => {
             if !stop.load(Ordering::Relaxed) {
                 emit(
@@ -1857,6 +1992,8 @@ fn run_stream(
             return dropped_frames;
         }
     };
+    let mut adaptive_encoder =
+        AdaptiveJpegEncoder::new(jpeg_quality, last_used_quality, jpeg_bytes);
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
     emit(
         &app,
@@ -1903,6 +2040,7 @@ fn run_stream(
         0,
         video_transport,
     );
+    let send_started = Instant::now();
     if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
         if !stop.load(Ordering::Relaxed) {
             emit(
@@ -1918,6 +2056,7 @@ fn run_stream(
         close_device_stream(&mut socket);
         return dropped_frames;
     }
+    let first_send_ms = send_started.elapsed().as_millis() as u32;
     let mut last_video_sent = Instant::now();
     let mut static_frames = 0_u32;
     let mut device_ms = 0;
@@ -1952,16 +2091,20 @@ fn run_stream(
         } else {
             "First screenshot sent over TCP".to_string()
         },
-        0,
-        jpeg_bytes,
-        last_used_quality,
-        source_scale_percent,
-        0,
         video_transport,
-        first_capture_encode_ms,
-        first_capture_wait_ms,
-        device_ms,
-        device_replaced_frames,
+        FrameMetrics {
+            jpeg_bytes,
+            jpeg_quality_used: last_used_quality,
+            source_scale_percent,
+            capture_encode_ms: first_capture_encode_ms,
+            capture_wait_ms: first_capture_wait_ms,
+            capture_process_ms: first_capture_process_ms,
+            send_ms: first_send_ms,
+            jpeg_encode_attempts: first_jpeg_encode_attempts,
+            device_ms,
+            device_replaced_frames,
+            ..FrameMetrics::default()
+        },
     );
     let mut next_frame = Instant::now() + frame_interval;
     let mut selection_size = (
@@ -2024,7 +2167,7 @@ fn run_stream(
         let live_quality = live.quality.load(Ordering::Relaxed).clamp(30, 95);
         if live_quality != jpeg_quality {
             jpeg_quality = live_quality;
-            adaptive_quality = jpeg_quality;
+            adaptive_encoder.set_requested_quality(jpeg_quality);
             /* Force a re-encode so the new quality applies to a static scene too. */
             last_fingerprint = last_fingerprint.wrapping_add(1);
         }
@@ -2073,6 +2216,9 @@ fn run_stream(
             }
         };
         let capture_wait_ms = capture_wait_started.elapsed().as_millis() as u32;
+        let capture_process_ms = image
+            .as_ref()
+            .map_or(0, |prepared| prepared.capture_process_ms);
         /* Window sources can resize; keep the touch mapping in step with the
         actual source dimensions. PipeWire refreshes from its layout instead. */
         #[cfg(not(target_os = "linux"))]
@@ -2093,18 +2239,22 @@ fn run_stream(
             None => None,
         };
         let static_frame = prepared.is_none();
-        let (frame, jpeg_bytes): (Vec<u8>, usize) = match prepared {
+        let (frame, jpeg_bytes, jpeg_encode_attempts): (Vec<u8>, usize, u8) = match prepared {
             Some((mut prepared, fingerprint)) => {
-                prepared.apply_quality_filter();
-                match encode_prepared_frame(&prepared.image, adaptive_quality, sequence, &target) {
-                    Ok((frame, jpeg_bytes, used_quality)) => {
-                        adaptive_quality = used_quality.saturating_add(2).min(jpeg_quality);
+                prepared.apply_quality_filter(&mut sharpen_workspace);
+                match encode_adaptive_prepared_frame(
+                    &prepared.image,
+                    &mut adaptive_encoder,
+                    sequence,
+                    &target,
+                ) {
+                    Ok((frame, jpeg_bytes, used_quality, attempts)) => {
                         cached_frame = frame.clone();
                         last_fingerprint = fingerprint;
                         last_used_quality = used_quality;
                         source_scale_percent = prepared.source_scale_percent;
                         static_frames = 0;
-                        (frame, jpeg_bytes)
+                        (frame, jpeg_bytes, attempts)
                     }
                     Err(error) => {
                         dropped_frames += 1;
@@ -2126,7 +2276,7 @@ fn run_stream(
                     continue;
                 }
                 match replay_frame(&cached_frame, sequence) {
-                    Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN),
+                    Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN, 0),
                     Err(error) => {
                         emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
                         break;
@@ -2134,7 +2284,9 @@ fn run_stream(
                 }
             }
         };
+        let capture_encode_ms = encode_started.elapsed().as_millis() as u32;
         emit_preview(&app, &frame, &mut last_preview);
+        let send_started = Instant::now();
         if let Err(error) = send_video_frame(&mut socket, &mut sender, frame, sequence) {
             if matches!(sender, VideoSender::Udp { .. }) {
                 match reconnect_udp_control(
@@ -2178,7 +2330,7 @@ fn run_stream(
             );
             break;
         }
-        let capture_encode_ms = encode_started.elapsed().as_millis() as u32;
+        let send_ms = send_started.elapsed().as_millis() as u32;
         if matches!(sender, VideoSender::Tcp) {
             match wait_for_presented(&mut socket, sequence, &stop, touch_tx.as_ref()) {
                 Ok(feedback) => {
@@ -2195,16 +2347,21 @@ fn run_stream(
                             &app,
                             "error",
                             error,
-                            0,
-                            jpeg_bytes,
-                            last_used_quality,
-                            source_scale_percent,
-                            dropped_frames,
                             video_transport,
-                            capture_encode_ms,
-                            capture_wait_ms,
-                            device_ms,
-                            device_replaced_frames,
+                            FrameMetrics {
+                                jpeg_bytes,
+                                jpeg_quality_used: last_used_quality,
+                                source_scale_percent,
+                                dropped_frames,
+                                capture_encode_ms,
+                                capture_wait_ms,
+                                capture_process_ms,
+                                send_ms,
+                                jpeg_encode_attempts,
+                                device_ms,
+                                device_replaced_frames,
+                                ..FrameMetrics::default()
+                            },
                         );
                     }
                     break;
@@ -2227,16 +2384,21 @@ fn run_stream(
             } else {
                 "Sending TCP video frames".to_string()
             },
-            fps,
-            jpeg_bytes,
-            last_used_quality,
-            source_scale_percent,
-            dropped_frames,
             video_transport,
-            capture_encode_ms,
-            capture_wait_ms,
-            device_ms,
-            device_replaced_frames,
+            FrameMetrics {
+                fps,
+                jpeg_bytes,
+                jpeg_quality_used: last_used_quality,
+                source_scale_percent,
+                dropped_frames,
+                capture_encode_ms,
+                capture_wait_ms,
+                capture_process_ms,
+                send_ms,
+                jpeg_encode_attempts,
+                device_ms,
+                device_replaced_frames,
+            },
         );
     }
     close_device_stream(&mut socket);
@@ -2285,7 +2447,7 @@ fn encode_selection_preview(
     id: String,
     frame: RawSelectionFrame,
 ) -> Result<RegionSelectionPreview, String> {
-    let (jpeg, _) = encode_jpeg(&frame.image, 80, 8 * 1024 * 1024)?;
+    let (jpeg, _, _) = encode_jpeg(&frame.image, 80, 8 * 1024 * 1024)?;
     Ok(RegionSelectionPreview {
         id,
         width: frame.image.width(),
@@ -2705,13 +2867,15 @@ mod tests {
     use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::{
         active_stream_error, base64_encode, build_frame, encode_jpeg, encode_jpeg_at_quality,
         ensure_reconnect_target, ensure_reconnect_touch, ensure_status_dimensions,
         parse_http_response, replay_frame, static_color_bars, validate_region,
-        validate_stream_target, validate_touch_descriptor, CaptureRegionConfig, ControlReply,
-        DisplayOrientation, ProjectionMode, StreamConfig, StreamTarget, UdpParameters,
+        validate_stream_target, validate_touch_descriptor, AdaptiveJpegEncoder,
+        CaptureRegionConfig, ControlReply, DisplayOrientation, FrameMetrics, ProjectionMode,
+        StreamConfig, StreamEvent, StreamTarget, UdpParameters,
     };
     use crate::{protocol, touch};
 
@@ -2880,7 +3044,7 @@ mod tests {
     #[test]
     fn encode_jpeg_reports_the_quality_that_fit() {
         let target = s3_target();
-        let (jpeg, used_quality) = encode_jpeg(
+        let (jpeg, used_quality, attempts) = encode_jpeg(
             &static_color_bars(u32::from(target.width), u32::from(target.height)),
             80,
             target.max_jpeg_bytes(),
@@ -2889,6 +3053,7 @@ mod tests {
         assert!(!jpeg.is_empty());
         assert!(jpeg.len() <= target.max_jpeg_bytes());
         assert!((30..=80).contains(&used_quality));
+        assert!(attempts >= 1);
     }
 
     #[test]
@@ -2915,8 +3080,166 @@ mod tests {
             .map(|(quality, _)| *quality)
             .max()
             .unwrap();
-        let (_, used_quality) = encode_jpeg(&image, 85, limit).unwrap();
+        let (_, used_quality, _) = encode_jpeg(&image, 85, limit).unwrap();
         assert_eq!(used_quality, expected);
+    }
+
+    #[test]
+    fn adaptive_jpeg_uses_one_pass_at_a_stable_quality() {
+        let image = static_color_bars(160, 90);
+        let initial = encode_jpeg_at_quality(&image, 75).unwrap();
+        let mut encoder = AdaptiveJpegEncoder::new(85, 75, initial.len());
+        let (first, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!(quality, 75);
+        assert_eq!(attempts, 1);
+        let (second, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!(quality, 75);
+        assert_eq!(attempts, 1);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn adaptive_jpeg_probes_up_at_most_once_per_interval() {
+        let image = static_color_bars(160, 90);
+        let mut encoder = AdaptiveJpegEncoder::new(80, 70, 1);
+        encoder.last_probe = Instant::now() - Duration::from_secs(2);
+        let (_, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!(quality, 71);
+        assert_eq!(attempts, 1);
+        let (_, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!(quality, 71);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn adaptive_jpeg_falls_back_only_when_the_frame_is_too_large() {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(160, 90, |x, y| {
+            Rgb([
+                ((x * 13 + y * 3) & 0xff) as u8,
+                ((x * 5 + y * 17) & 0xff) as u8,
+                ((x * 11 + y * 7) & 0xff) as u8,
+            ])
+        }));
+        let limit = encode_jpeg_at_quality(&image, 60).unwrap().len();
+        let mut encoder = AdaptiveJpegEncoder::new(80, 80, 0);
+        let (jpeg, quality, attempts) = encoder.encode(&image, limit).unwrap();
+        assert!(jpeg.len() <= limit);
+        assert!(quality <= 60);
+        assert!(attempts > 1);
+        let (_, repeated_quality, repeated_attempts) = encoder.encode(&image, limit).unwrap();
+        assert_eq!(repeated_quality, quality);
+        assert_eq!(repeated_attempts, 1);
+    }
+
+    #[test]
+    fn adaptive_jpeg_applies_live_quality_changes() {
+        let image = static_color_bars(160, 90);
+        let mut encoder = AdaptiveJpegEncoder::new(85, 75, 1);
+        encoder.set_requested_quality(60);
+        let (_, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!((quality, attempts), (60, 1));
+
+        encoder.set_requested_quality(80);
+        let (_, quality, attempts) = encoder.encode(&image, 8 * 1024 * 1024).unwrap();
+        assert_eq!((quality, attempts), (80, 1));
+    }
+
+    #[test]
+    fn adaptive_jpeg_probe_failure_returns_to_the_previous_quality() {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(160, 90, |x, y| {
+            Rgb([
+                ((x * 13 + y * 3) & 0xff) as u8,
+                ((x * 5 + y * 17) & 0xff) as u8,
+                ((x * 11 + y * 7) & 0xff) as u8,
+            ])
+        }));
+        let sizes = (30..=80)
+            .map(|quality| {
+                (
+                    quality,
+                    encode_jpeg_at_quality(&image, quality).unwrap().len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ((quality, limit), _) = sizes
+            .windows(2)
+            .find_map(|pair| (pair[1].1 > pair[0].1).then_some((pair[0], pair[1])))
+            .expect("test image must grow at some adjacent JPEG quality");
+        let mut encoder = AdaptiveJpegEncoder::new(quality + 1, quality, 1);
+        encoder.last_probe = Instant::now() - Duration::from_secs(2);
+        let (jpeg, used_quality, attempts) = encoder.encode(&image, limit).unwrap();
+        assert!(jpeg.len() <= limit);
+        assert_eq!(used_quality, quality);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn adaptive_jpeg_probes_only_with_ten_percent_headroom() {
+        let image = static_color_bars(160, 90);
+        let limit = 8 * 1024 * 1024;
+        let mut at_threshold = AdaptiveJpegEncoder::new(80, 70, limit * 90 / 100);
+        at_threshold.last_probe = Instant::now() - Duration::from_secs(2);
+        let (_, quality, _) = at_threshold.encode(&image, limit).unwrap();
+        assert_eq!(quality, 71);
+
+        let mut above_threshold = AdaptiveJpegEncoder::new(80, 70, limit * 90 / 100 + 1);
+        above_threshold.last_probe = Instant::now() - Duration::from_secs(2);
+        let (_, quality, _) = above_threshold.encode(&image, limit).unwrap();
+        assert_eq!(quality, 70);
+    }
+
+    #[test]
+    fn adaptive_jpeg_rejects_a_frame_that_does_not_fit_at_quality_30() {
+        let image = static_color_bars(160, 90);
+        let minimum = encode_jpeg_at_quality(&image, 30).unwrap().len();
+        let mut encoder = AdaptiveJpegEncoder::new(30, 30, 0);
+        assert!(encoder
+            .encode(&image, minimum.saturating_sub(1))
+            .unwrap_err()
+            .contains("remains larger"));
+    }
+
+    #[test]
+    fn stream_event_metrics_use_camel_case_and_zero_for_cached_frames() {
+        let event = StreamEvent::from_metrics(
+            "streaming",
+            "changed frame",
+            "udp",
+            ProjectionMode::Region,
+            FrameMetrics {
+                fps: 20,
+                jpeg_bytes: 42_000,
+                jpeg_quality_used: 75,
+                source_scale_percent: 53,
+                dropped_frames: 2,
+                capture_encode_ms: 8,
+                capture_wait_ms: 3,
+                capture_process_ms: 4,
+                send_ms: 12,
+                jpeg_encode_attempts: 1,
+                device_ms: 9,
+                device_replaced_frames: 5,
+            },
+        );
+        let value = serde_json::to_value(event).unwrap();
+        assert_eq!(value["captureProcessMs"], 4);
+        assert_eq!(value["captureWaitMs"], 3);
+        assert_eq!(value["sendMs"], 12);
+        assert_eq!(value["jpegEncodeAttempts"], 1);
+        assert_eq!(value["projectionMode"], "region");
+        assert!(value.get("capture_process_ms").is_none());
+
+        let cached = StreamEvent::from_metrics(
+            "streaming",
+            "cached frame",
+            "tcp",
+            ProjectionMode::Live,
+            FrameMetrics::default(),
+        );
+        assert_eq!(
+            serde_json::to_value(cached).unwrap()["jpegEncodeAttempts"],
+            0
+        );
     }
 
     fn hello_reply(width: u16, height: u16, max_frame_bytes: usize) -> ControlReply {

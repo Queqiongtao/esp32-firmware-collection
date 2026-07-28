@@ -16,17 +16,24 @@ pub struct PreparedImage {
     pub image: DynamicImage,
     pub source_scale_percent: u16,
     pub content_rect: Option<ImageRect>,
+    pub capture_process_ms: u32,
+}
+
+#[derive(Default)]
+pub struct SharpenWorkspace {
+    luma: Vec<u8>,
+    horizontal: Vec<u16>,
 }
 
 impl PreparedImage {
-    pub fn apply_quality_filter(&mut self) {
+    pub fn apply_quality_filter(&mut self, workspace: &mut SharpenWorkspace) {
         if !should_sharpen(self.source_scale_percent) {
             return;
         }
         let (Some(rect), Some(image)) = (self.content_rect, self.image.as_mut_rgb8()) else {
             return;
         };
-        sharpen_luma_region(image, rect);
+        workspace.sharpen_luma_region(image, rect);
     }
 }
 
@@ -48,63 +55,74 @@ pub fn should_sharpen(scale_percent: u16) -> bool {
     scale_percent > 0 && scale_percent < SHARPEN_SCALE_THRESHOLD_PERCENT
 }
 
+#[cfg(test)]
 pub fn sharpen_luma_region(image: &mut RgbImage, rect: ImageRect) {
-    if rect.width < 3
-        || rect.height < 3
-        || rect.x > image.width().saturating_sub(rect.width)
-        || rect.y > image.height().saturating_sub(rect.height)
-    {
-        return;
-    }
+    SharpenWorkspace::default().sharpen_luma_region(image, rect);
+}
 
-    let image_width = image.width() as usize;
-    let rect_x = rect.x as usize;
-    let rect_y = rect.y as usize;
-    let width = rect.width as usize;
-    let height = rect.height as usize;
-    let pixels = image.as_raw();
-    let mut luma = vec![0_u8; width * height];
-    for y in 0..height {
-        let source_row = ((rect_y + y) * image_width + rect_x) * 3;
-        let luma_row = y * width;
-        for x in 0..width {
-            let offset = source_row + x * 3;
-            luma[luma_row + x] = ((77_u32 * u32::from(pixels[offset])
-                + 150_u32 * u32::from(pixels[offset + 1])
-                + 29_u32 * u32::from(pixels[offset + 2])
-                + 128)
-                >> 8) as u8;
+impl SharpenWorkspace {
+    pub fn sharpen_luma_region(&mut self, image: &mut RgbImage, rect: ImageRect) {
+        if rect.width < 3
+            || rect.height < 3
+            || rect.x > image.width().saturating_sub(rect.width)
+            || rect.y > image.height().saturating_sub(rect.height)
+        {
+            return;
         }
-    }
 
-    let pixels = image.as_mut();
-    for y in 1..height - 1 {
-        for x in 1..width - 1 {
-            let offset = y * width + x;
-            let softened = (i32::from(luma[offset - width - 1])
-                + 2 * i32::from(luma[offset - width])
-                + i32::from(luma[offset - width + 1])
-                + 2 * i32::from(luma[offset - 1])
-                + 4 * i32::from(luma[offset])
-                + 2 * i32::from(luma[offset + 1])
-                + i32::from(luma[offset + width - 1])
-                + 2 * i32::from(luma[offset + width])
-                + i32::from(luma[offset + width + 1])
-                + 8)
-                / 16;
-            let detail = i32::from(luma[offset]) - softened;
-            if detail.abs() < SHARPEN_DETAIL_THRESHOLD {
-                continue;
+        let image_width = image.width() as usize;
+        let rect_x = rect.x as usize;
+        let rect_y = rect.y as usize;
+        let width = rect.width as usize;
+        let height = rect.height as usize;
+        self.luma.resize(width * height, 0);
+        self.horizontal.resize(width * height, 0);
+        let pixels = image.as_raw();
+        for y in 0..height {
+            let source_row = ((rect_y + y) * image_width + rect_x) * 3;
+            let luma_row = y * width;
+            for x in 0..width {
+                let offset = source_row + x * 3;
+                self.luma[luma_row + x] = ((77_u32 * u32::from(pixels[offset])
+                    + 150_u32 * u32::from(pixels[offset + 1])
+                    + 29_u32 * u32::from(pixels[offset + 2])
+                    + 128)
+                    >> 8) as u8;
             }
-            let weighted = detail * SHARPEN_STRENGTH_PERCENT;
-            let adjustment = if weighted >= 0 {
-                (weighted + 50) / 100
-            } else {
-                (weighted - 50) / 100
-            };
-            let pixel_offset = ((rect_y + y) * image_width + rect_x + x) * 3;
-            for channel in &mut pixels[pixel_offset..pixel_offset + 3] {
-                *channel = (i32::from(*channel) + adjustment).clamp(0, 255) as u8;
+        }
+
+        for y in 0..height {
+            let row = y * width;
+            for x in 1..width - 1 {
+                self.horizontal[row + x] = u16::from(self.luma[row + x - 1])
+                    + 2 * u16::from(self.luma[row + x])
+                    + u16::from(self.luma[row + x + 1]);
+            }
+        }
+
+        let pixels = image.as_mut();
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let offset = y * width + x;
+                let softened = (i32::from(self.horizontal[offset - width])
+                    + 2 * i32::from(self.horizontal[offset])
+                    + i32::from(self.horizontal[offset + width])
+                    + 8)
+                    / 16;
+                let detail = i32::from(self.luma[offset]) - softened;
+                if detail.abs() < SHARPEN_DETAIL_THRESHOLD {
+                    continue;
+                }
+                let weighted = detail * SHARPEN_STRENGTH_PERCENT;
+                let adjustment = if weighted >= 0 {
+                    (weighted + 50) / 100
+                } else {
+                    (weighted - 50) / 100
+                };
+                let pixel_offset = ((rect_y + y) * image_width + rect_x + x) * 3;
+                for channel in &mut pixels[pixel_offset..pixel_offset + 3] {
+                    *channel = (i32::from(*channel) + adjustment).clamp(0, 255) as u8;
+                }
             }
         }
     }
@@ -114,6 +132,58 @@ pub fn sharpen_luma_region(image: &mut RgbImage, rect: ImageRect) {
 mod tests {
     use super::*;
     use image::{ImageBuffer, Rgb};
+
+    fn reference_sharpen(image: &mut RgbImage, rect: ImageRect) {
+        let image_width = image.width() as usize;
+        let rect_x = rect.x as usize;
+        let rect_y = rect.y as usize;
+        let width = rect.width as usize;
+        let height = rect.height as usize;
+        let pixels = image.as_raw();
+        let mut luma = vec![0_u8; width * height];
+        for y in 0..height {
+            let source_row = ((rect_y + y) * image_width + rect_x) * 3;
+            for x in 0..width {
+                let offset = source_row + x * 3;
+                luma[y * width + x] = ((77_u32 * u32::from(pixels[offset])
+                    + 150_u32 * u32::from(pixels[offset + 1])
+                    + 29_u32 * u32::from(pixels[offset + 2])
+                    + 128)
+                    >> 8) as u8;
+            }
+        }
+        let pixels = image.as_mut();
+        for y in 1..height - 1 {
+            for x in 1..width - 1 {
+                let offset = y * width + x;
+                let softened = (i32::from(luma[offset - width - 1])
+                    + 2 * i32::from(luma[offset - width])
+                    + i32::from(luma[offset - width + 1])
+                    + 2 * i32::from(luma[offset - 1])
+                    + 4 * i32::from(luma[offset])
+                    + 2 * i32::from(luma[offset + 1])
+                    + i32::from(luma[offset + width - 1])
+                    + 2 * i32::from(luma[offset + width])
+                    + i32::from(luma[offset + width + 1])
+                    + 8)
+                    / 16;
+                let detail = i32::from(luma[offset]) - softened;
+                if detail.abs() < SHARPEN_DETAIL_THRESHOLD {
+                    continue;
+                }
+                let weighted = detail * SHARPEN_STRENGTH_PERCENT;
+                let adjustment = if weighted >= 0 {
+                    (weighted + 50) / 100
+                } else {
+                    (weighted - 50) / 100
+                };
+                let pixel_offset = ((rect_y + y) * image_width + rect_x + x) * 3;
+                for channel in &mut pixels[pixel_offset..pixel_offset + 3] {
+                    *channel = (i32::from(*channel) + adjustment).clamp(0, 255) as u8;
+                }
+            }
+        }
+    }
 
     #[test]
     fn scale_percent_reports_downscale_and_upscale() {
@@ -164,8 +234,10 @@ mod tests {
                 width: 6,
                 height: 4,
             }),
+            capture_process_ms: 0,
         };
-        downscaled.apply_quality_filter();
+        let mut workspace = SharpenWorkspace::default();
+        downscaled.apply_quality_filter(&mut workspace);
         assert_eq!(downscaled.image.to_rgb8().get_pixel(0, 2).0, [20, 20, 20]);
         assert!(downscaled.image.to_rgb8().get_pixel(3, 2).0[0] < 20);
 
@@ -178,8 +250,49 @@ mod tests {
                 width: 8,
                 height: 6,
             }),
+            capture_process_ms: 0,
         };
-        native.apply_quality_filter();
+        native.apply_quality_filter(&mut workspace);
         assert_eq!(native.image.to_rgb8(), source);
+    }
+
+    #[test]
+    fn reusable_workspace_matches_reference_across_sizes_and_rectangles() {
+        let mut workspace = SharpenWorkspace::default();
+        for (width, height, rect) in [
+            (
+                11,
+                9,
+                ImageRect {
+                    x: 1,
+                    y: 2,
+                    width: 8,
+                    height: 6,
+                },
+            ),
+            (
+                7,
+                5,
+                ImageRect {
+                    x: 0,
+                    y: 0,
+                    width: 7,
+                    height: 5,
+                },
+            ),
+        ] {
+            let source = ImageBuffer::from_fn(width, height, |x, y| {
+                Rgb([
+                    ((x * 37 + y * 11) & 0xff) as u8,
+                    ((x * 13 + y * 41) & 0xff) as u8,
+                    ((x * 23 + y * 17) & 0xff) as u8,
+                ])
+            });
+            let mut expected = source.clone();
+            let mut actual = source;
+            reference_sharpen(&mut expected, rect);
+            workspace.sharpen_luma_region(&mut actual, rect);
+            assert_eq!(actual, expected);
+        }
     }
 }

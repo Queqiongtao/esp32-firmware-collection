@@ -29,7 +29,7 @@ WDP/WebRTC 位于仓库顶层 `wireless_display/`，它与本目录的 WebSocket
 
 客户端提供“实时投屏”和“区域投屏”两种模式。区域投屏先取得屏幕或窗口的冻结预览，用户鼠标框选后持续实时采集该区域；Linux 自动恢复上次来源时，可在全屏框选层直接更换屏幕或窗口。运行中可以重新框选，取消不会改变当前区域，点击 Stop 后设备恢复主页。开启“触摸控制”后，投屏期间在设备屏幕上单击、拖拽、长按（右键）和右缘滑动（滚轮）会反向操控 PC 鼠标，详见 [PC 客户端实现](docs/pc-client.md)。
 
-Linux 首次授权或重新选屏时，客户端在 `hello_ack` 后先取得并编码首帧，首帧就绪后才发送 `start_stream`，避免 Portal 操作消耗设备的 10 秒无帧超时。PipeWire 回调只负责裁剪、缩放和发布最新画面；变化画面的锐化与 JPEG 编码在发送线程执行。
+Linux 首次授权或重新选屏时，客户端在 `hello_ack` 后先取得并编码首帧，首帧就绪后才发送 `start_stream`，避免 Portal 操作消耗设备的 10 秒无帧超时。PipeWire 回调裁剪、缩放并覆盖发布最新画面，变化画面的锐化与 JPEG 编码在发送线程执行。PipeWire 优先协商最高 30 FPS，并为不接受该范围的 Portal 后端保留宽松格式回退。
 
 Ubuntu/Debian 首次构建需要安装 Tauri、WebKitGTK 和 PipeWire 依赖，然后执行：
 
@@ -37,6 +37,12 @@ Ubuntu/Debian 首次构建需要安装 Tauri、WebKitGTK 和 PipeWire 依赖，�
 cd companion_display/desktop_client
 npm ci
 npm run tauri:dev
+```
+
+`tauri:dev` 保留调试信息，不能代表发布性能。需要热更新并按发布优化级别复测 CPU 时使用：
+
+```bash
+npm run tauri:dev:release
 ```
 
 生成发布包：

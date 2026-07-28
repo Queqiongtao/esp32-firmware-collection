@@ -10,7 +10,8 @@ const jpegMetric = computed(() => {
   if (!stream.metrics.jpegQualityUsed || !stream.target) return "--";
   const usedKiB = Math.ceil(stream.metrics.jpegBytes / 1024);
   const limitKiB = Math.floor((stream.target.maxFrameBytes - 24) / 1024);
-  return `Q${stream.metrics.jpegQualityUsed} ${usedKiB}/${limitKiB}K`;
+  const attempts = stream.metrics.jpegEncodeAttempts ? ` ${stream.metrics.jpegEncodeAttempts}x` : "";
+  return `Q${stream.metrics.jpegQualityUsed}${attempts} ${usedKiB}/${limitKiB}K`;
 });
 
 const items = computed(() => [
@@ -18,8 +19,9 @@ const items = computed(() => [
   { key: "fps", name: "FPS", get: () => String(stream.metrics.fps) },
   { key: "scale", name: "SCALE", get: () => (stream.metrics.sourceScalePercent ? `${stream.metrics.sourceScalePercent}%` : "--") },
   { key: "jpeg", name: "JPEG", get: () => jpegMetric.value },
-  { key: "capture", name: locale.t("metric.capture"), get: () => `${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },
+  { key: "capture", name: locale.t("metric.capture"), hint: locale.t("metric.captureHint"), get: () => `${stream.metrics.captureProcessMs}/${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },
   { key: "encode", name: locale.t("metric.encode"), get: () => `${stream.metrics.captureEncodeMs} ms`, slow: () => stream.encodeSlow },
+  { key: "send", name: locale.t("metric.send"), get: () => `${stream.metrics.sendMs} ms`, slow: () => stream.sendSlow },
   { key: "device", name: locale.t("metric.device"), get: () => `${stream.metrics.deviceMs} ms`, slow: () => stream.deviceSlow },
   { key: "replaced", name: locale.t("metric.replaced"), get: () => String(stream.metrics.deviceReplacedFrames) },
   { key: "dropped", name: locale.t("metric.dropped"), get: () => String(stream.metrics.droppedFrames) },
@@ -28,7 +30,14 @@ const items = computed(() => [
 
 <template>
   <div class="metric-row">
-    <div v-for="item in items" :key="item.key" class="metric" :class="{ slow: 'slow' in item && item.slow?.() }">
+    <div
+      v-for="item in items"
+      :key="item.key"
+      class="metric"
+      :class="{ slow: 'slow' in item && item.slow?.() }"
+      :title="'hint' in item ? item.hint : undefined"
+      :aria-label="'hint' in item ? `${item.name}: ${item.hint}` : undefined"
+    >
       <span class="metric-name">{{ item.name }}</span>
       <span class="metric-value">{{ item.get() }}</span>
     </div>
@@ -85,6 +94,7 @@ const items = computed(() => [
   font-family: var(--cd-mono);
   font-size: 13px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .metric.slow .metric-value {

@@ -2,7 +2,7 @@ use std::io::Cursor;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::image_quality::{scale_percent, ImageRect, PreparedImage};
 use crate::orientation::DisplayOrientation;
@@ -11,7 +11,7 @@ use ashpd::desktop::{
     screencast::{CursorMode, Screencast, SourceType, Stream as PortalStream},
     PersistMode, Session,
 };
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{DynamicImage, ImageBuffer};
 use pipewire as pw;
 use pw::{properties::properties, spa};
 
@@ -23,6 +23,12 @@ struct PipeWireData {
     layout_logged: bool,
     last_layout_issue: Option<FrameLayoutIssue>,
     last_alpha_status: Option<AlphaStatus>,
+    resample_plan: Option<ResamplePlan>,
+    stats_started: Instant,
+    callback_count: u64,
+    converted_count: u64,
+    conversion_total_us: u64,
+    conversion_max_us: u64,
     stop: Arc<AtomicBool>,
     mainloop: pw::main_loop::MainLoop,
 }
@@ -90,6 +96,78 @@ struct PreparedFrame {
     draw_height: usize,
     offset_x: usize,
     offset_y: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AxisSample {
+    low: usize,
+    high: usize,
+    weight: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ResampleKey {
+    crop: CaptureRegion,
+    draw_width: usize,
+    draw_height: usize,
+    offset_x: usize,
+    offset_y: usize,
+    physical_width: usize,
+    physical_height: usize,
+    orientation: DisplayOrientation,
+}
+
+struct ResamplePlan {
+    key: ResampleKey,
+    horizontal: Vec<AxisSample>,
+    vertical: Vec<AxisSample>,
+    destination_start: isize,
+    destination_x_step: isize,
+    destination_y_step: isize,
+}
+
+impl ResamplePlan {
+    fn new(key: ResampleKey) -> Self {
+        let horizontal = build_axis_samples(key.crop.x, key.crop.width, key.draw_width);
+        let vertical = build_axis_samples(key.crop.y, key.crop.height, key.draw_height);
+        let destination_start = destination_offset(key, 0, 0) as isize;
+        let destination_x_step = match key.orientation {
+            DisplayOrientation::Portrait => 3,
+            DisplayOrientation::LandscapeLeft => key.physical_width as isize * 3,
+            DisplayOrientation::PortraitInverted => -3,
+            DisplayOrientation::LandscapeRight => -(key.physical_width as isize * 3),
+        };
+        let destination_y_step = match key.orientation {
+            DisplayOrientation::Portrait => key.physical_width as isize * 3,
+            DisplayOrientation::LandscapeLeft => -3,
+            DisplayOrientation::PortraitInverted => -(key.physical_width as isize * 3),
+            DisplayOrientation::LandscapeRight => 3,
+        };
+        Self {
+            key,
+            horizontal,
+            vertical,
+            destination_start,
+            destination_x_step,
+            destination_y_step,
+        }
+    }
+
+    fn destination_offset(&self, x: usize, y: usize) -> usize {
+        (self.destination_start
+            + x as isize * self.destination_x_step
+            + y as isize * self.destination_y_step) as usize
+    }
+}
+
+fn destination_offset(key: ResampleKey, x: usize, y: usize) -> usize {
+    let (physical_x, physical_y) = key.orientation.map_logical_to_physical(
+        (key.offset_x + x) as u32,
+        (key.offset_y + y) as u32,
+        key.physical_width as u32,
+        key.physical_height as u32,
+    );
+    (physical_y as usize * key.physical_width + physical_x as usize) * 3
 }
 
 #[derive(Clone, Copy)]
@@ -459,6 +537,12 @@ fn run(
             layout_logged: false,
             last_layout_issue: None,
             last_alpha_status: None,
+            resample_plan: None,
+            stats_started: Instant::now(),
+            callback_count: 0,
+            converted_count: 0,
+            conversion_total_us: 0,
+            conversion_max_us: 0,
             stop,
             mainloop: mainloop.clone(),
         })
@@ -477,19 +561,25 @@ fn run(
             if let Ok((media_type, media_subtype)) = spa::param::format_utils::parse_format(param) {
                 if media_type == spa::param::format::MediaType::Video
                     && media_subtype == spa::param::format::MediaSubtype::Raw
+                    && user_data.format.parse(param).is_ok()
                 {
-                    if user_data.format.parse(param).is_ok() {
-                        let size = user_data.format.size();
-                        eprintln!(
-                            "PipeWire negotiated: size={}x{} format={:?}",
-                            size.width,
-                            size.height,
-                            user_data.format.format()
-                        );
-                        user_data.layout_logged = false;
-                        user_data.last_layout_issue = None;
-                        user_data.last_alpha_status = None;
-                    }
+                    let size = user_data.format.size();
+                    let framerate = user_data.format.framerate();
+                    let max_framerate = user_data.format.max_framerate();
+                    eprintln!(
+                        "PipeWire negotiated: size={}x{} format={:?} framerate={}/{} max_framerate={}/{}",
+                        size.width,
+                        size.height,
+                        user_data.format.format(),
+                        framerate.num,
+                        framerate.denom,
+                        max_framerate.num,
+                        max_framerate.denom
+                    );
+                    user_data.layout_logged = false;
+                    user_data.last_layout_issue = None;
+                    user_data.last_alpha_status = None;
+                    user_data.resample_plan = None;
                 }
             }
         })
@@ -502,6 +592,7 @@ fn run(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
+            user_data.callback_count += 1;
             let video_crop = validate_video_crop(buffer.video_crop(), &user_data.format);
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
@@ -517,14 +608,61 @@ fn run(
                 .transform
                 .preview_requested
                 .swap(false, Ordering::AcqRel);
+
+            if wants_preview {
+                let size = user_data.format.size();
+                let preview_transform = CaptureTransform {
+                    region_x: 0,
+                    region_y: 0,
+                    region_width: 0,
+                    region_height: 0,
+                    target_width: size.width,
+                    target_height: size.height,
+                    orientation: DisplayOrientation::Portrait,
+                };
+                let mut preview_plan = None;
+                let preview = image_from_data(
+                    data,
+                    &user_data.format,
+                    preview_transform,
+                    user_data.is_window,
+                    video_crop,
+                    &mut preview_plan,
+                )
+                .map_err(|error| match error {
+                    CaptureFrameError::Retry(issue) => issue.description().to_string(),
+                    CaptureFrameError::Fatal(error) => error,
+                })
+                .and_then(|frame| frame.ok_or_else(|| "selection source is empty".to_string()))
+                .map(|frame| SelectionFrame {
+                    image: frame.image,
+                    content_x: frame.offset_x as u32,
+                    content_y: frame.offset_y as u32,
+                    content_width: frame.draw_width as u32,
+                    content_height: frame.draw_height as u32,
+                    source_width: frame.crop.width as u32,
+                    source_height: frame.crop.height as u32,
+                });
+                if let Ok(mut slot) = user_data.transform.preview.lock() {
+                    *slot = Some(preview);
+                    user_data.transform.preview_ready.notify_one();
+                }
+            }
+
+            let conversion_started = Instant::now();
             match image_from_data(
                 data,
                 &user_data.format,
                 transform,
                 user_data.is_window,
                 video_crop,
+                &mut user_data.resample_plan,
             ) {
                 Ok(Some(prepared)) => {
+                    let conversion_us = conversion_started.elapsed().as_micros() as u64;
+                    user_data.converted_count += 1;
+                    user_data.conversion_total_us += conversion_us;
+                    user_data.conversion_max_us = user_data.conversion_max_us.max(conversion_us);
                     user_data.last_layout_issue = None;
                     if user_data.last_alpha_status != Some(prepared.alpha_status) {
                         match prepared.alpha_status {
@@ -577,43 +715,6 @@ fn run(
                             frame_height: size.height,
                         });
                     }
-                    if wants_preview {
-                        let size = user_data.format.size();
-                        let preview_transform = CaptureTransform {
-                            region_x: 0,
-                            region_y: 0,
-                            region_width: 0,
-                            region_height: 0,
-                            target_width: size.width,
-                            target_height: size.height,
-                            orientation: DisplayOrientation::Portrait,
-                        };
-                        let preview = image_from_data(
-                            data,
-                            &user_data.format,
-                            preview_transform,
-                            user_data.is_window,
-                            video_crop,
-                        )
-                        .map_err(|error| match error {
-                            CaptureFrameError::Retry(issue) => issue.description().to_string(),
-                            CaptureFrameError::Fatal(error) => error,
-                        })
-                        .and_then(|frame| frame.ok_or_else(|| "selection source is empty".to_string()))
-                        .map(|frame| SelectionFrame {
-                            image: frame.image,
-                            content_x: frame.offset_x as u32,
-                            content_y: frame.offset_y as u32,
-                            content_width: frame.draw_width as u32,
-                            content_height: frame.draw_height as u32,
-                            source_width: frame.crop.width as u32,
-                            source_height: frame.crop.height as u32,
-                        });
-                        if let Ok(mut slot) = user_data.transform.preview.lock() {
-                            *slot = Some(preview);
-                            user_data.transform.preview_ready.notify_one();
-                        }
-                    }
                     let content_rect = transform.orientation.map_logical_rect_to_physical(
                         ImageRect {
                             x: prepared.offset_x as u32,
@@ -633,6 +734,8 @@ fn run(
                             prepared.draw_height as u32,
                         ),
                         content_rect: Some(content_rect),
+                        capture_process_ms: u32::try_from(conversion_us.div_ceil(1000))
+                            .unwrap_or(u32::MAX),
                     }));
                 }
                 Ok(None) => {
@@ -665,57 +768,61 @@ fn run(
                 }
                 Err(CaptureFrameError::Fatal(error)) => user_data.frames.publish(Err(error)),
             }
+            maybe_log_capture_stats(user_data);
         })
         .register()
         .map_err(|error| format!("PipeWire listener registration failed: {error}"))?;
 
-    let format = pw::spa::pod::object!(
-        pw::spa::utils::SpaTypes::ObjectParamFormat,
-        pw::spa::param::ParamType::EnumFormat,
-        pw::spa::pod::property!(
-            pw::spa::param::format::FormatProperties::MediaType,
-            Id,
-            pw::spa::param::format::MediaType::Video
-        ),
-        pw::spa::pod::property!(
-            pw::spa::param::format::FormatProperties::MediaSubtype,
-            Id,
-            pw::spa::param::format::MediaSubtype::Raw
-        ),
-        pw::spa::pod::property!(
-            pw::spa::param::format::FormatProperties::VideoFormat,
-            Choice,
-            Enum,
-            Id,
-            pw::spa::param::video::VideoFormat::BGRA,
-            pw::spa::param::video::VideoFormat::BGRA,
-            pw::spa::param::video::VideoFormat::RGBA,
-            pw::spa::param::video::VideoFormat::BGRx,
-            pw::spa::param::video::VideoFormat::RGBx,
-        ),
-        pw::spa::pod::property!(
-            pw::spa::param::format::FormatProperties::VideoFramerate,
-            Choice,
-            Range,
-            Fraction,
-            pw::spa::utils::Fraction {
-                num: u32::from(fps.clamp(1, 30)),
-                denom: 1
-            },
-            pw::spa::utils::Fraction { num: 0, denom: 1 },
-            pw::spa::utils::Fraction {
-                num: 1000,
-                denom: 1
-            }
-        ),
-    );
-    let values = pw::spa::pod::serialize::PodSerializer::serialize(
-        Cursor::new(Vec::new()),
-        &pw::spa::pod::Value::Object(format),
-    )
-    .map_err(|error| format!("PipeWire format serialization failed: {error}"))?
-    .0
-    .into_inner();
+    let serialize_format = |maximum_fps: u32| {
+        let format = pw::spa::pod::object!(
+            pw::spa::utils::SpaTypes::ObjectParamFormat,
+            pw::spa::param::ParamType::EnumFormat,
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaType,
+                Id,
+                pw::spa::param::format::MediaType::Video
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::MediaSubtype,
+                Id,
+                pw::spa::param::format::MediaSubtype::Raw
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFormat,
+                Choice,
+                Enum,
+                Id,
+                pw::spa::param::video::VideoFormat::BGRA,
+                pw::spa::param::video::VideoFormat::BGRA,
+                pw::spa::param::video::VideoFormat::RGBA,
+                pw::spa::param::video::VideoFormat::BGRx,
+                pw::spa::param::video::VideoFormat::RGBx,
+            ),
+            pw::spa::pod::property!(
+                pw::spa::param::format::FormatProperties::VideoFramerate,
+                Choice,
+                Range,
+                Fraction,
+                pw::spa::utils::Fraction {
+                    num: u32::from(fps.clamp(1, 30)),
+                    denom: 1
+                },
+                pw::spa::utils::Fraction { num: 0, denom: 1 },
+                pw::spa::utils::Fraction {
+                    num: maximum_fps,
+                    denom: 1
+                }
+            ),
+        );
+        pw::spa::pod::serialize::PodSerializer::serialize(
+            Cursor::new(Vec::new()),
+            &pw::spa::pod::Value::Object(format),
+        )
+        .map(|serialized| serialized.0.into_inner())
+        .map_err(|error| format!("PipeWire format serialization failed: {error}"))
+    };
+    let capped_format_values = serialize_format(30)?;
+    let fallback_format_values = serialize_format(1000)?;
     let meta = pw::spa::pod::object!(
         pw::spa::utils::SpaTypes::ObjectParamMeta,
         pw::spa::param::ParamType::Meta,
@@ -738,8 +845,10 @@ fn run(
     .0
     .into_inner();
     let mut params = [
-        spa::pod::Pod::from_bytes(&values)
-            .ok_or_else(|| "PipeWire format creation failed".to_string())?,
+        spa::pod::Pod::from_bytes(&capped_format_values)
+            .ok_or_else(|| "PipeWire capped format creation failed".to_string())?,
+        spa::pod::Pod::from_bytes(&fallback_format_values)
+            .ok_or_else(|| "PipeWire fallback format creation failed".to_string())?,
         spa::pod::Pod::from_bytes(&meta_values)
             .ok_or_else(|| "PipeWire metadata request creation failed".to_string())?,
     ];
@@ -763,6 +872,7 @@ fn image_from_data(
     transform: CaptureTransform,
     is_window: bool,
     video_crop: Option<CaptureRegion>,
+    cached_plan: &mut Option<ResamplePlan>,
 ) -> Result<Option<PreparedFrame>, CaptureFrameError> {
     let size = format.size();
     let width = size.width as usize;
@@ -866,58 +976,32 @@ fn image_from_data(
     let target_height = logical_height as usize;
     let (draw_width, draw_height, offset_x, offset_y) =
         letterbox_layout(crop_width, crop_height, target_width, target_height);
-    let mut output = ImageBuffer::from_pixel(
-        transform.target_width,
-        transform.target_height,
-        Rgb([0, 0, 0]),
-    );
-    let sample = |x: usize, y: usize| -> [u8; 3] {
-        let offset = layout.row_offset(y) + x * 4;
-        let pixel = &bytes[offset..offset + 4];
-        if rgb_ordered {
-            [pixel[0], pixel[1], pixel[2]]
-        } else {
-            [pixel[2], pixel[1], pixel[0]]
-        }
+    let key = ResampleKey {
+        crop: CaptureRegion {
+            x: crop_x,
+            y: crop_y,
+            width: crop_width,
+            height: crop_height,
+        },
+        draw_width,
+        draw_height,
+        offset_x,
+        offset_y,
+        physical_width,
+        physical_height,
+        orientation: transform.orientation,
     };
-    for output_y in 0..draw_height {
-        let source_y = crop_y as f32
-            + ((output_y as f32 + 0.5) * crop_height as f32 / draw_height as f32 - 0.5);
-        let y0 = source_y
-            .floor()
-            .clamp(crop_y as f32, (crop_y + crop_height - 1) as f32) as usize;
-        let y1 = (y0 + 1).min(crop_y + crop_height - 1);
-        let fy = source_y - source_y.floor();
-        for output_x in 0..draw_width {
-            let source_x = crop_x as f32
-                + ((output_x as f32 + 0.5) * crop_width as f32 / draw_width as f32 - 0.5);
-            let x0 = source_x
-                .floor()
-                .clamp(crop_x as f32, (crop_x + crop_width - 1) as f32)
-                as usize;
-            let x1 = (x0 + 1).min(crop_x + crop_width - 1);
-            let fx = source_x - source_x.floor();
-            let p00 = sample(x0, y0);
-            let p10 = sample(x1, y0);
-            let p01 = sample(x0, y1);
-            let p11 = sample(x1, y1);
-            let mut rgb = [0_u8; 3];
-            for channel in 0..3 {
-                let top = p00[channel] as f32 + (p10[channel] as f32 - p00[channel] as f32) * fx;
-                let bottom = p01[channel] as f32 + (p11[channel] as f32 - p01[channel] as f32) * fx;
-                rgb[channel] = (top + (bottom - top) * fy).round() as u8;
-            }
-            let logical_x = (offset_x + output_x) as u32;
-            let logical_y = (offset_y + output_y) as u32;
-            let (physical_x, physical_y) = transform.orientation.map_logical_to_physical(
-                logical_x,
-                logical_y,
-                physical_width as u32,
-                physical_height as u32,
-            );
-            output.put_pixel(physical_x, physical_y, Rgb(rgb));
-        }
+    let plan_changed = match cached_plan.as_ref() {
+        Some(plan) => plan.key != key,
+        None => true,
+    };
+    if plan_changed {
+        *cached_plan = Some(ResamplePlan::new(key));
     }
+    let plan = cached_plan.as_ref().expect("resample plan was initialized");
+    let output = resample_frame(bytes, layout, rgb_ordered, plan);
+    let output = ImageBuffer::from_raw(transform.target_width, transform.target_height, output)
+        .ok_or_else(|| CaptureFrameError::Fatal("capture output layout failed".to_string()))?;
     Ok(Some(PreparedFrame {
         image: DynamicImage::ImageRgb8(output),
         alpha_status,
@@ -932,6 +1016,88 @@ fn image_from_data(
         offset_x,
         offset_y,
     }))
+}
+
+fn resample_frame(
+    bytes: &[u8],
+    layout: FrameLayout,
+    rgb_ordered: bool,
+    plan: &ResamplePlan,
+) -> Vec<u8> {
+    let mut output = vec![0_u8; plan.key.physical_width * plan.key.physical_height * 3];
+    let channels = if rgb_ordered { [0, 1, 2] } else { [2, 1, 0] };
+    for (output_y, vertical) in plan.vertical.iter().enumerate() {
+        let row0 = layout.row_offset(vertical.low);
+        let row1 = layout.row_offset(vertical.high);
+        let wy = u32::from(vertical.weight);
+        let inverse_y = 4096 - wy;
+        for (output_x, horizontal) in plan.horizontal.iter().enumerate() {
+            let wx = u32::from(horizontal.weight);
+            let inverse_x = 4096 - wx;
+            let source00 = row0 + horizontal.low * 4;
+            let source10 = row0 + horizontal.high * 4;
+            let source01 = row1 + horizontal.low * 4;
+            let source11 = row1 + horizontal.high * 4;
+            let destination = plan.destination_offset(output_x, output_y);
+            for (destination_channel, source_channel) in channels.iter().enumerate() {
+                let top = u32::from(bytes[source00 + source_channel]) * inverse_x
+                    + u32::from(bytes[source10 + source_channel]) * wx;
+                let bottom = u32::from(bytes[source01 + source_channel]) * inverse_x
+                    + u32::from(bytes[source11 + source_channel]) * wx;
+                output[destination + destination_channel] =
+                    ((top * inverse_y + bottom * wy + 8_388_608) >> 24) as u8;
+            }
+        }
+    }
+    output
+}
+
+fn build_axis_samples(
+    origin: usize,
+    source_length: usize,
+    output_length: usize,
+) -> Vec<AxisSample> {
+    let origin_fixed = origin as i64 * 4096;
+    let last = origin + source_length - 1;
+    (0..output_length)
+        .map(|output| {
+            let coordinate = origin_fixed
+                + ((2 * output + 1) as i64 * source_length as i64 * 4096
+                    / (2 * output_length) as i64)
+                - 2048;
+            let floor = coordinate.div_euclid(4096);
+            let low = usize::try_from(floor).unwrap_or(origin).clamp(origin, last);
+            AxisSample {
+                low,
+                high: (low + 1).min(last),
+                weight: coordinate.rem_euclid(4096) as u16,
+            }
+        })
+        .collect()
+}
+
+fn maybe_log_capture_stats(data: &mut PipeWireData) {
+    let elapsed = data.stats_started.elapsed();
+    if elapsed < Duration::from_secs(5) {
+        return;
+    }
+    let seconds = elapsed.as_secs_f64();
+    let average_us = data
+        .conversion_total_us
+        .checked_div(data.converted_count)
+        .unwrap_or(0);
+    eprintln!(
+        "PipeWire capture stats: callbacks={:.1}/s converted={:.1}/s avg={}us max={}us",
+        data.callback_count as f64 / seconds,
+        data.converted_count as f64 / seconds,
+        average_us,
+        data.conversion_max_us
+    );
+    data.stats_started = Instant::now();
+    data.callback_count = 0;
+    data.converted_count = 0;
+    data.conversion_total_us = 0;
+    data.conversion_max_us = 0;
 }
 
 fn frame_layout(
@@ -971,16 +1137,17 @@ fn frame_layout(
     let first_row_offset = chunk_offset as usize % mapped_len;
     if chunk_stride < 0 {
         if first_row_offset < preceding_rows
-            || first_row_offset
-                .checked_add(row_bytes)
-                .is_none_or(|end| end > mapped_len)
+            || match first_row_offset.checked_add(row_bytes) {
+                Some(end) => end > mapped_len,
+                None => true,
+            }
         {
             return Err(FrameLayoutIssue::InvalidRange);
         }
-    } else if first_row_offset
-        .checked_add(frame_span)
-        .is_none_or(|end| end > mapped_len)
-    {
+    } else if match first_row_offset.checked_add(frame_span) {
+        Some(end) => end > mapped_len,
+        None => true,
+    } {
         return Err(FrameLayoutIssue::InvalidRange);
     }
 
@@ -1153,6 +1320,7 @@ mod tests {
                 width: 1,
                 height: 1,
             }),
+            capture_process_ms: 0,
         };
         let latest = PreparedImage {
             image: DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([2, 0, 0]))),
@@ -1163,6 +1331,7 @@ mod tests {
                 width: 1,
                 height: 1,
             }),
+            capture_process_ms: 0,
         };
         frames.publish(Ok(first));
         frames.publish(Ok(latest));
@@ -1175,6 +1344,236 @@ mod tests {
                 .get_pixel(0, 0)[0],
             2
         );
+    }
+
+    #[test]
+    fn fixed_point_axis_samples_match_the_previous_float_mapping() {
+        for (origin, source_length, output_length) in [(0, 2, 4), (3, 7, 5), (5, 5, 5)] {
+            let samples = build_axis_samples(origin, source_length, output_length);
+            for (output, sample) in samples.iter().enumerate() {
+                let coordinate = origin as f32
+                    + ((output as f32 + 0.5) * source_length as f32 / output_length as f32 - 0.5);
+                let floor = coordinate.floor();
+                let expected_low = (floor as isize)
+                    .clamp(origin as isize, (origin + source_length - 1) as isize)
+                    as usize;
+                let expected_weight = coordinate - floor;
+                assert_eq!(sample.low, expected_low);
+                assert_eq!(
+                    sample.high,
+                    (expected_low + 1).min(origin + source_length - 1)
+                );
+                assert!(
+                    (f32::from(sample.weight) / 4096.0 - expected_weight).abs() <= 1.0 / 4096.0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn affine_destination_offsets_match_orientation_mapping() {
+        for orientation in [
+            DisplayOrientation::Portrait,
+            DisplayOrientation::LandscapeLeft,
+            DisplayOrientation::PortraitInverted,
+            DisplayOrientation::LandscapeRight,
+        ] {
+            let (logical_width, logical_height) = orientation.logical_size(7, 9);
+            let key = ResampleKey {
+                crop: CaptureRegion {
+                    x: 2,
+                    y: 3,
+                    width: 5,
+                    height: 4,
+                },
+                draw_width: logical_width as usize - 2,
+                draw_height: logical_height as usize - 2,
+                offset_x: 1,
+                offset_y: 1,
+                physical_width: 7,
+                physical_height: 9,
+                orientation,
+            };
+            let plan = ResamplePlan::new(key);
+            for y in 0..key.draw_height {
+                for x in 0..key.draw_width {
+                    assert_eq!(
+                        plan.destination_offset(x, y),
+                        destination_offset(key, x, y),
+                        "{orientation:?} ({x}, {y})"
+                    );
+                }
+            }
+            assert_eq!(plan.horizontal.len(), key.draw_width);
+            assert_eq!(plan.vertical.len(), key.draw_height);
+        }
+    }
+
+    fn reference_resample(
+        bytes: &[u8],
+        layout: FrameLayout,
+        rgb_ordered: bool,
+        key: ResampleKey,
+    ) -> Vec<u8> {
+        let mut output = vec![0_u8; key.physical_width * key.physical_height * 3];
+        let channels = if rgb_ordered { [0, 1, 2] } else { [2, 1, 0] };
+        let sample = |x: usize, y: usize| {
+            let offset = layout.row_offset(y) + x * 4;
+            [
+                bytes[offset + channels[0]],
+                bytes[offset + channels[1]],
+                bytes[offset + channels[2]],
+            ]
+        };
+        for output_y in 0..key.draw_height {
+            let source_y = key.crop.y as f32
+                + ((output_y as f32 + 0.5) * key.crop.height as f32 / key.draw_height as f32 - 0.5);
+            let y0 = source_y
+                .floor()
+                .clamp(key.crop.y as f32, (key.crop.y + key.crop.height - 1) as f32)
+                as usize;
+            let y1 = (y0 + 1).min(key.crop.y + key.crop.height - 1);
+            let fy = source_y - source_y.floor();
+            for output_x in 0..key.draw_width {
+                let source_x = key.crop.x as f32
+                    + ((output_x as f32 + 0.5) * key.crop.width as f32 / key.draw_width as f32
+                        - 0.5);
+                let x0 = source_x
+                    .floor()
+                    .clamp(key.crop.x as f32, (key.crop.x + key.crop.width - 1) as f32)
+                    as usize;
+                let x1 = (x0 + 1).min(key.crop.x + key.crop.width - 1);
+                let fx = source_x - source_x.floor();
+                let p00 = sample(x0, y0);
+                let p10 = sample(x1, y0);
+                let p01 = sample(x0, y1);
+                let p11 = sample(x1, y1);
+                let destination = destination_offset(key, output_x, output_y);
+                for channel in 0..3 {
+                    let top =
+                        p00[channel] as f32 + (p10[channel] as f32 - p00[channel] as f32) * fx;
+                    let bottom =
+                        p01[channel] as f32 + (p11[channel] as f32 - p01[channel] as f32) * fx;
+                    output[destination + channel] = (top + (bottom - top) * fy).round() as u8;
+                }
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn fixed_point_resampling_matches_rgb_bgr_reference_for_every_orientation() {
+        let source_width = 7;
+        let source_height = 6;
+        let row_bytes = source_width * 4;
+        let bytes = (0..source_height)
+            .flat_map(|y| {
+                (0..source_width).flat_map(move |x| {
+                    [
+                        (x * 29 + y * 7) as u8,
+                        (x * 11 + y * 31) as u8,
+                        (x * 17 + y * 13) as u8,
+                        255,
+                    ]
+                })
+            })
+            .collect::<Vec<_>>();
+        let layout = FrameLayout {
+            first_row_offset: 0,
+            stride: row_bytes as isize,
+        };
+        for orientation in [
+            DisplayOrientation::Portrait,
+            DisplayOrientation::LandscapeLeft,
+            DisplayOrientation::PortraitInverted,
+            DisplayOrientation::LandscapeRight,
+        ] {
+            let (logical_width, logical_height) = orientation.logical_size(5, 4);
+            let crop = CaptureRegion {
+                x: 1,
+                y: 1,
+                width: 5,
+                height: 4,
+            };
+            let (draw_width, draw_height, offset_x, offset_y) = letterbox_layout(
+                crop.width,
+                crop.height,
+                logical_width as usize,
+                logical_height as usize,
+            );
+            let key = ResampleKey {
+                crop,
+                draw_width,
+                draw_height,
+                offset_x,
+                offset_y,
+                physical_width: 5,
+                physical_height: 4,
+                orientation,
+            };
+            let plan = ResamplePlan::new(key);
+            for rgb_ordered in [true, false] {
+                let actual = resample_frame(&bytes, layout, rgb_ordered, &plan);
+                let expected = reference_resample(&bytes, layout, rgb_ordered, key);
+                for (actual, expected) in actual.iter().zip(expected) {
+                    assert!(u8::abs_diff(*actual, expected) <= 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resampling_preserves_negative_stride_orientation() {
+        let width = 5;
+        let height = 4;
+        let row_bytes = width * 4;
+        let bytes = (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| [(x + y * width) as u8, x as u8, y as u8, 255])
+            })
+            .collect::<Vec<_>>();
+        let mut reversed = vec![0_u8; bytes.len()];
+        for y in 0..height {
+            let source = y * row_bytes;
+            let destination = (height - 1 - y) * row_bytes;
+            reversed[destination..destination + row_bytes]
+                .copy_from_slice(&bytes[source..source + row_bytes]);
+        }
+        let key = ResampleKey {
+            crop: CaptureRegion {
+                x: 0,
+                y: 0,
+                width,
+                height,
+            },
+            draw_width: width,
+            draw_height: height,
+            offset_x: 0,
+            offset_y: 0,
+            physical_width: width,
+            physical_height: height,
+            orientation: DisplayOrientation::Portrait,
+        };
+        let plan = ResamplePlan::new(key);
+        let positive = resample_frame(
+            &bytes,
+            FrameLayout {
+                first_row_offset: 0,
+                stride: row_bytes as isize,
+            },
+            true,
+            &plan,
+        );
+        let negative = resample_frame(
+            &reversed,
+            FrameLayout {
+                first_row_offset: (height - 1) * row_bytes,
+                stride: -(row_bytes as isize),
+            },
+            true,
+            &plan,
+        );
+        assert_eq!(negative, positive);
     }
 
     #[test]

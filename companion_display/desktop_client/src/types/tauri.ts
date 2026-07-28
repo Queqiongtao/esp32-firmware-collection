@@ -37,6 +37,9 @@ export type StreamEvent = {
   videoTransport: string;
   captureEncodeMs: number;
   captureWaitMs: number;
+  captureProcessMs: number;
+  sendMs: number;
+  jpegEncodeAttempts: number;
   deviceMs: number;
   deviceReplacedFrames: number;
   projectionMode: ProjectionMode;

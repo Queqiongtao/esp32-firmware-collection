@@ -48,7 +48,10 @@ export const useStreamStore = defineStore("stream", () => {
     jpegQualityUsed: 0,
     sourceScalePercent: 0,
     captureWaitMs: 0,
+    captureProcessMs: 0,
     captureEncodeMs: 0,
+    sendMs: 0,
+    jpegEncodeAttempts: 0,
     deviceMs: 0,
     deviceReplacedFrames: 0,
     droppedFrames: 0,
@@ -56,6 +59,7 @@ export const useStreamStore = defineStore("stream", () => {
 
   const captureWindow = ref<number[]>([]);
   const encodeWindow = ref<number[]>([]);
+  const sendWindow = ref<number[]>([]);
   const deviceWindow = ref<number[]>([]);
 
   const previewSrc = ref<string>("");
@@ -98,9 +102,12 @@ export const useStreamStore = defineStore("stream", () => {
   /* 窗口未满（流刚启动）时退化为即时判定，保证启动初期即有反馈。 */
   const captureSlow = computed(() => windowMax(captureWindow.value) > frameBudgetMs.value);
   const encodeSlow = computed(() => windowMax(encodeWindow.value) > frameBudgetMs.value);
+  const sendSlow = computed(() => windowMax(sendWindow.value) > frameBudgetMs.value);
   const deviceSlow = computed(() => windowMax(deviceWindow.value) > frameBudgetMs.value);
 
-  const performanceLimited = computed(() => captureSlow.value || encodeSlow.value || deviceSlow.value);
+  const performanceLimited = computed(
+    () => captureSlow.value || encodeSlow.value || sendSlow.value || deviceSlow.value,
+  );
 
   function clearPreview() {
     previewSrc.value = "";
@@ -119,13 +126,17 @@ export const useStreamStore = defineStore("stream", () => {
       jpegQualityUsed: 0,
       sourceScalePercent: 0,
       captureWaitMs: 0,
+      captureProcessMs: 0,
       captureEncodeMs: 0,
+      sendMs: 0,
+      jpegEncodeAttempts: 0,
       deviceMs: 0,
       deviceReplacedFrames: 0,
       droppedFrames: 0,
     };
     captureWindow.value = [];
     encodeWindow.value = [];
+    sendWindow.value = [];
     deviceWindow.value = [];
   }
 
@@ -137,13 +148,17 @@ export const useStreamStore = defineStore("stream", () => {
       jpegQualityUsed: payload.jpegQualityUsed,
       sourceScalePercent: payload.sourceScalePercent,
       captureWaitMs: payload.captureWaitMs,
+      captureProcessMs: payload.captureProcessMs,
       captureEncodeMs: payload.captureEncodeMs,
+      sendMs: payload.sendMs,
+      jpegEncodeAttempts: payload.jpegEncodeAttempts,
       deviceMs: payload.deviceMs,
       deviceReplacedFrames: payload.deviceReplacedFrames,
       droppedFrames: payload.droppedFrames,
     };
-    pushWindow(captureWindow.value, payload.captureWaitMs);
+    pushWindow(captureWindow.value, Math.max(payload.captureWaitMs, payload.captureProcessMs));
     pushWindow(encodeWindow.value, payload.captureEncodeMs);
+    pushWindow(sendWindow.value, payload.sendMs);
     pushWindow(deviceWindow.value, payload.deviceMs);
   }
 
@@ -218,6 +233,7 @@ export const useStreamStore = defineStore("stream", () => {
     performanceLimited,
     captureSlow,
     encodeSlow,
+    sendSlow,
     deviceSlow,
     clearPreview,
     setTarget,
