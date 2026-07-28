@@ -42,7 +42,7 @@ npm run tauri:dev:release
 npm run tauri:build
 ```
 
-发布二进制位于 `src-tauri/target/release/`，安装包位于其 `bundle/` 子目录。默认窗口为 1280×800，最小 720×560。
+发布二进制位于 `src-tauri/target/release/`。Linux 默认在其 `bundle/deb/`、`bundle/rpm/` 和 `bundle/appimage/` 子目录分别生成 Debian、RPM 和 AppImage 包。工程使用 `src-tauri/icons/app-icon.svg` 作为高分辨率图标母版，并在 `bundle.icon` 显式列出 Tauri 生成的桌面图标；若修改品牌图标，应重新执行 `npm exec tauri icon -- src-tauri/icons/app-icon.svg --output src-tauri/icons` 后再打包，避免 AppImage 因找不到方形图标而失败。首次生成 AppImage 还会从 GitHub 下载 `linuxdeploy`、打包插件和 AppImage runtime；`Failed to download runtime` 或状态码 `0` 表示构建环境的网络或代理无法取得发布资源，不是应用编译失败。默认窗口为 1280×800，最小 720×560。
 
 Linux 启动时会在 WebKitGTK 初始化前设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`，规避部分 Wayland、虚拟 GPU 或显卡驱动下的 DMA-BUF 界面合成杂块；该设置不影响 PipeWire 采集和视频发送。
 

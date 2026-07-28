@@ -51,6 +51,8 @@ npm run tauri:dev:release
 npm run tauri:build
 ```
 
+Linux 默认同时生成 Debian、RPM 和 AppImage 包，分别位于 `src-tauri/target/release/bundle/deb/`、`rpm/` 和 `appimage/`。工程内置方形应用图标及 Tauri 桌面图标配置，三类包应在同一次构建中完成。首次生成 AppImage 需要从 GitHub 下载 `linuxdeploy`、打包插件和 AppImage runtime，构建环境必须能够访问对应发布资源。
+
 仅验证前端与 Rust 核心：
 
 ```bash
