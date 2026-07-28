@@ -48,13 +48,18 @@ const summary = computed(() => {
   <div class="panel-content">
     <div class="field">
       <label>{{ locale.t("source.capture") }}</label>
-      <n-select
-        :value="sourceId"
-        :options="options"
-        :disabled="locked"
-        @update:value="(v: string) => emit('update:sourceId', v)"
-      />
-      <n-button size="small" :disabled="locked" class="refresh-btn" @click="emit('refresh')">{{ locale.t("source.refresh") }}</n-button>
+      <div class="source-row">
+        <n-select
+          :value="sourceId"
+          :options="options"
+          :disabled="locked"
+          @update:value="(v: string) => emit('update:sourceId', v)"
+        />
+        <n-button :disabled="locked" :title="locale.t('source.refresh')" @click="emit('refresh')">
+          <span class="refresh-icon" aria-hidden="true">↻</span>
+          <span class="refresh-label">{{ locale.t("source.refresh") }}</span>
+        </n-button>
+      </div>
     </div>
     <div class="source-summary">{{ summary }}</div>
     <div v-if="sourceId === 'linux:portal'" class="portal-memory">
@@ -83,9 +88,18 @@ const summary = computed(() => {
   font-weight: 700;
 }
 
-.refresh-btn {
-  margin-top: 6px;
-  justify-self: start;
+.source-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.refresh-icon { font-size: 17px; line-height: 1; }
+.refresh-label { display: none; }
+
+@media (max-width: 420px) {
+  .source-row { grid-template-columns: minmax(0, 1fr); }
+  .refresh-label { display: inline; margin-left: 5px; }
 }
 
 .source-summary {

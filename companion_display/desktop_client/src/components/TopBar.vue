@@ -111,4 +111,18 @@ function cycleTheme() {
   font-size: 14px;
   margin-right: 4px;
 }
+
+@media (max-width: 720px) {
+  .topbar { align-items: center; }
+  .subtitle { display: none; }
+  .brand h1 { font-size: 19px; }
+  .topbar-right { gap: 4px; }
+  .theme-text { display: none; }
+  .theme-icon { margin-right: 0; }
+}
+
+@media (max-width: 520px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .topbar-right { width: 100%; justify-content: flex-start; }
+}
 </style>

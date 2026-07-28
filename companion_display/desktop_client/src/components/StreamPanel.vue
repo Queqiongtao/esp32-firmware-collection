@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NSelect, NInputNumber, NRadioButton, NRadioGroup, NSwitch } from "naive-ui";
+import { NButton, NSelect, NInputNumber, NRadioButton, NRadioGroup, NSlider, NSwitch } from "naive-ui";
 import type { DisplayOrientation, ProjectionMode } from "../types/tauri";
 import { useLocaleStore } from "../stores/locale";
 import { computed } from "vue";
@@ -49,13 +49,10 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
 
 <template>
   <div class="panel-content">
-    <n-radio-group :value="projectionMode" :disabled="active || regionBusy" @update:value="(v: ProjectionMode) => emit('update:projectionMode', v)">
+    <n-radio-group class="mode-control" :value="projectionMode" :disabled="active || regionBusy" @update:value="(v: ProjectionMode) => emit('update:projectionMode', v)">
       <n-radio-button value="live">{{ locale.t("stream.mode.live") }}</n-radio-button>
       <n-radio-button value="region">{{ locale.t("stream.mode.region") }}</n-radio-button>
     </n-radio-group>
-    <div class="ready-row">
-      <span :class="['ready-label', `tone-${readyTone}`]">{{ readyLabel }}</span>
-    </div>
     <div class="control-grid">
       <div class="field">
         <label>{{ locale.t("stream.transport") }}</label>
@@ -75,29 +72,19 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
           @update:value="(v: DisplayOrientation) => emit('update:displayOrientation', v)"
         />
       </div>
-      <div class="field">
+      <div class="field range-field">
         <label>FPS</label>
-        <n-input-number
-          :value="fps"
-          :min="1"
-          :max="30"
-          :disabled="false"
-          :show-button="false"
-          @update:value="(v: number | null) => emit('update:fps', v ?? 20)"
-          @input="() => emit('input-params')"
-        />
+        <div class="range-control">
+          <n-slider :value="fps" :min="1" :max="30" :step="1" @update:value="(v: number) => { emit('update:fps', v); emit('input-params'); }" />
+          <n-input-number :value="fps" :min="1" :max="30" size="small" @update:value="(v: number | null) => { emit('update:fps', v ?? 20); emit('input-params'); }" />
+        </div>
       </div>
-      <div class="field">
+      <div class="field range-field">
         <label>{{ locale.t("stream.jpegQuality") }}</label>
-        <n-input-number
-          :value="quality"
-          :min="30"
-          :max="95"
-          :disabled="false"
-          :show-button="false"
-          @update:value="(v: number | null) => emit('update:quality', v ?? 85)"
-          @input="() => emit('input-params')"
-        />
+        <div class="range-control">
+          <n-slider :value="quality" :min="30" :max="95" :step="1" @update:value="(v: number) => { emit('update:quality', v); emit('input-params'); }" />
+          <n-input-number :value="quality" :min="30" :max="95" size="small" @update:value="(v: number | null) => { emit('update:quality', v ?? 85); emit('input-params'); }" />
+        </div>
       </div>
     </div>
     <div class="switch-row">
@@ -108,11 +95,22 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
         @update:value="(v: boolean) => emit('update:touchControl', v)"
       />
     </div>
-    <div class="actions">
-      <n-button type="primary" attr-type="button" :loading="regionBusy" :disabled="startDisabled" @click="emit('start')">
-        {{ locale.t(projectionMode === "region" ? (active ? "stream.reselectRegion" : "stream.regionStart") : "stream.start") }}
-      </n-button>
-      <n-button type="error" attr-type="button" :disabled="stopDisabled" @click="emit('stop')">{{ locale.t("stream.stop") }}</n-button>
+    <div class="command-area">
+      <div :class="['ready-row', `tone-${readyTone}`]">
+        <span class="ready-dot" aria-hidden="true"></span>
+        <span>{{ readyLabel }}</span>
+      </div>
+      <div class="actions">
+        <n-button v-if="!active" type="primary" size="large" attr-type="button" :loading="regionBusy" :disabled="startDisabled" @click="emit('start')">
+          {{ locale.t(projectionMode === "region" ? "stream.regionStart" : "stream.start") }}
+        </n-button>
+        <template v-else>
+          <n-button v-if="projectionMode === 'region'" size="large" attr-type="button" :loading="regionBusy" :disabled="startDisabled" @click="emit('start')">
+            {{ locale.t("stream.reselectRegion") }}
+          </n-button>
+          <n-button type="error" size="large" attr-type="button" :disabled="stopDisabled" @click="emit('stop')">{{ locale.t("stream.stop") }}</n-button>
+        </template>
+      </div>
     </div>
   </div>
 </template>
@@ -123,21 +121,23 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
   gap: 12px;
 }
 
-.ready-row {
-  display: flex;
-  justify-content: flex-end;
-}
+.mode-control { width: 100%; }
+.mode-control :deep(.n-radio-button) { width: 50%; text-align: center; }
 
-.ready-label {
-  display: inline-flex;
+.ready-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
   align-items: center;
-  min-height: 26px;
-  border-radius: 999px;
-  padding: 4px 12px;
+  gap: 8px;
+  min-height: 34px;
+  border-radius: var(--cd-radius-sm);
+  padding: 6px 9px;
   font-size: 12px;
   font-weight: 700;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
+
+.ready-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
 
 .tone-good {
   background: var(--cd-good-soft);
@@ -156,6 +156,14 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.range-field { grid-column: 1 / -1; }
+.range-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px;
+  gap: 12px;
+  align-items: center;
 }
 
 .field {
@@ -183,7 +191,22 @@ const orientationOptions = computed<Array<{ label: string; value: DisplayOrienta
 }
 
 .actions {
+  display: flex;
+  gap: 8px;
+}
+
+.actions :deep(.n-button) { flex: 1 1 0; }
+
+.command-area {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--cd-border-soft);
+}
+
+@media (max-width: 420px) {
+  .control-grid { grid-template-columns: minmax(0, 1fr); }
+  .range-field { grid-column: auto; }
+  .actions { flex-direction: column; }
 }
 </style>

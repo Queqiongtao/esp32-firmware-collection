@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { NCollapse, NCollapseItem } from "naive-ui";
 import { useSettingsStore } from "../stores/settings";
 import DevicePanel from "./DevicePanel.vue";
 import SourcePanel from "./SourcePanel.vue";
@@ -52,8 +50,18 @@ function forgetPortalSelection() {
 
 <template>
   <aside class="side">
-    <n-collapse :default-expanded-names="['stream']" arrow-placement="left">
-      <n-collapse-item :title="locale.t('panel.device')" name="device">
+    <div class="side-heading">
+      <div>
+        <h2>{{ locale.t("workspace.setup") }}</h2>
+        <p>{{ locale.t("workspace.setupHint") }}</p>
+      </div>
+    </div>
+    <div class="side-scroll">
+      <section class="setup-section">
+        <header class="section-heading">
+          <span class="step-number">1</span>
+          <div><h3>{{ locale.t("panel.device") }}</h3><p>{{ locale.t("panel.deviceHint") }}</p></div>
+        </header>
         <DevicePanel
           :locked="props.locked"
           :endpoint="settings.endpoint"
@@ -65,8 +73,12 @@ function forgetPortalSelection() {
           @input-token="emit('input-token')"
           @check="emit('check')"
         />
-      </n-collapse-item>
-      <n-collapse-item :title="locale.t('panel.source')" name="source">
+      </section>
+      <section class="setup-section">
+        <header class="section-heading">
+          <span class="step-number">2</span>
+          <div><h3>{{ locale.t("panel.source") }}</h3><p>{{ locale.t("panel.sourceHint") }}</p></div>
+        </header>
         <SourcePanel
           :locked="props.locked"
           :sourceId="props.sourceId"
@@ -77,8 +89,12 @@ function forgetPortalSelection() {
           @refresh="emit('refresh')"
           @forgetPortal="forgetPortalSelection"
         />
-      </n-collapse-item>
-      <n-collapse-item :title="locale.t('panel.stream')" name="stream">
+      </section>
+      <section class="setup-section stream-section">
+        <header class="section-heading">
+          <span class="step-number">3</span>
+          <div><h3>{{ locale.t("panel.stream") }}</h3><p>{{ locale.t("panel.streamHint") }}</p></div>
+        </header>
         <StreamPanel
           :locked="props.locked"
           :videoTransport="settings.videoTransport"
@@ -103,8 +119,8 @@ function forgetPortalSelection() {
           @stop="emit('stop')"
           @update:projectionMode="(v) => emit('update:projectionMode', v)"
         />
-      </n-collapse-item>
-    </n-collapse>
+      </section>
+    </div>
   </aside>
 </template>
 
@@ -112,14 +128,75 @@ function forgetPortalSelection() {
 .side {
   display: flex;
   flex-direction: column;
-  gap: 8px;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--cd-border);
+  border-radius: var(--cd-radius);
+  background: var(--cd-surface);
+}
+
+.side-heading {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--cd-border-soft);
+}
+
+.side-heading h2 {
+  color: var(--cd-strong);
+  font-size: 15px;
+}
+
+.side-heading p,
+.section-heading p {
+  margin-top: 3px;
+  color: var(--cd-muted);
+  font-size: 12px;
+}
+
+.side-scroll {
+  min-height: 0;
   overflow-y: auto;
+  padding: 0 14px 14px;
+}
+
+.setup-section {
+  padding: 16px 0;
+  border-bottom: 1px solid var(--cd-border-soft);
+}
+
+.setup-section:last-child { border-bottom: 0; }
+
+.section-heading {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  margin-bottom: 13px;
+}
+
+.section-heading h3 {
+  margin: 0;
+  color: var(--cd-strong);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.step-number {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--cd-accent-soft);
+  color: var(--cd-accent-ink);
+  font-size: 12px;
+  font-weight: 800;
 }
 
 @media (max-width: 1100px) {
   .side {
-    overflow-y: visible;
+    overflow: visible;
   }
+  .side-scroll { overflow: visible; }
 }
 </style>
