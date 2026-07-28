@@ -12,6 +12,10 @@ extern "C" {
 #define COMPANION_UDP_STREAM_VIDEO 1
 #define COMPANION_UDP_MAX_PAYLOAD 1200U
 #define COMPANION_UDP_MAX_FRAGMENTS 128U
+#define COMPANION_UDP_FEC_FLAG 0x8000U
+#define COMPANION_UDP_FEC_DATA_FRAGMENTS_PER_GROUP 8U
+#define COMPANION_UDP_MAX_FEC_GROUPS \
+    (COMPANION_UDP_MAX_FRAGMENTS / COMPANION_UDP_FEC_DATA_FRAGMENTS_PER_GROUP)
 #define COMPANION_UDP_FRAGMENTED_FRAME_LIMIT \
     ((size_t)COMPANION_UDP_MAX_PAYLOAD * COMPANION_UDP_MAX_FRAGMENTS)
 
@@ -40,6 +44,17 @@ typedef struct __attribute__((packed)) {
     uint16_t payload_length;
     uint16_t reserved;
 } companion_udp_header_t;
+
+static inline uint16_t companion_udp_fec_group_count(uint16_t fragment_count)
+{
+    return (fragment_count + COMPANION_UDP_FEC_DATA_FRAGMENTS_PER_GROUP - 1U) /
+           COMPANION_UDP_FEC_DATA_FRAGMENTS_PER_GROUP;
+}
+
+static inline bool companion_udp_is_fec(const companion_udp_header_t *header)
+{
+    return header != NULL && (header->reserved & COMPANION_UDP_FEC_FLAG) != 0;
+}
 
 companion_udp_reject_reason_t companion_udp_validate_packet(
     const companion_udp_header_t *header,

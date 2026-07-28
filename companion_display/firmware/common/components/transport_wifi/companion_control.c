@@ -1,4 +1,5 @@
 #include "companion_control.h"
+#include "companion_udp.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -299,12 +300,12 @@ int companion_control_build_hello_ack(char *buffer, size_t buffer_size,
         : "";
     if (strcmp(video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0) {
         int written = snprintf(buffer, buffer_size,
-                               "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
+                               "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u,\"fec\":{\"scheme\":\"xor_interleaved\",\"data_fragments_per_group\":%u}},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
                                request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
                                COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                                (unsigned)max_frame_bytes, udp_port,
                                (unsigned long)session_id, (unsigned long)session_token,
-                               udp_max_payload, touch);
+                               udp_max_payload, COMPANION_UDP_FEC_DATA_FRAGMENTS_PER_GROUP, touch);
         if (touch_enabled && written > 0 && (size_t)written < buffer_size) {
             written += snprintf(buffer + written, buffer_size - (size_t)written,
                                 touch_description, COMPANION_CONTROL_WIDTH,
@@ -422,7 +423,7 @@ int companion_control_build_status(char *buffer, size_t buffer_size,
         return -1;
     }
     return snprintf(buffer, buffer_size,
-                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":%s,\"touch_events_active\":%s,\"audio_capture\":false,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"lastReject\":\"%s\"}}",
+                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":%s,\"touch_events_active\":%s,\"audio_capture\":false,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"fecPackets\":%lu,\"fecRecoveredFragments\":%lu,\"fecUnrecoverableFrames\":%lu,\"lastReject\":\"%s\"}}",
                     COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                     snapshot->wifi != NULL ? snapshot->wifi : "",
                     snapshot->ipv4 != NULL ? snapshot->ipv4 : "",
@@ -445,5 +446,24 @@ int companion_control_build_status(char *buffer, size_t buffer_size,
                     (unsigned long)snapshot->udp_submitted_frames,
                     (unsigned long)snapshot->udp_submit_failures,
                     (unsigned long)snapshot->udp_reassembly_timeouts,
+                    (unsigned long)snapshot->udp_fec_packets,
+                    (unsigned long)snapshot->udp_fec_recovered_fragments,
+                    (unsigned long)snapshot->udp_fec_unrecoverable_frames,
                     snapshot->udp_last_reject != NULL ? snapshot->udp_last_reject : "none");
+}
+
+int companion_control_build_udp_feedback(char *buffer, size_t buffer_size,
+                                         uint32_t latest_sequence,
+                                         uint32_t completed_frames,
+                                         uint32_t submitted_frames,
+                                         uint32_t recovered_fragments,
+                                         uint32_t unrecoverable_frames)
+{
+    return snprintf(buffer, buffer_size,
+                    "{\"type\":\"udp_feedback\",\"latest_sequence\":%lu,\"completed_frames\":%lu,\"submitted_frames\":%lu,\"recovered_fragments\":%lu,\"unrecoverable_frames\":%lu}",
+                    (unsigned long)latest_sequence,
+                    (unsigned long)completed_frames,
+                    (unsigned long)submitted_frames,
+                    (unsigned long)recovered_fragments,
+                    (unsigned long)unrecoverable_frames);
 }

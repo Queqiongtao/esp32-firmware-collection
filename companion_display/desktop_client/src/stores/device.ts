@@ -68,6 +68,8 @@ export const useDeviceStore = defineStore("device", () => {
         rejected: udp.rejectedPackets,
         reason: udp.lastReject,
         frames: udp.submittedFrames,
+        recovered: udp.fecRecoveredFragments,
+        unrecoverable: udp.fecUnrecoverableFrames,
       });
     }
     const active = device.activeTransport === "none" ? locale.t("device.transport.none") : device.activeTransport.toUpperCase();

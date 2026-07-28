@@ -43,6 +43,9 @@ typedef struct {
     uint32_t udp_submitted_frames;
     uint32_t udp_submit_failures;
     uint32_t udp_reassembly_timeouts;
+    uint32_t udp_fec_packets;
+    uint32_t udp_fec_recovered_fragments;
+    uint32_t udp_fec_unrecoverable_frames;
     const char *udp_last_reject;
 } companion_status_snapshot_t;
 
@@ -70,7 +73,13 @@ int companion_control_build_stream_timeout(char *buffer, size_t buffer_size);
 int companion_control_build_pong(char *buffer, size_t buffer_size,
                                  const char *request_id);
 int companion_control_build_frame_presented(char *buffer, size_t buffer_size,
-                                            const frame_pipeline_presented_frame_t *frame);
+                                             const frame_pipeline_presented_frame_t *frame);
+int companion_control_build_udp_feedback(char *buffer, size_t buffer_size,
+                                         uint32_t latest_sequence,
+                                         uint32_t completed_frames,
+                                         uint32_t submitted_frames,
+                                         uint32_t recovered_fragments,
+                                         uint32_t unrecoverable_frames);
 int companion_control_build_touch_events(char *buffer, size_t buffer_size,
                                          uint32_t seq,
                                          const touch_input_event_t *events,

@@ -54,6 +54,9 @@ export const useStreamStore = defineStore("stream", () => {
     jpegEncodeAttempts: 0,
     deviceMs: 0,
     deviceReplacedFrames: 0,
+    udpFragmentBudget: 0,
+    udpFecRecoveredFragments: 0,
+    udpUnrecoverableFrames: 0,
     droppedFrames: 0,
   });
 
@@ -132,6 +135,9 @@ export const useStreamStore = defineStore("stream", () => {
       jpegEncodeAttempts: 0,
       deviceMs: 0,
       deviceReplacedFrames: 0,
+      udpFragmentBudget: 0,
+      udpFecRecoveredFragments: 0,
+      udpUnrecoverableFrames: 0,
       droppedFrames: 0,
     };
     captureWindow.value = [];
@@ -154,6 +160,9 @@ export const useStreamStore = defineStore("stream", () => {
       jpegEncodeAttempts: payload.jpegEncodeAttempts,
       deviceMs: payload.deviceMs,
       deviceReplacedFrames: payload.deviceReplacedFrames,
+      udpFragmentBudget: payload.udpFragmentBudget,
+      udpFecRecoveredFragments: payload.udpFecRecoveredFragments,
+      udpUnrecoverableFrames: payload.udpUnrecoverableFrames,
       droppedFrames: payload.droppedFrames,
     };
     pushWindow(captureWindow.value, Math.max(payload.captureWaitMs, payload.captureProcessMs));

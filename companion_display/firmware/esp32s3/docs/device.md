@@ -170,11 +170,13 @@ rxPackets
 ```
 
 - `rxPackets`：UDP socket 收到的数据报数量；
-- `acceptedFragments`：通过 UDP 头、会话和来源校验的分片；
+- `acceptedFragments`：通过 UDP 头、会话和来源校验的数据或 FEC 分片；
 - `completedFrames`：所有分片均已收齐；
 - `submittedFrames`：内层 `CDP1` 已成功提交帧管线；
 - `submitFailures`：完整帧在长度、CRC、状态或缓冲阶段失败；
 - `reassemblyTimeouts`：不完整帧超时或被新帧替换；
+- `fecPackets` / `fecRecoveredFragments`：收到的 XOR 校验分片和成功恢复的数据分片；
+- `fecUnrecoverableFrames`：同一校验组丢失多片等原因导致无法恢复的帧；
 - `lastReject`：最近一次 UDP 头层拒绝原因；
 - `droppedFrames`：会话级 UDP 丢帧累计；
 - `performance`：最近一次成功显示帧的设备端耗时。

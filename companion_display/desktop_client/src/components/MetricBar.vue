@@ -16,6 +16,7 @@ const jpegMetric = computed(() => {
 
 const items = computed(() => [
   { key: "transport", name: locale.t("metric.transport"), get: () => (stream.metrics.videoTransport === "none" ? "--" : stream.metrics.videoTransport.toUpperCase()) },
+  { key: "udp", name: "UDP", get: () => (stream.metrics.udpFragmentBudget ? `${stream.metrics.udpFragmentBudget}F +${stream.metrics.udpFecRecoveredFragments}/-${stream.metrics.udpUnrecoverableFrames}` : "--") },
   { key: "fps", name: "FPS", get: () => String(stream.metrics.fps) },
   { key: "scale", name: "SCALE", get: () => (stream.metrics.sourceScalePercent ? `${stream.metrics.sourceScalePercent}%` : "--") },
   { key: "jpeg", name: "JPEG", get: () => jpegMetric.value },

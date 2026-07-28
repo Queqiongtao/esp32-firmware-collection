@@ -61,12 +61,18 @@ typedef struct {
     uint32_t udp_submitted_frames;
     uint32_t udp_submit_failures;
     uint32_t udp_reassembly_timeouts;
+    uint32_t udp_fec_packets;
+    uint32_t udp_fec_recovered_fragments;
+    uint32_t udp_fec_unrecoverable_frames;
+    uint32_t udp_latest_sequence;
     companion_udp_reject_reason_t udp_last_reject;
     frame_pipeline_presented_frame_t last_presented;
     uint32_t reassembly_sequence;
     uint32_t reassembly_length;
     uint16_t reassembly_fragments;
     uint64_t received_fragments[2];
+    uint8_t fec_group_received[COMPANION_UDP_MAX_FEC_GROUPS];
+    uint16_t fec_parity_received;
     int64_t reassembly_started_us;
 } stream_session_t;
 
@@ -87,8 +93,10 @@ static stream_session_t s_session;
 static uint32_t s_next_session_generation;
 static int s_last_ws_fd = -1;
 static uint8_t *s_udp_reassembly;
+static uint8_t *s_udp_fec_accumulators;
 static int64_t s_last_udp_summary_us;
 static int64_t s_last_udp_reject_log_us;
+static int64_t s_last_udp_feedback_us;
 static int64_t s_last_control_heartbeat_log_us;
 static companion_udp_reject_reason_t s_last_logged_reject;
 
@@ -96,6 +104,15 @@ typedef struct {
     int ws_fd;
     frame_pipeline_presented_frame_t frame;
 } frame_feedback_work_t;
+
+typedef struct {
+    int ws_fd;
+    uint32_t latest_sequence;
+    uint32_t completed_frames;
+    uint32_t submitted_frames;
+    uint32_t recovered_fragments;
+    uint32_t unrecoverable_frames;
+} udp_feedback_work_t;
 
 typedef struct {
     int ws_fd;
@@ -154,6 +171,43 @@ static void frame_presented(const frame_pipeline_presented_frame_t *frame, void 
     work->ws_fd = ws_fd;
     work->frame = *frame;
     if (httpd_queue_work(s_server, send_frame_feedback_work, work) != ESP_OK) free(work);
+}
+
+static void send_udp_feedback_work(void *arg)
+{
+    udp_feedback_work_t *work = arg;
+    char message[256];
+    companion_control_build_udp_feedback(
+        message, sizeof(message), work->latest_sequence, work->completed_frames,
+        work->submitted_frames, work->recovered_fragments, work->unrecoverable_frames);
+    httpd_ws_frame_t frame = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)message,
+        .len = strlen(message),
+    };
+    esp_err_t err = httpd_ws_send_frame_async(s_server, work->ws_fd, &frame);
+    if (err != ESP_OK) ESP_LOGW(TAG, "UDP feedback failed: %s", esp_err_to_name(err));
+    free(work);
+}
+
+static void queue_udp_feedback_locked(int64_t now)
+{
+    if (s_server == NULL || now - s_last_udp_feedback_us < 200 * 1000) return;
+    udp_feedback_work_t *work = malloc(sizeof(*work));
+    if (work == NULL) return;
+    *work = (udp_feedback_work_t) {
+        .ws_fd = s_session.ws_fd,
+        .latest_sequence = s_session.udp_latest_sequence,
+        .completed_frames = s_session.udp_completed_frames,
+        .submitted_frames = s_session.udp_submitted_frames,
+        .recovered_fragments = s_session.udp_fec_recovered_fragments,
+        .unrecoverable_frames = s_session.udp_fec_unrecoverable_frames,
+    };
+    if (httpd_queue_work(s_server, send_udp_feedback_work, work) != ESP_OK) {
+        free(work);
+        return;
+    }
+    s_last_udp_feedback_us = now;
 }
 
 static void send_touch_events_work(void *arg)
@@ -448,6 +502,7 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
     s_session.session_token = esp_random();
     s_session.touch_enabled = message->touch_subscribe && touch_input_hw_ready();
     s_session.last_control_us = esp_timer_get_time();
+    s_last_udp_feedback_us = 0;
     uint32_t session_id = s_session.session_id;
     uint32_t session_token = s_session.session_token;
     video_transport_t transport = s_session.video_transport;
@@ -660,7 +715,51 @@ static void reset_reassembly_locked(uint32_t sequence, uint32_t length, uint16_t
     s_session.reassembly_fragments = fragments;
     s_session.received_fragments[0] = 0;
     s_session.received_fragments[1] = 0;
+    memset(s_session.fec_group_received, 0, sizeof(s_session.fec_group_received));
+    s_session.fec_parity_received = 0;
+    memset(s_udp_fec_accumulators, 0,
+           COMPANION_UDP_MAX_FEC_GROUPS * COMPANION_UDP_MAX_PAYLOAD);
     s_session.reassembly_started_us = esp_timer_get_time();
+}
+
+static uint8_t *fec_accumulator(uint16_t group)
+{
+    return s_udp_fec_accumulators + (size_t)group * COMPANION_UDP_MAX_PAYLOAD;
+}
+
+static void xor_fec_payload(uint16_t group, const uint8_t *payload, size_t length)
+{
+    uint8_t *accumulator = fec_accumulator(group);
+    for (size_t i = 0; i < length; ++i) accumulator[i] ^= payload[i];
+}
+
+static void recover_fec_fragments_locked(void)
+{
+    const uint16_t fragments = s_session.reassembly_fragments;
+    const uint16_t groups = companion_udp_fec_group_count(fragments);
+    for (uint16_t group = 0; group < groups; ++group) {
+        if ((s_session.fec_parity_received & (1U << group)) == 0) continue;
+        const uint16_t expected = (fragments + groups - 1U - group) / groups;
+        if (s_session.fec_group_received[group] + 1U != expected) continue;
+        uint16_t missing = fragments;
+        for (uint16_t index = group; index < fragments; index += groups) {
+            if (!fragment_received(index)) {
+                if (missing != fragments) {
+                    missing = fragments;
+                    break;
+                }
+                missing = index;
+            }
+        }
+        if (missing == fragments) continue;
+        const size_t offset = (size_t)missing * COMPANION_UDP_MAX_PAYLOAD;
+        const size_t remaining = s_session.reassembly_length - offset;
+        const size_t length = remaining < COMPANION_UDP_MAX_PAYLOAD ? remaining : COMPANION_UDP_MAX_PAYLOAD;
+        memcpy(s_udp_reassembly + offset, fec_accumulator(group), length);
+        mark_fragment_received(missing);
+        s_session.fec_group_received[group]++;
+        s_session.udp_fec_recovered_fragments++;
+    }
 }
 
 static bool reassembly_complete_locked(void)
@@ -713,21 +812,37 @@ static void udp_task(void *arg)
                     if (s_session.reassembly_fragments != 0) {
                         s_session.dropped_frames++;
                         s_session.udp_reassembly_timeouts++;
+                        s_session.udp_fec_unrecoverable_frames++;
+                        s_session.udp_latest_sequence = s_session.reassembly_sequence;
                         ESP_LOGW(TAG, "UDP reassembly replaced: frame=%lu incomplete before frame=%lu",
                                  (unsigned long)s_session.reassembly_sequence, (unsigned long)header->frame_sequence);
                     }
                     reset_reassembly_locked(header->frame_sequence, header->frame_length, header->fragment_count);
                 }
-                if (!fragment_received(header->fragment_index)) {
+                const bool fec = companion_udp_is_fec(header);
+                const uint16_t groups = companion_udp_fec_group_count(header->fragment_count);
+                if (fec) {
+                    const uint16_t group = header->fragment_index;
+                    if ((s_session.fec_parity_received & (1U << group)) == 0) {
+                        xor_fec_payload(group, packet + sizeof(*header), header->payload_length);
+                        s_session.fec_parity_received |= 1U << group;
+                        s_session.udp_fec_packets++;
+                    }
+                } else if (!fragment_received(header->fragment_index)) {
                     memcpy(s_udp_reassembly + header->fragment_offset, packet + sizeof(*header), header->payload_length);
                     mark_fragment_received(header->fragment_index);
+                    const uint16_t group = header->fragment_index % groups;
+                    xor_fec_payload(group, packet + sizeof(*header), header->payload_length);
+                    s_session.fec_group_received[group]++;
                 }
+                recover_fec_fragments_locked();
                 s_session.last_udp_us = now;
                 if (reassembly_complete_locked()) {
                     uint32_t frame_length = s_session.reassembly_length;
                     const uint32_t session_generation = s_session.generation;
                     s_session.reassembly_fragments = 0;
                     s_session.udp_completed_frames++;
+                    s_session.udp_latest_sequence = header->frame_sequence;
                     xSemaphoreGive(s_session_lock);
                     const companion_frame_header_t *frame = (const companion_frame_header_t *)s_udp_reassembly;
                     if (frame_length == sizeof(*frame) + frame->payload_size) {
@@ -810,8 +925,13 @@ static void udp_task(void *arg)
             s_session.reassembly_fragments = 0;
             s_session.dropped_frames++;
             s_session.udp_reassembly_timeouts++;
+            s_session.udp_fec_unrecoverable_frames++;
+            s_session.udp_latest_sequence = s_session.reassembly_sequence;
             ESP_LOGW(TAG, "UDP reassembly timeout: frame=%lu", (unsigned long)s_session.reassembly_sequence);
             update_transport_status(SUBSCREEN_TRANSPORT_UDP_DROPPED);
+        }
+        if (s_session.active && s_session.started && s_session.video_transport == VIDEO_TRANSPORT_UDP) {
+            queue_udp_feedback_locked(now);
         }
         xSemaphoreGive(s_session_lock);
         if (frame_timeout.generation != 0) end_session_on_frame_timeout(&frame_timeout);
@@ -828,7 +948,7 @@ static esp_err_t root_get(httpd_req_t *req)
 
 static esp_err_t status_get(httpd_req_t *req)
 {
-    char response[896];
+    char response[1152];
     companion_status_snapshot_t snapshot = {};
     xSemaphoreTake(s_session_lock, portMAX_DELAY);
     snapshot.active_transport = s_session.started ? video_transport_name(s_session.video_transport) : "none";
@@ -841,6 +961,9 @@ static esp_err_t status_get(httpd_req_t *req)
     snapshot.udp_submitted_frames = s_session.udp_submitted_frames;
     snapshot.udp_submit_failures = s_session.udp_submit_failures;
     snapshot.udp_reassembly_timeouts = s_session.udp_reassembly_timeouts;
+    snapshot.udp_fec_packets = s_session.udp_fec_packets;
+    snapshot.udp_fec_recovered_fragments = s_session.udp_fec_recovered_fragments;
+    snapshot.udp_fec_unrecoverable_frames = s_session.udp_fec_unrecoverable_frames;
     snapshot.udp_last_reject = companion_udp_reject_reason_name(s_session.udp_last_reject);
     snapshot.performance = s_session.last_presented;
     xSemaphoreGive(s_session_lock);
@@ -896,6 +1019,10 @@ static esp_err_t start_udp_server(void)
 {
     s_udp_reassembly = heap_caps_malloc(UDP_FRAME_LIMIT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     ESP_RETURN_ON_FALSE(s_udp_reassembly != NULL, ESP_ERR_NO_MEM, TAG, "UDP reassembly buffer");
+    s_udp_fec_accumulators = heap_caps_malloc(
+        COMPANION_UDP_MAX_FEC_GROUPS * COMPANION_UDP_MAX_PAYLOAD,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_RETURN_ON_FALSE(s_udp_fec_accumulators != NULL, ESP_ERR_NO_MEM, TAG, "UDP FEC accumulators");
     s_udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     ESP_RETURN_ON_FALSE(s_udp_socket >= 0, ESP_FAIL, TAG, "UDP socket");
     struct sockaddr_in address = {.sin_family = AF_INET, .sin_port = htons(CONFIG_COMPANION_UDP_PORT), .sin_addr.s_addr = htonl(INADDR_ANY)};

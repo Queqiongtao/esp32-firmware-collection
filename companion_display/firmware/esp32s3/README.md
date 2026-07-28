@@ -110,7 +110,7 @@ npm run tauri:build
 | 模式 | 视频路径 | 流控方式 | 推荐场景 |
 | --- | --- | --- | --- |
 | TCP | WebSocket 二进制帧 | 一次只允许一帧在途，等待设备 `frame_presented` | 首次联调、弱网络、优先保证完整帧 |
-| UDP | `CDU1` 分片数据报 | 不重传，设备只重组当前最新帧 | 稳定局域网、重视低延迟、允许偶发丢帧 |
+| UDP | `CDU1` 分片与协商式 XOR FEC | 不重传，设备恢复每个交错组内一个丢失分片并只保留最新帧 | 稳定局域网、重视低延迟、允许偶发丢帧 |
 
 两种模式都要求 PC 客户端与设备固件使用控制协议 v3。v3 与旧控制协商不兼容。
 
@@ -132,7 +132,7 @@ npm run tauri:build
 
 - 先使用 TCP + `Static color bars`，将采集权限问题与网络、编码、显示问题分开。
 - 配对失败时检查设备屏幕上的六位配对码；HTTP `401` 表示配对码错误，`403` 表示设备已有活动会话。
-- UDP 无画面时查看设备串口 `UDP stats`；`rx`、`accepted`、`completed`、`submitted` 应依次增长。
+- UDP 无画面时查看设备串口 `UDP stats`；`rx`、`accepted`、`completed`、`submitted` 应依次增长。`/api/status.udp` 的 `fecRecoveredFragments` 表示成功恢复，`fecUnrecoverableFrames` 持续增长表示同组多片丢失，PC 会自动降低帧预算和实际 FPS。
 - `Replaced` 增长表示系统主动跳过旧画面以维持低延迟，不等同于连接失败。
 - `Capture`、`Encode` 或 `Device` 持续接近当前帧间隔时，降低 FPS 或 JPEG 质量。
 - Linux 客户端窗口出现固定颜色杂块时确认使用当前版本；客户端会自动设置 `WEBKIT_DISABLE_DMABUF_RENDERER=1`。

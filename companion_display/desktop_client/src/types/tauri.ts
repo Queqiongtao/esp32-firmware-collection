@@ -42,6 +42,9 @@ export type StreamEvent = {
   jpegEncodeAttempts: number;
   deviceMs: number;
   deviceReplacedFrames: number;
+  udpFragmentBudget: number;
+  udpFecRecoveredFragments: number;
+  udpUnrecoverableFrames: number;
   projectionMode: ProjectionMode;
 };
 
@@ -59,6 +62,9 @@ export type UdpDiagnostics = {
   submittedFrames: number;
   submitFailures: number;
   reassemblyTimeouts: number;
+  fecPackets: number;
+  fecRecoveredFragments: number;
+  fecUnrecoverableFrames: number;
   lastReject: string;
 };
 
