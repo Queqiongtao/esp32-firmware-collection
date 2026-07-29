@@ -34,13 +34,13 @@ GT911 800x480 -> 板级缩放 1024x600 -> touch_events -> PC 鼠标注入
 | DSI 电源与控制 | MIPI DPHY LDO channel 3 / 2.5 V；LCD reset GPIO27 |
 | 背光 | GPIO23、20 kHz PWM、默认 80% |
 | 触摸 | GT911；I2C1 GPIO7/8、400 kHz；RST GPIO22；INT GPIO21 |
-| Hosted SDIO | Slot 1、4-bit、25 MHz；D0～D3 GPIO14～17、CLK GPIO18、CMD GPIO19 |
+| Hosted SDIO | Slot 1、4-bit、25 MHz；TX/RX queue 各 20；D0～D3 GPIO14～17、CLK GPIO18、CMD GPIO19 |
 | C6 复位 | GPIO54、active-high；P4 每次启动复位 C6，默认延迟 1500 ms |
 | 网络服务 | HTTP/WebSocket 80；UDP 5000；UDP 接收邮箱 64 包 |
 
 `CONFIG_COMPANION_DISPLAY_WIDTH/HEIGHT` 必须保持 `1024x600`，帧管线启动时会与显示后端交叉校验。当前构建选择 P4 `<3.0` 寄存器路径，不应直接用于 rev 3.0 及以上芯片。
 
-默认 TCP 完整帧上限为 `393240` 字节，即 384 KiB JPEG 加 24 字节 `CDP1` 头。UDP 最多使用 128 个、每个 1200 字节的数据分片，因此协商的有效完整帧上限仍为 `153600` 字节，JPEG 上限为 `153576` 字节。UDP 另行协商交错 XOR FEC，每 8 个数据分片增加一个校验分片，可恢复每组一个丢失分片；重组和 FEC 累加缓冲均从 PSRAM 分配。输入 JPEG 头声明的尺寸必须严格为 `1024x600`。
+默认 TCP 完整帧上限为 `393240` 字节，即 384 KiB JPEG 加 24 字节 `CDP1` 头。UDP 最多使用 128 个、每个 1200 字节的数据分片，因此协商的有效完整帧上限仍为 `153600` 字节，JPEG 上限为 `153576` 字节。只有 JPEG 分片走 UDP，逐帧结果经 TCP/WebSocket 返回；PC 同时只保留一帧在途。UDP 另行协商交错 XOR FEC，每 8 个数据分片增加一个校验分片，可恢复每组一个丢失分片；重组和 FEC 累加缓冲均从 PSRAM 分配。输入 JPEG 头声明的尺寸必须严格为 `1024x600`。
 
 ## 前置条件
 
@@ -144,7 +144,7 @@ P4 上的性能字段含义：
 - `JPEG decode failed`：检查 JPEG 是否完整、编码格式是否受硬件支持，并确认没有超过 200 ms 解码等待。
 - 红蓝互换：硬件 JPEG 路径必须使用 `JPEG_DEC_RGB_ELEMENT_ORDER_BGR`，不要按枚举名称改回 RGB。
 - 画面撕裂：当前路径只向空闲 framebuffer 写入，等待 `on_refresh_done` 后复用旧帧；不要改回 DPI 内置 DMA2D 的外部缓冲复制路径。
-- UDP `rxPackets` 增长而 `completedFrames` 不增长：查看 `fecRecoveredFragments` 与 `fecUnrecoverableFrames`；后者持续增长表示丢包超过每组单片恢复能力，PC 会自动降低帧预算和实际 FPS。`lastReject` 仍用于区分 session、来源、头和长度错误。
+- UDP `rxPackets` 增长而 `completedFrames` 不增长：查看 `fecRecoveredFragments`、`fecUnrecoverableFrames`、`lastOutcome` 和 `lastReassemblyUs`；PC 会先降低 pacing 与实际 FPS，达到 5 FPS 且持续失败后才降低帧预算。`lastReject` 仍用于区分 session、来源、头和长度错误。
 - 桌面细字偏软：PC 端优先使用 TCP、20 FPS、质量 85，并观察 `Scale` 与 `JPEG` 指标；`Scale` 很低时使用区域投屏减少强缩小。
 - GT911 不响应：检查 I2C GPIO7/8、RST GPIO22、INT GPIO21 和两个地址的探测日志。边缘比例异常时调整 GT911 native `800x480` 配置，不要修改协议显示尺寸。
 

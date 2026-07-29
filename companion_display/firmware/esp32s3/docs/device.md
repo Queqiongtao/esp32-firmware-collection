@@ -26,7 +26,10 @@
 | `CONFIG_COMPANION_FRAME_LIMIT_KB` | `100` | JPEG payload 最大尺寸 |
 | `CONFIG_COMPANION_FRAME_BUFFER_COUNT` | `2` | 工程默认分配的 PSRAM JPEG 缓冲数量 |
 | `CONFIG_COMPANION_DRAW_TASK_PRIORITY` | `5` | JPEG 解码和显示任务优先级 |
-| `CONFIG_LWIP_UDP_RECVMBOX_SIZE` | `24` | lwIP UDP 接收邮箱容量 |
+| `CONFIG_LWIP_UDP_RECVMBOX_SIZE` | `48` | lwIP UDP 接收邮箱容量 |
+| `CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM` | `16` | Wi-Fi 静态接收缓冲数量 |
+| `CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM` | `48` | Wi-Fi 动态接收缓冲数量 |
+| `CONFIG_ESP_WIFI_RX_BA_WIN` | `16` | AMPDU RX BA 窗口 |
 
 `Kconfig` 中帧缓冲数量的菜单回退值为 3，但当前 `sdkconfig.defaults` 明确设为 2，因此新工程配置以 2 为默认。显示分辨率、GPIO、I2C、LCD PCLK 和电源时序位于 `Board AMOLED 1.8` 配置组。
 
@@ -146,7 +149,7 @@ TCP 模式将完整 `CDP1` 作为 WebSocket 二进制消息接收。完整帧成
 
 ### UDP 视频
 
-UDP 模式在 `hello_ack` 中返回随机 `session_id`、`session_token`、端口和最大 payload。每个 `CDU1` 分片必须满足会话值、来源 IPv4、偏移、数量和长度约束。
+UDP 模式在 `hello_ack` 中返回随机 `session_id`、`session_token`、端口、最大 payload 和 `latest_frame_ack` 流控能力。只有 JPEG `CDU1` 分片走 UDP；协商、心跳、触摸及 `udp_feedback` 全部沿用 TCP/WebSocket。设备在整帧成功提交、不可恢复或提交失败后立即反馈对应 sequence，PC 同时只允许一帧在途。
 
 设备只维护一个重组缓冲和一张 128 bit 分片位图。出现新 sequence、布局变化或重组超时时，未完成旧帧会被丢弃。完整帧重组后仍需通过内层 `CDP1` 长度、CRC 和帧管线检查。
 
@@ -178,6 +181,8 @@ rxPackets
 - `fecPackets` / `fecRecoveredFragments`：收到的 XOR 校验分片和成功恢复的数据分片；
 - `fecUnrecoverableFrames`：同一校验组丢失多片等原因导致无法恢复的帧；
 - `lastReject`：最近一次 UDP 头层拒绝原因；
+- `lastOutcome` / `lastOutcomeSequence`：最近整帧结果及对应 sequence；
+- `lastReassemblyUs`：最近整帧完成或放弃前的重组耗时；
 - `droppedFrames`：会话级 UDP 丢帧累计；
 - `performance`：最近一次成功显示帧的设备端耗时。
 

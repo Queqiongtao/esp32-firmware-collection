@@ -66,6 +66,9 @@ typedef struct {
     uint32_t udp_fec_unrecoverable_frames;
     uint32_t udp_latest_sequence;
     companion_udp_reject_reason_t udp_last_reject;
+    const char *udp_last_outcome;
+    uint32_t udp_last_outcome_sequence;
+    uint32_t udp_last_reassembly_us;
     frame_pipeline_presented_frame_t last_presented;
     uint32_t reassembly_sequence;
     uint32_t reassembly_length;
@@ -112,7 +115,13 @@ typedef struct {
     uint32_t submitted_frames;
     uint32_t recovered_fragments;
     uint32_t unrecoverable_frames;
+    const char *outcome;
+    uint32_t outcome_sequence;
+    uint32_t reassembly_us;
 } udp_feedback_work_t;
+
+static udp_feedback_work_t s_udp_feedback_work[2];
+static bool s_udp_feedback_pending[2];
 
 typedef struct {
     int ws_fd;
@@ -179,7 +188,8 @@ static void send_udp_feedback_work(void *arg)
     char message[256];
     companion_control_build_udp_feedback(
         message, sizeof(message), work->latest_sequence, work->completed_frames,
-        work->submitted_frames, work->recovered_fragments, work->unrecoverable_frames);
+        work->submitted_frames, work->recovered_fragments, work->unrecoverable_frames,
+        work->outcome, work->outcome_sequence, work->reassembly_us);
     httpd_ws_frame_t frame = {
         .type = HTTPD_WS_TYPE_TEXT,
         .payload = (uint8_t *)message,
@@ -187,24 +197,39 @@ static void send_udp_feedback_work(void *arg)
     };
     esp_err_t err = httpd_ws_send_frame_async(s_server, work->ws_fd, &frame);
     if (err != ESP_OK) ESP_LOGW(TAG, "UDP feedback failed: %s", esp_err_to_name(err));
-    free(work);
+    xSemaphoreTake(s_session_lock, portMAX_DELAY);
+    size_t slot = (size_t)(work - s_udp_feedback_work);
+    if (slot < 2) s_udp_feedback_pending[slot] = false;
+    xSemaphoreGive(s_session_lock);
 }
 
-static void queue_udp_feedback_locked(int64_t now)
+static void queue_udp_feedback_locked(int64_t now, const char *outcome,
+                                      uint32_t outcome_sequence, uint32_t reassembly_us)
 {
-    if (s_server == NULL || now - s_last_udp_feedback_us < 200 * 1000) return;
-    udp_feedback_work_t *work = malloc(sizeof(*work));
-    if (work == NULL) return;
-    *work = (udp_feedback_work_t) {
+    const bool immediate = outcome != NULL;
+    if (s_server == NULL || (!immediate && now - s_last_udp_feedback_us < 500 * 1000)) return;
+    if (immediate) {
+        s_session.udp_last_outcome = outcome;
+        s_session.udp_last_outcome_sequence = outcome_sequence;
+        s_session.udp_last_reassembly_us = reassembly_us;
+    }
+    size_t slot = 0;
+    while (slot < 2 && s_udp_feedback_pending[slot]) slot++;
+    if (slot == 2) return;
+    s_udp_feedback_work[slot] = (udp_feedback_work_t) {
         .ws_fd = s_session.ws_fd,
         .latest_sequence = s_session.udp_latest_sequence,
         .completed_frames = s_session.udp_completed_frames,
         .submitted_frames = s_session.udp_submitted_frames,
         .recovered_fragments = s_session.udp_fec_recovered_fragments,
         .unrecoverable_frames = s_session.udp_fec_unrecoverable_frames,
+        .outcome = outcome,
+        .outcome_sequence = outcome_sequence,
+        .reassembly_us = reassembly_us,
     };
-    if (httpd_queue_work(s_server, send_udp_feedback_work, work) != ESP_OK) {
-        free(work);
+    s_udp_feedback_pending[slot] = true;
+    if (httpd_queue_work(s_server, send_udp_feedback_work, &s_udp_feedback_work[slot]) != ESP_OK) {
+        s_udp_feedback_pending[slot] = false;
         return;
     }
     s_last_udp_feedback_us = now;
@@ -519,7 +544,7 @@ static void handle_hello(httpd_req_t *req, const companion_control_message_t *me
         ESP_LOGW(TAG, "hello: fd=%d transport=%s has no usable TCP peer IPv4; waiting for authenticated UDP source",
                  ws_fd, video_transport_name(transport));
     }
-    char response[512];
+    char response[768];
     const size_t session_frame_limit = transport == VIDEO_TRANSPORT_UDP
         ? UDP_FRAME_LIMIT
         : COMPLETE_FRAME_LIMIT;
@@ -810,12 +835,15 @@ static void udp_task(void *arg)
                 if (s_session.reassembly_sequence != header->frame_sequence || s_session.reassembly_length != header->frame_length ||
                     s_session.reassembly_fragments != header->fragment_count || now - s_session.reassembly_started_us > UDP_REASSEMBLY_TIMEOUT_US) {
                     if (s_session.reassembly_fragments != 0) {
+                        const uint32_t replaced_sequence = s_session.reassembly_sequence;
+                        const uint32_t reassembly_us = (uint32_t)(now - s_session.reassembly_started_us);
                         s_session.dropped_frames++;
                         s_session.udp_reassembly_timeouts++;
                         s_session.udp_fec_unrecoverable_frames++;
                         s_session.udp_latest_sequence = s_session.reassembly_sequence;
                         ESP_LOGW(TAG, "UDP reassembly replaced: frame=%lu incomplete before frame=%lu",
                                  (unsigned long)s_session.reassembly_sequence, (unsigned long)header->frame_sequence);
+                        queue_udp_feedback_locked(now, "unrecoverable", replaced_sequence, reassembly_us);
                     }
                     reset_reassembly_locked(header->frame_sequence, header->frame_length, header->fragment_count);
                 }
@@ -839,6 +867,7 @@ static void udp_task(void *arg)
                 s_session.last_udp_us = now;
                 if (reassembly_complete_locked()) {
                     uint32_t frame_length = s_session.reassembly_length;
+                    const uint32_t reassembly_us = (uint32_t)(now - s_session.reassembly_started_us);
                     const uint32_t session_generation = s_session.generation;
                     s_session.reassembly_fragments = 0;
                     s_session.udp_completed_frames++;
@@ -865,6 +894,9 @@ static void udp_task(void *arg)
                             } else {
                                 s_session.udp_submit_failures++;
                             }
+                            queue_udp_feedback_locked(esp_timer_get_time(),
+                                result == FRAME_PIPELINE_SUBMIT_OK ? "submitted" : "submit_failed",
+                                header->frame_sequence, reassembly_us);
                         }
                         xSemaphoreGive(s_session_lock);
                         xSemaphoreGive(s_stream_transition_lock);
@@ -879,6 +911,11 @@ static void udp_task(void *arg)
                         const bool current = s_session.active && s_session.started &&
                                              s_session.generation == session_generation &&
                                              s_session.video_transport == VIDEO_TRANSPORT_UDP;
+                        if (current) {
+                            s_session.udp_submit_failures++;
+                            queue_udp_feedback_locked(esp_timer_get_time(), "submit_failed",
+                                                      header->frame_sequence, reassembly_us);
+                        }
                         xSemaphoreGive(s_session_lock);
                         xSemaphoreGive(s_stream_transition_lock);
                         if (current) update_transport_status(SUBSCREEN_TRANSPORT_BAD_SIZE);
@@ -922,6 +959,8 @@ static void udp_task(void *arg)
                 update_transport_status(SUBSCREEN_TRANSPORT_SESSION_EXPIRED);
             }
         } else if (s_session.reassembly_fragments != 0 && now - s_session.reassembly_started_us > UDP_REASSEMBLY_TIMEOUT_US) {
+            const uint32_t timed_out_sequence = s_session.reassembly_sequence;
+            const uint32_t reassembly_us = (uint32_t)(now - s_session.reassembly_started_us);
             s_session.reassembly_fragments = 0;
             s_session.dropped_frames++;
             s_session.udp_reassembly_timeouts++;
@@ -929,9 +968,10 @@ static void udp_task(void *arg)
             s_session.udp_latest_sequence = s_session.reassembly_sequence;
             ESP_LOGW(TAG, "UDP reassembly timeout: frame=%lu", (unsigned long)s_session.reassembly_sequence);
             update_transport_status(SUBSCREEN_TRANSPORT_UDP_DROPPED);
+            queue_udp_feedback_locked(now, "unrecoverable", timed_out_sequence, reassembly_us);
         }
         if (s_session.active && s_session.started && s_session.video_transport == VIDEO_TRANSPORT_UDP) {
-            queue_udp_feedback_locked(now);
+            queue_udp_feedback_locked(now, NULL, 0, 0);
         }
         xSemaphoreGive(s_session_lock);
         if (frame_timeout.generation != 0) end_session_on_frame_timeout(&frame_timeout);
@@ -965,6 +1005,9 @@ static esp_err_t status_get(httpd_req_t *req)
     snapshot.udp_fec_recovered_fragments = s_session.udp_fec_recovered_fragments;
     snapshot.udp_fec_unrecoverable_frames = s_session.udp_fec_unrecoverable_frames;
     snapshot.udp_last_reject = companion_udp_reject_reason_name(s_session.udp_last_reject);
+    snapshot.udp_last_outcome = s_session.udp_last_outcome;
+    snapshot.udp_last_outcome_sequence = s_session.udp_last_outcome_sequence;
+    snapshot.udp_last_reassembly_us = s_session.udp_last_reassembly_us;
     snapshot.performance = s_session.last_presented;
     xSemaphoreGive(s_session_lock);
     snapshot.touch_hw = touch_input_hw_ready();

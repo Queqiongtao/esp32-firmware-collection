@@ -45,6 +45,8 @@ export type StreamEvent = {
   udpFragmentBudget: number;
   udpFecRecoveredFragments: number;
   udpUnrecoverableFrames: number;
+  udpRateKbps: number;
+  udpDeliveryMs: number;
   projectionMode: ProjectionMode;
 };
 
@@ -66,6 +68,9 @@ export type UdpDiagnostics = {
   fecRecoveredFragments: number;
   fecUnrecoverableFrames: number;
   lastReject: string;
+  lastOutcome: string;
+  lastOutcomeSequence: number;
+  lastReassemblyUs: number;
 };
 
 export type Performance = {

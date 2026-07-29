@@ -47,6 +47,9 @@ typedef struct {
     uint32_t udp_fec_recovered_fragments;
     uint32_t udp_fec_unrecoverable_frames;
     const char *udp_last_reject;
+    const char *udp_last_outcome;
+    uint32_t udp_last_outcome_sequence;
+    uint32_t udp_last_reassembly_us;
 } companion_status_snapshot_t;
 
 bool companion_control_parse(const char *json, size_t length,
@@ -79,7 +82,10 @@ int companion_control_build_udp_feedback(char *buffer, size_t buffer_size,
                                          uint32_t completed_frames,
                                          uint32_t submitted_frames,
                                          uint32_t recovered_fragments,
-                                         uint32_t unrecoverable_frames);
+                                         uint32_t unrecoverable_frames,
+                                         const char *outcome,
+                                         uint32_t outcome_sequence,
+                                         uint32_t reassembly_us);
 int companion_control_build_touch_events(char *buffer, size_t buffer_size,
                                          uint32_t seq,
                                          const touch_input_event_t *events,

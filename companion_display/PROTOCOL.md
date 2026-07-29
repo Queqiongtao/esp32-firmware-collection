@@ -4,7 +4,7 @@
 
 ## 总览
 
-协议 v3 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式通过协商后的 UDP 端口发送同一完整帧的分片。v3 在 v2 之上新增设备到 PC 的触摸事件通道（`touch_events`），视频链路与 v2 完全一致。当前 S3/P4 实现同时只支持一个控制会话和一个视频流；其他设备如有不同并发能力，仍不得改变单个会话的状态机。v3 与 v2、v1 控制协商互不兼容：固件对版本不匹配的 `hello` 返回 `unsupported_protocol`，PC 客户端对 `/api/status` 报告的其他版本拒绝启动，两端必须同步升级。
+协议 v3 使用 WebSocket/TCP 作为整个流生命周期内的可靠控制通道。视频可选：TCP 模式将完整帧作为 WebSocket 二进制消息发送；UDP 模式只通过协商后的 UDP 端口发送同一 JPEG 完整帧的分片，UDP 帧结果仍经 TCP 控制通道返回。v3 在 v2 之上新增设备到 PC 的触摸事件通道（`touch_events`），并通过可选字段扩展 UDP 逐帧流控。当前 S3/P4 实现同时只支持一个控制会话和一个视频流。v3 与 v2、v1 控制协商互不兼容：固件对版本不匹配的 `hello` 返回 `unsupported_protocol`，PC 客户端对 `/api/status` 报告的其他版本拒绝启动，两端必须同步升级。
 
 默认 HTTP/WebSocket 端口为 `80`，UDP 端口为 `5000`。所有多字节二进制字段均为小端序。当前只支持 IPv4 UDP 视频。
 
@@ -58,10 +58,10 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 设备成功响应为 `hello_ack`：
 
 ```json
-{"type":"hello_ack","request_id":"hello-1","protocol_version":3,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200,"fec":{"scheme":"xor_interleaved","data_fragments_per_group":8}},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":false,"text_input":false},"touch":{"width":368,"height":448,"max_move_hz":60}}
+{"type":"hello_ack","request_id":"hello-1","protocol_version":3,"video_transport":"udp","width":368,"height":448,"max_frame_bytes":102424,"udp":{"port":5000,"session_id":1,"session_token":2,"max_payload":1200,"flow_control":"latest_frame_ack","max_in_flight_frames":1,"feedback_timeout_ms":250,"fec":{"scheme":"xor_interleaved","data_fragments_per_group":8}},"capabilities":{"video":["tcp","udp"],"frame_feedback":true,"touch":true,"audio_capture":false,"text_input":false},"touch":{"width":368,"height":448,"max_move_hz":60}}
 ```
 
-`width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。可选 `udp.fec` 声明本会话支持交错 XOR FEC；客户端只有识别 `scheme` 和分组大小时才发送校验分片，字段缺失时保持纯数据分片兼容模式。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。
+`width`、`height` 是本次会话的物理目标画面尺寸；`max_frame_bytes` 包含 24 字节 `CDP1` 帧头；UDP 模式才返回 `udp` 对象。三个目标字段都是 `hello_ack` 的必填字段，发送端必须按协商值缩放、编码并填写帧头，不得写死某块硬件的尺寸或帧上限。示例值来自当前 S3 固件配置：`368x448`、JPEG 100 KiB，因此 `max_frame_bytes` 为 `102424`。公共 PC 客户端单边最多接受 4096 像素、总计最多 8,294,400 像素、完整帧最多 8 MiB；超出客户端安全边界时拒绝启动。UDP 的有效完整帧上限还不得超过 `udp.max_payload * 128`。`session_id` 和 `session_token` 均为设备为本次会话生成的 32 位随机值，必须逐分片原样携带。可选 `udp.fec` 声明本会话支持交错 XOR FEC。可选 `flow_control=latest_frame_ack` 与 `max_in_flight_frames=1` 声明设备支持经 TCP 控制通道逐帧反馈；客户端此时最多发送一帧在途 JPEG，`feedback_timeout_ms` 是等待结果的上限。字段缺失时使用旧固件兼容发送方式。`frame_feedback: true` 表示 TCP 视频会收到 `frame_presented` 回执。
 
 `capabilities.touch` 在 v3 中是本次会话的运行时承诺：仅当客户端在 `hello` 中订阅 `features.touch_events` 且设备触摸硬件就绪时为 `true`，此时设备会在流启动后发送 [`touch_events`](#touch_events-设备触摸事件)。顶层 `touch` 对象声明触摸坐标空间（物理面板像素，旋转前）与 `move` 事件的最大速率，仅在 `capabilities.touch` 为 `true` 时出现。客户端要求 `touch.width/height` 均至少为 2、单边不超过 4096、总像素不超过 8,294,400，且 `max_move_hz` 为 `1..=1000`；描述缺失、越界或与 capability 矛盾时拒绝启动。`text_input`、`audio_capture` 在 v3 固定为 `false`，仍为未来扩展预留，客户端不得据此发送未定义消息。
 
@@ -99,13 +99,13 @@ UDP 视频运行期间，PC 必须每 2 秒发送一个应用层心跳：
 
 设备返回 `{"type":"pong","request_id":"ping-1"}`。PC 使用非阻塞方式接收 `pong`；连续 3 个心跳周期未确认时，判定控制通道失效，暂停 UDP 视频并重新建连、重新执行 `hello` 和 `start_stream`。重连成功后必须改用新的 UDP `session_id` 与 `session_token`，并继续发送最新缓存帧。WebSocket 协议层 PING/PONG 也会被处理。
 
-支持 FEC 的设备最多每 200 ms 经同一可靠控制通道发送一次累计链路反馈：
+UDP JPEG 仍只通过 UDP 发送；结果反馈通过同一条可靠 TCP/WebSocket 控制通道返回。支持 `latest_frame_ack` 时，设备在帧提交成功、重组不可恢复或提交失败后立即发送：
 
 ```json
-{"type":"udp_feedback","latest_sequence":42,"completed_frames":38,"submitted_frames":38,"recovered_fragments":3,"unrecoverable_frames":1}
+{"type":"udp_feedback","latest_sequence":42,"completed_frames":38,"submitted_frames":38,"recovered_fragments":3,"unrecoverable_frames":1,"outcome":"submitted","outcome_sequence":42,"reassembly_us":18200}
 ```
 
-计数在每次 `hello` 建立的新会话中从零开始。客户端用它调整运行时完整帧预算和实际 FPS；该消息不确认单个数据报，也不要求重传旧帧。
+`outcome` 为 `submitted`、`unrecoverable` 或 `submit_failed`。它确认整个 JPEG 帧的处理结果，不确认单个 UDP 数据报，也不要求重传旧帧。客户端只在收到匹配在途 sequence 的结果或等待超时后发送最新帧；迟到和重复结果不得重新打开发送门。设备空闲时每 500 ms 发送不带 `outcome` 的累计反馈作为状态保活。计数在每次 `hello` 建立的新会话中从零开始。
 
 控制错误统一为：
 
@@ -189,7 +189,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 必须为分片序号乘以协商的 `max_payload`。协商 `xor_interleaved` 后，发送端令校验组数为 `ceil(fragment_count / 8)`，数据分片 `i` 属于组 `i % group_count`；每组校验载荷是组内数据补零到 `max_payload` 后的逐字节 XOR。FEC 分片使用组索引作为 `fragment_index`、保持原数据 `fragment_count`，`fragment_offset=0`、`payload_length=max_payload`，并在所有数据分片之后发送。每组丢失不超过一个数据分片时设备可恢复；同组多片丢失仍丢弃整帧。
 
-桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃；不重传旧帧。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的协商上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；PC 可以根据反馈采用更低的运行时分片预算。P4 的 TCP 完整帧上限为 `393240` 字节。
+桌面客户端采用最多 2 个分片的小突发和 6～20 Mbit/s 令牌桶 pacing，初始为 8 Mbit/s；单帧发送预算为 240 ms。支持 `latest_frame_ack` 时同一时刻最多一帧在途，超过反馈期限只放弃该帧并发送最新画面，不重建仍健康的 TCP 控制连接。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃。S3/P4 UDP 接收邮箱默认分别为 48/64 包。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的协商上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；PC 可以根据反馈采用更低的运行时分片预算。P4 的 TCP 完整帧上限为 `393240` 字节。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
@@ -218,7 +218,7 @@ TCP 模式在每帧 JPEG 解码完成并提交显示后端后，设备主动发�
 | `previous_dma_us` | 兼容字段名；上一帧从提交到传输或刷新完成的耗时 |
 | `replaced_frames` | 设备本次启动期间累计的、被较新帧替换的待绘制帧数；建立新会话不会清零 |
 
-UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；PC 按手动 FPS 发送最新编码帧，并在 UDP 流活动期间每 2 秒通过 `/api/status` 轮询一次设备诊断（TCP 模式的设备耗时已由 `frame_presented` 逐帧提供，不额外轮询）。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，在回调中直接裁剪并双线性缩放为设备尺寸，采集槽只保留最新图像；发送线程只对发生变化且缩小超过 10% 的有效内容区域执行轻量整数亮度锐化，黑边不参与处理。新安装默认发送配置为 TCP、20 FPS、JPEG 质量 85，已有持久化设置保持不变。
+UDP 使用 TCP `udp_feedback` 实现逐帧发送门控，但不等待显示完成，也不重传旧帧，因此仍保持“最新画面优先”的低延迟语义。PC 在 UDP 流活动期间每 2 秒通过 `/api/status` 轮询设备诊断。Linux PC 客户端通过 Portal/PipeWire 持续接收画面，采集槽只保留最新图像；发送门打开后编码当时最新画面。新安装默认发送配置为 TCP、20 FPS、JPEG 质量 85，已有持久化设置保持不变。
 
 ## HTTP 状态与诊断
 
@@ -252,6 +252,9 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 | `udp.fecRecoveredFragments` | 通过 FEC 恢复的数据分片数 |
 | `udp.fecUnrecoverableFrames` | FEC 无法恢复、最终超时或被替换的帧数 |
 | `udp.lastReject` | 最近拒绝原因：`none`、`inactive`、`source_ip`、`header`、`session`、`fragment` 或 `length` |
+| `udp.lastOutcome` | 最近整帧结果：`none`、`submitted`、`unrecoverable` 或 `submit_failed` |
+| `udp.lastOutcomeSequence` | 最近整帧结果对应的 `CDP1.sequence` |
+| `udp.lastReassemblyUs` | 最近结果从首个分片到完成或放弃的重组耗时 |
 
 UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submittedFrames`。`acceptedFragments` 包含数据和 FEC 校验分片。`acceptedFragments` 增长而 `completedFrames` 不增长表示分片未收齐且超过 FEC 恢复能力；`completedFrames` 增长而 `submittedFrames` 不增长表示完整帧未通过 `CDP1` 校验或无法提交显示管线。`reassemblyTimeouts` 和 `fecUnrecoverableFrames` 持续增长表示链路或发送节奏不稳定。PC 必须使用 `submittedFrames` 的推进判断设备是否仍在成功接收画面，不能仅凭 `completedFrames` 刷新媒体存活状态。
 

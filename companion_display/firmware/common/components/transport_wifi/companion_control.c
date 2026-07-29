@@ -300,7 +300,7 @@ int companion_control_build_hello_ack(char *buffer, size_t buffer_size,
         : "";
     if (strcmp(video_transport, COMPANION_CONTROL_TRANSPORT_UDP) == 0) {
         int written = snprintf(buffer, buffer_size,
-                               "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u,\"fec\":{\"scheme\":\"xor_interleaved\",\"data_fragments_per_group\":%u}},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
+                               "{\"type\":\"hello_ack\",\"request_id\":\"%s\",\"protocol_version\":%d,\"video_transport\":\"udp\",\"width\":%d,\"height\":%d,\"max_frame_bytes\":%u,\"udp\":{\"port\":%u,\"session_id\":%lu,\"session_token\":%lu,\"max_payload\":%u,\"flow_control\":\"latest_frame_ack\",\"max_in_flight_frames\":1,\"feedback_timeout_ms\":250,\"fec\":{\"scheme\":\"xor_interleaved\",\"data_fragments_per_group\":%u}},\"capabilities\":{\"video\":[\"tcp\",\"udp\"],\"frame_feedback\":true,\"touch\":%s,\"audio_capture\":false,\"text_input\":false}",
                                request_id, COMPANION_CONTROL_PROTOCOL_VERSION,
                                COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                                (unsigned)max_frame_bytes, udp_port,
@@ -423,7 +423,7 @@ int companion_control_build_status(char *buffer, size_t buffer_size,
         return -1;
     }
     return snprintf(buffer, buffer_size,
-                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":%s,\"touch_events_active\":%s,\"audio_capture\":false,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"fecPackets\":%lu,\"fecRecoveredFragments\":%lu,\"fecUnrecoverableFrames\":%lu,\"lastReject\":\"%s\"}}",
+                    "{\"name\":\"companion-display\",\"width\":%d,\"height\":%d,\"wifi\":\"%s\",\"ipv4\":\"%s\",\"active_transport\":\"%s\",\"token_set\":true,\"protocol_version\":%d,\"video_transports\":[\"tcp\",\"udp\"],\"touch\":%s,\"touch_events_active\":%s,\"audio_capture\":false,\"dropped_frames\":%lu,\"performance\":{\"sequence\":%lu,\"queueWaitUs\":%lu,\"jpegDecodeUs\":%lu,\"lcdWaitUs\":%lu,\"lcdSubmitUs\":%lu,\"previousDmaUs\":%lu,\"replacedFrames\":%lu},\"udp\":{\"rxPackets\":%lu,\"acceptedFragments\":%lu,\"rejectedPackets\":%lu,\"completedFrames\":%lu,\"submittedFrames\":%lu,\"submitFailures\":%lu,\"reassemblyTimeouts\":%lu,\"fecPackets\":%lu,\"fecRecoveredFragments\":%lu,\"fecUnrecoverableFrames\":%lu,\"lastReject\":\"%s\",\"lastOutcome\":\"%s\",\"lastOutcomeSequence\":%lu,\"lastReassemblyUs\":%lu}}",
                     COMPANION_CONTROL_WIDTH, COMPANION_CONTROL_HEIGHT,
                     snapshot->wifi != NULL ? snapshot->wifi : "",
                     snapshot->ipv4 != NULL ? snapshot->ipv4 : "",
@@ -449,7 +449,10 @@ int companion_control_build_status(char *buffer, size_t buffer_size,
                     (unsigned long)snapshot->udp_fec_packets,
                     (unsigned long)snapshot->udp_fec_recovered_fragments,
                     (unsigned long)snapshot->udp_fec_unrecoverable_frames,
-                    snapshot->udp_last_reject != NULL ? snapshot->udp_last_reject : "none");
+                    snapshot->udp_last_reject != NULL ? snapshot->udp_last_reject : "none",
+                    snapshot->udp_last_outcome != NULL ? snapshot->udp_last_outcome : "none",
+                    (unsigned long)snapshot->udp_last_outcome_sequence,
+                    (unsigned long)snapshot->udp_last_reassembly_us);
 }
 
 int companion_control_build_udp_feedback(char *buffer, size_t buffer_size,
@@ -457,13 +460,28 @@ int companion_control_build_udp_feedback(char *buffer, size_t buffer_size,
                                          uint32_t completed_frames,
                                          uint32_t submitted_frames,
                                          uint32_t recovered_fragments,
-                                         uint32_t unrecoverable_frames)
+                                         uint32_t unrecoverable_frames,
+                                         const char *outcome,
+                                         uint32_t outcome_sequence,
+                                         uint32_t reassembly_us)
 {
-    return snprintf(buffer, buffer_size,
-                    "{\"type\":\"udp_feedback\",\"latest_sequence\":%lu,\"completed_frames\":%lu,\"submitted_frames\":%lu,\"recovered_fragments\":%lu,\"unrecoverable_frames\":%lu}",
-                    (unsigned long)latest_sequence,
-                    (unsigned long)completed_frames,
-                    (unsigned long)submitted_frames,
-                    (unsigned long)recovered_fragments,
-                    (unsigned long)unrecoverable_frames);
+    int written = snprintf(buffer, buffer_size,
+                           "{\"type\":\"udp_feedback\",\"latest_sequence\":%lu,\"completed_frames\":%lu,\"submitted_frames\":%lu,\"recovered_fragments\":%lu,\"unrecoverable_frames\":%lu",
+                           (unsigned long)latest_sequence,
+                           (unsigned long)completed_frames,
+                           (unsigned long)submitted_frames,
+                           (unsigned long)recovered_fragments,
+                           (unsigned long)unrecoverable_frames);
+    if (written < 0 || (size_t)written >= buffer_size) return -1;
+    if (outcome != NULL) {
+        int fields = snprintf(buffer + written, buffer_size - (size_t)written,
+                              ",\"outcome\":\"%s\",\"outcome_sequence\":%lu,\"reassembly_us\":%lu",
+                              outcome, (unsigned long)outcome_sequence,
+                              (unsigned long)reassembly_us);
+        if (fields < 0 || (size_t)fields >= buffer_size - (size_t)written) return -1;
+        written += fields;
+    }
+    int tail = snprintf(buffer + written, buffer_size - (size_t)written, "}");
+    if (tail < 0 || (size_t)tail >= buffer_size - (size_t)written) return -1;
+    return written + tail;
 }

@@ -24,6 +24,7 @@ const primaryItems = computed(() => [
 
 const detailItems = computed(() => [
   { key: "udp", name: "UDP / FEC", get: () => (stream.metrics.udpFragmentBudget ? `${stream.metrics.udpFragmentBudget}F +${stream.metrics.udpFecRecoveredFragments}/-${stream.metrics.udpUnrecoverableFrames}` : "--") },
+  { key: "udp-link", name: "UDP LINK", get: () => (stream.metrics.udpRateKbps ? `${(stream.metrics.udpRateKbps / 1000).toFixed(1)}M ${stream.metrics.udpDeliveryMs} ms` : "--") },
   { key: "scale", name: "SCALE", get: () => (stream.metrics.sourceScalePercent ? `${stream.metrics.sourceScalePercent}%` : "--") },
   { key: "jpeg", name: "JPEG", get: () => jpegMetric.value },
   { key: "capture", name: locale.t("metric.capture"), hint: locale.t("metric.captureHint"), get: () => `${stream.metrics.captureProcessMs}/${stream.metrics.captureWaitMs} ms`, slow: () => stream.captureSlow },

@@ -25,7 +25,7 @@ WDP/WebRTC 位于仓库顶层 `wireless_display/`，它与本目录的 WebSocket
 
 公共客户端从 `hello_ack` 读取视频尺寸、帧上限和触摸坐标空间，不识别或写死具体板卡。P4 的 TCP JPEG payload 上限为 384 KiB；UDP 仍受 128 个、每个 1200 字节分片的限制。
 
-S3/P4 的 UDP 会话会协商交错 XOR FEC，每 8 个数据分片增加一个校验分片，可恢复每组任意一个丢失分片。PC 根据设备累计反馈自动收紧完整帧预算和实际 FPS，链路稳定后逐步恢复；连续 5 秒没有帧成功提交显示管线时进入 5 FPS 生存模式并重连 UDP，不会隐式切换 TCP。弱网下实际 JPEG 质量可临时降至 10；当前画面仍无法编码时，以 1 FPS 重发最近成功帧，用户设置不会被改写。旧固件未声明 FEC 时客户端仍可发送纯数据分片，并采用 64 分片的保守上限。
+S3/P4 的 UDP 会话只用 UDP 承载 JPEG `CDU1` 分片，协商、心跳、触摸和 `udp_feedback` 始终走 TCP/WebSocket。新固件协商 `latest_frame_ack`：PC 同时只发送一帧，在设备通过 TCP 报告 `submitted`、`unrecoverable` 或 `submit_failed` 后再发送最新画面，不重传旧帧。链路拥塞时先降低 6～20 Mbit/s pacing 和实际 FPS，达到 5 FPS 且持续失败后才收紧 JPEG 帧预算，实际质量下限保持 30。旧固件缺少流控字段时客户端保留兼容发送路径。
 
 ## PC 客户端
 
