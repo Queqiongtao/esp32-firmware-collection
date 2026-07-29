@@ -1,0 +1,25 @@
+dependencies:
+  idf:
+    version: "==6.0.1"
+  joltwallet/littlefs:
+    version: "^1.20.1"
+  lvgl/lvgl:
+    version: "9.5.0"
+  espressif/esp_lvgl_adapter:
+    version: "^0.6.2"
+  espressif/esp_lcd_touch_gt911:
+    version: "^1.2.0~2"
+  espressif/esp_codec_dev:
+    version: "~1.5"
+  espressif/esp_wifi_remote:
+    version: ">=0.10,<2.0"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/esp_hosted:
+    version: "==2.12.8"
+    rules:
+      - if: "target in [esp32p4]"
+  espressif/cjson:
+    version: "^1.7.19"
+  espressif/mqtt:
+    version: "^1.0.0"

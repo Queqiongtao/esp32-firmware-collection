@@ -1,0 +1,56 @@
+menu "PrintSphere P4"
+
+    config PRINTSPHERE_EXPERIMENTAL_PRINT_CONTROL
+        bool "Enable experimental print control buttons"
+        default n
+
+    config EXAMPLE_USE_DMA2D_COPY_FRAME
+        bool "Use ESP LCD DMA2D draw hook"
+        default y
+
+    config EXAMPLE_LVGL_PORT_ESP_ADAPTER
+        bool
+        default y
+
+    config EXAMPLE_LVGL_PORT_CUSTOM_LEGACY
+        bool
+        default n
+
+    config EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_DIRECT
+        bool
+        default y
+
+    config EXAMPLE_LVGL_ADAPTER_TEAR_TRIPLE_PARTIAL
+        bool
+        default n
+
+    config EXAMPLE_LVGL_ADAPTER_TEAR_DOUBLE_FULL
+        bool
+        default n
+
+    config EXAMPLE_LVGL_ADAPTER_FORCE_PARTIAL_DMA2D_TEST
+        bool
+        default n
+
+    config EXAMPLE_LVGL_ADAPTER_ENABLE_PPA_ACCEL
+        bool
+        default y
+
+    config EXAMPLE_LCD_BACKLIGHT_BYPASS_PWM
+        bool "Bypass PWM and force backlight on"
+        default n
+
+    config EXAMPLE_LVGL_PERF_LOG
+        bool "Log LVGL refresh performance"
+        default n
+
+    config EXAMPLE_LVGL_DRAW_BUF_LINES
+        int
+        range 20 200
+        default 80
+
+    config EXAMPLE_LVGL_DRAW_BUF_INTERNAL
+        bool
+        default n
+
+endmenu

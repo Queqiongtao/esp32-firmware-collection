@@ -20,12 +20,15 @@ esp32-firmware-collection/
 │   └── blink/
 ├── esp32p4/
 │   ├── JC1060P470/
+│   ├── PrintSphere/           PrintSphere v1.6.2 的 JC1060P470 迁移
 │   ├── mipi_dsi/
 │   └── hello_world/
 └── wireless_display/          独立的 WDP/WebRTC 协议设计
 ```
 
 `companion_display` 使用 WebSocket + JPEG + UDP 的 Companion Display v3，将公共协议、PC 客户端和 S3/P4 设备固件放在同一产品目录。两个固件保持独立构建，设备差异通过协议协商。`wireless_display` 是不兼容的 WDP/WebRTC 新协议，两者不共享版本号或实现。
+
+`esp32p4/PrintSphere` 是 PrintSphere `v1.6.2` 到 JC1060P470（ESP32-P4 + ESP32-C6）的固定快照迁移，使用 ESP-IDF `6.0.1` 和原生 1024x600 横屏 UI。当前已通过编译和链接验证，真机状态及后续门禁见其 [迁移总计划](esp32p4/PrintSphere/docs/plans/00_master_plan.md)。
 
 | Companion Display 设备 | 网络 | 默认协商尺寸 | TCP / UDP 完整帧上限 |
 | --- | --- | --- | --- |
@@ -43,6 +46,9 @@ cd companion_display/firmware/esp32s3
 ./dev.sh build
 
 cd ../esp32p4
+./dev.sh build
+
+cd ../../../esp32p4/PrintSphere
 ./dev.sh build
 ```
 

@@ -1,0 +1,34 @@
+idf_component_register(
+    SRCS
+        "jc1060p470_bsp.c"
+        "jc1060p470_audio.c"
+        "jc1060p470_wifi.c"
+        "board_i2c.c"
+        "display_board.c"
+        "display_panel.c"
+        "display_touch.c"
+        "display_lvgl.c"
+    INCLUDE_DIRS
+        "."
+        "include"
+    REQUIRES
+        lvgl
+        esp_lcd_jd9165
+        esp_lcd_touch_gt911
+        esp_lvgl_adapter
+        esp_codec_dev
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_i2s
+        esp_driver_ledc
+        esp_event
+        efuse
+        esp_common
+        esp_netif
+        esp_wifi
+        esp_hw_support
+        esp_lcd
+        esp_mm
+        esp_timer
+        espressif__esp_hosted
+)
