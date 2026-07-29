@@ -27,7 +27,7 @@
 
 ## 图形与内存
 
-显示使用 RGB565、MIPI DSI 双 framebuffer 和 `DOUBLE_DIRECT` tear avoidance。Hex PSRAM 200 MHz 保存帧缓冲和大块图片数据，内部 RAM 优先保留给 DMA、任务栈和网络控制结构。编译配置启用 adapter PPA 加速和 ESP LCD DMA2D copy hook。
+显示使用 RGB565、MIPI DSI 双 framebuffer 和 `DOUBLE_DIRECT` tear avoidance。Hex PSRAM 200 MHz 保存帧缓冲和大块图片数据，内部 RAM 优先保留给 DMA、任务栈和网络控制结构。相机客户端是明确例外：其 12 KiB 任务栈通过 `xTaskCreateWithCaps` 放在 PSRAM，因此必须保持 `CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM=y`。编译配置启用 adapter PPA 加速和 ESP LCD DMA2D copy hook。
 
 当前 Hosted ready 检查需要 2.12.8 的私有 `is_transport_tx_ready()` 符号来覆盖事件注册前 transport 已连接的情况，因此不得放宽版本范围。移除该私有 ABI 前必须先验证公共事件接口能够覆盖冷启动、软重启和 C6 已运行三种时序。
 

@@ -15,12 +15,17 @@
 #include "esp_timer.h"
 #include "esp_tls.h"
 
+#if !defined(CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM)
+#error "P1sCameraClient requires CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM for its PSRAM stack"
+#endif
+
 namespace printsphere {
 
 namespace {
 
 constexpr char kTag[] = "printsphere.camera";
 constexpr uint16_t kCameraPort = 6000;
+constexpr uint32_t kCameraTaskStackBytes = 12U * 1024U;
 constexpr size_t kFrameHeaderBytes = 16;
 constexpr size_t kMaxFrameBytes = 256U * 1024U;
 constexpr size_t kImagePersistentReserveBytes = 20U * 1024U;
@@ -152,9 +157,20 @@ esp_err_t P1sCameraClient::start() {
   // fragmented (Wi-Fi + Cloud MQTT TLS + 44 KB rotation staging) and a 12 KiB
   // contiguous internal-RAM stack allocation reliably fails.
   const BaseType_t result = xTaskCreateWithCaps(
-      &P1sCameraClient::task_entry, "p1s_camera", 12288, this, 4, &task_handle_,
+      &P1sCameraClient::task_entry, "p1s_camera", kCameraTaskStackBytes, this, 4, &task_handle_,
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  return result == pdPASS ? ESP_OK : ESP_FAIL;
+  if (result != pdPASS) {
+    return ESP_FAIL;
+  }
+
+  StackType_t* task_stack = nullptr;
+  StaticTask_t* task_tcb = nullptr;
+  const BaseType_t buffers_result =
+      xTaskGetStaticBuffers(task_handle_, &task_stack, &task_tcb);
+  ESP_LOGI(kTag, "Camera task started: stack=%u bytes ram=%s",
+           static_cast<unsigned>(kCameraTaskStackBytes),
+           buffers_result == pdTRUE ? ram_region(task_stack) : "unknown");
+  return ESP_OK;
 }
 
 P1sCameraSnapshot P1sCameraClient::snapshot() const {

@@ -41,11 +41,12 @@ constexpr uint64_t kPrintCommandOverrideMs = 5000;
 esp_err_t configure_power_management() {
 #if CONFIG_PM_ENABLE
   esp_pm_config_t pm_config = {};
-  pm_config.max_freq_mhz = 240;
-  pm_config.min_freq_mhz = 80;
+  pm_config.max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+  pm_config.min_freq_mhz = CONFIG_XTAL_FREQ;
   pm_config.light_sleep_enable = false;
   ESP_RETURN_ON_ERROR(esp_pm_configure(&pm_config), kTag, "esp_pm_configure failed");
-  ESP_LOGI(kTag, "Power management enabled: DFS 80-240 MHz, light sleep off");
+  ESP_LOGI(kTag, "Power management enabled: DFS %d-%d MHz, light sleep off",
+           pm_config.min_freq_mhz, pm_config.max_freq_mhz);
 #else
   ESP_LOGI(kTag, "Power management disabled in sdkconfig (CONFIG_PM_ENABLE=n)");
 #endif
