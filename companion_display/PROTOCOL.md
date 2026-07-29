@@ -36,7 +36,7 @@ ws://DEVICE_IP/stream?token=PAIRING_CODE
 
 - 客户端发送 `stop_stream`；
 - 控制 WebSocket 关闭或底层 TCP 连接断开（含异常断开）；
-- `stream_started` 后连续 `CONFIG_COMPANION_FRAME_TIMEOUT_MS`（默认 10 秒）未收到任何完整视频帧。此时设备尽力发送一条非请求式 `stream_stopped`（含 `reason:"frame_timeout"`，无 `request_id`），随后主动关闭控制连接，屏幕状态栏显示 `STREAM TIMEOUT`。客户端可以忽略该消息，仅依赖连接关闭事件按既有重连流程恢复。
+- `stream_started` 后连续 `CONFIG_COMPANION_FRAME_TIMEOUT_MS`（默认 10 秒）没有视频帧成功提交显示管线。仅收到 UDP 分片或收齐但提交失败都不刷新该计时。此时设备尽力发送一条非请求式 `stream_stopped`（含 `reason:"frame_timeout"`，无 `request_id`），随后主动关闭控制连接，屏幕状态栏显示 `STREAM TIMEOUT`。客户端可以立即处理该消息，也可以依赖连接关闭事件按既有重连流程恢复。
 
 ### `hello`
 
@@ -189,13 +189,13 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 必须为分片序号乘以协商的 `max_payload`。协商 `xor_interleaved` 后，发送端令校验组数为 `ceil(fragment_count / 8)`，数据分片 `i` 属于组 `i % group_count`；每组校验载荷是组内数据补零到 `max_payload` 后的逐字节 XOR。FEC 分片使用组索引作为 `fragment_index`、保持原数据 `fragment_count`，`fragment_offset=0`、`payload_length=max_payload`，并在所有数据分片之后发送。每组丢失不超过一个数据分片时设备可恢复；同组多片丢失仍丢弃整帧。
 
-桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃；不重传旧帧。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的有效完整帧上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；P4 的 TCP 完整帧上限为 `393240` 字节。
+桌面客户端以每毫秒最多 2 个分片的节奏发送，并将单帧发送预算限制为 120 ms，避免突发包压垮设备 UDP 接收邮箱；超过预算时 PC 中止该帧剩余分片的发送并视为发送失败，随后自动重连控制通道、协商新的 UDP 会话并继续发送最新画面，不会继续积压旧画面。UDP 接收邮箱由设备配置决定，S3/P4 默认分别为 24/64 包。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃；不重传旧帧。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的协商上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；PC 可以根据反馈采用更低的运行时分片预算。P4 的 TCP 完整帧上限为 `393240` 字节。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
 接收 UDP 数据 5 秒中断时，设备显示 `SESSION EXPIRED` 并保留控制会话，等待同一 session 的后续数据；继续中断到累计 `CONFIG_COMPANION_FRAME_TIMEOUT_MS`（默认 10 秒）仍无完整帧时，设备按无帧超时结束会话并关闭控制连接。
 
-画面静止或 Portal 暂时未提供新图像时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。设备将静态保活帧视为普通视频帧，保活帧同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
+画面静止、Portal 暂时未提供新图像或 UDP 运行时预算无法容纳当前变化帧时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。UDP 弱网应急编码允许实际 JPEG 质量低于用户可选下限 30，最低为 10，但不修改持久化设置。设备将缓存保活帧视为普通视频帧，成功提交后同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
 
 控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height`、有效 `max_frame_bytes` 和可选 `touch` 描述必须与原会话一致；尺寸变化、触摸能力丢失或触摸坐标空间变化时，PC 结束当前流，用户重新启动后再建立对应采集和输入管线。
 
@@ -253,7 +253,7 @@ UDP 不发送逐帧回执，避免为低延迟视频引入可靠反馈等待；P
 | `udp.fecUnrecoverableFrames` | FEC 无法恢复、最终超时或被替换的帧数 |
 | `udp.lastReject` | 最近拒绝原因：`none`、`inactive`、`source_ip`、`header`、`session`、`fragment` 或 `length` |
 
-UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submittedFrames`。`acceptedFragments` 包含数据和 FEC 校验分片。`acceptedFragments` 增长而 `completedFrames` 不增长表示分片未收齐且超过 FEC 恢复能力；`completedFrames` 增长而 `submittedFrames` 不增长表示完整帧未通过 `CDP1` 校验或无法提交显示管线。`reassemblyTimeouts` 和 `fecUnrecoverableFrames` 持续增长表示链路或发送节奏不稳定。
+UDP 处理链路为 `rxPackets -> acceptedFragments -> completedFrames -> submittedFrames`。`acceptedFragments` 包含数据和 FEC 校验分片。`acceptedFragments` 增长而 `completedFrames` 不增长表示分片未收齐且超过 FEC 恢复能力；`completedFrames` 增长而 `submittedFrames` 不增长表示完整帧未通过 `CDP1` 校验或无法提交显示管线。`reassemblyTimeouts` 和 `fecUnrecoverableFrames` 持续增长表示链路或发送节奏不稳定。PC 必须使用 `submittedFrames` 的推进判断设备是否仍在成功接收画面，不能仅凭 `completedFrames` 刷新媒体存活状态。
 
 `audio_capture` 与 `hello_ack.capabilities.text_input` 仍是预留字段，v3 没有对应消息；客户端不得依据这些字段发送未定义消息。触摸能力以 `hello_ack.capabilities.touch` 的会话级协商结果为准，`/api/status` 的 `touch` 只反映硬件可用性。
 

@@ -394,15 +394,18 @@ struct UdpFeedback {
 
 struct UdpLinkController {
     adaptive: bool,
+    feedback_seen: bool,
     max_payload: usize,
     max_fragments: usize,
     fragment_budget: usize,
+    last_successful_fragments: usize,
     fps_cap: u8,
     last_feedback: Instant,
-    last_completed: Instant,
+    last_submitted: Instant,
     last_evaluation: Instant,
     stable_since: Instant,
     previous_completed: u32,
+    previous_submitted: u32,
     previous_recovered: u32,
     previous_unrecoverable: u32,
     window_completed: u32,
@@ -425,15 +428,18 @@ impl UdpLinkController {
         let now = Instant::now();
         Some(Self {
             adaptive,
+            feedback_seen: false,
             max_payload: parameters.max_payload,
             max_fragments,
             fragment_budget,
+            last_successful_fragments: 1,
             fps_cap: requested_fps,
             last_feedback: now,
-            last_completed: now,
+            last_submitted: now,
             last_evaluation: now,
             stable_since: now,
             previous_completed: 0,
+            previous_submitted: 0,
             previous_recovered: 0,
             previous_unrecoverable: 0,
             window_completed: 0,
@@ -450,17 +456,26 @@ impl UdpLinkController {
             .saturating_sub(protocol::HEADER_LEN)
     }
 
+    fn record_encoded_frame(&mut self, frame_bytes: usize) {
+        self.last_successful_fragments = frame_bytes
+            .div_ceil(self.max_payload)
+            .clamp(1, self.max_fragments);
+    }
+
     fn observe(&mut self, feedback: UdpFeedback) {
-        let _ = (feedback.latest_sequence, feedback.submitted_frames);
+        let _ = feedback.latest_sequence;
         if feedback.completed_frames < self.previous_completed
+            || feedback.submitted_frames < self.previous_submitted
             || feedback.recovered_fragments < self.previous_recovered
             || feedback.unrecoverable_frames < self.previous_unrecoverable
         {
             self.previous_completed = 0;
+            self.previous_submitted = 0;
             self.previous_recovered = 0;
             self.previous_unrecoverable = 0;
         }
         let completed = feedback.completed_frames - self.previous_completed;
+        let submitted = feedback.submitted_frames - self.previous_submitted;
         self.window_completed = self.window_completed.saturating_add(completed);
         self.window_recovered = self
             .window_recovered
@@ -469,11 +484,13 @@ impl UdpLinkController {
             .window_unrecoverable
             .saturating_add(feedback.unrecoverable_frames - self.previous_unrecoverable);
         self.previous_completed = feedback.completed_frames;
+        self.previous_submitted = feedback.submitted_frames;
         self.previous_recovered = feedback.recovered_fragments;
         self.previous_unrecoverable = feedback.unrecoverable_frames;
         self.last_feedback = Instant::now();
-        if completed > 0 {
-            self.last_completed = self.last_feedback;
+        self.feedback_seen = true;
+        if submitted > 0 {
+            self.last_submitted = self.last_feedback;
         }
     }
 
@@ -483,25 +500,37 @@ impl UdpLinkController {
 
     fn reconnected(&mut self) {
         let now = Instant::now();
+        self.feedback_seen = false;
         self.last_feedback = now;
-        self.last_completed = now;
+        self.last_submitted = now;
         self.last_evaluation = now;
         self.previous_completed = 0;
+        self.previous_submitted = 0;
         self.previous_recovered = 0;
         self.previous_unrecoverable = 0;
         self.window_completed = 0;
         self.window_recovered = 0;
         self.window_unrecoverable = 0;
+        self.sent_frames = 0;
     }
 
     fn update(&mut self, requested_fps: u8) -> bool {
+        let now = Instant::now();
+        if self.feedback_seen
+            && self.sent_frames > 0
+            && self.last_submitted.elapsed() >= UDP_LINK_STALL_TIMEOUT
+        {
+            self.fps_cap = 5;
+            self.fragment_budget = self
+                .fragment_budget
+                .max(self.last_successful_fragments)
+                .min(self.max_fragments);
+            self.stable_since = now;
+            return true;
+        }
         if !self.adaptive {
             self.fps_cap = requested_fps;
             return false;
-        }
-        let now = Instant::now();
-        if self.sent_frames > 0 && self.last_completed.elapsed() >= UDP_LINK_STALL_TIMEOUT {
-            return true;
         }
         if now.duration_since(self.last_evaluation) < UDP_LINK_EVALUATION_INTERVAL {
             return false;
@@ -510,7 +539,8 @@ impl UdpLinkController {
             .window_completed
             .saturating_add(self.window_unrecoverable);
         let severe = self.sent_frames > 0
-            && self.last_completed.elapsed() >= UDP_LINK_EVALUATION_INTERVAL
+            && self.feedback_seen
+            && self.last_submitted.elapsed() >= UDP_LINK_EVALUATION_INTERVAL
             || outcomes > 0 && self.window_unrecoverable.saturating_mul(5) >= outcomes;
         let degraded = self.window_unrecoverable > 0
             || self.window_completed > 0
@@ -715,12 +745,14 @@ fn encode_jpeg_at_quality(image: &DynamicImage, quality: u8) -> Result<Vec<u8>, 
 }
 
 /* Search in coarse five-point steps, then refine only the final bracket. */
-fn encode_jpeg(
+fn encode_jpeg_with_minimum(
     image: &DynamicImage,
     requested_quality: u8,
     max_jpeg_bytes: usize,
+    minimum_quality: u8,
 ) -> Result<(Vec<u8>, u8, u8), String> {
     let requested_quality = requested_quality.clamp(30, 95);
+    let minimum_quality = minimum_quality.clamp(10, 30).min(requested_quality);
     let mut quality = requested_quality;
     let mut failed_quality: Option<u8> = None;
     let mut attempts = 0_u8;
@@ -741,14 +773,22 @@ fn encode_jpeg(
             return Ok((output, quality, attempts));
         }
         failed_quality = Some(quality);
-        if quality == 30 {
+        if quality == minimum_quality {
             break;
         }
-        quality = quality.saturating_sub(5).max(30);
+        quality = quality.saturating_sub(5).max(minimum_quality);
     }
     Err(format!(
         "JPEG remains larger than the negotiated {max_jpeg_bytes}-byte limit"
     ))
+}
+
+fn encode_jpeg(
+    image: &DynamicImage,
+    requested_quality: u8,
+    max_jpeg_bytes: usize,
+) -> Result<(Vec<u8>, u8, u8), String> {
+    encode_jpeg_with_minimum(image, requested_quality, max_jpeg_bytes, 30)
 }
 
 const JPEG_QUALITY_PROBE_INTERVAL: Duration = Duration::from_secs(1);
@@ -756,6 +796,7 @@ const JPEG_QUALITY_PROBE_HEADROOM_PERCENT: usize = 90;
 
 struct AdaptiveJpegEncoder {
     requested_quality: u8,
+    minimum_quality: u8,
     quality: u8,
     last_size: usize,
     last_probe: Instant,
@@ -765,10 +806,16 @@ impl AdaptiveJpegEncoder {
     fn new(requested_quality: u8, quality: u8, last_size: usize) -> Self {
         Self {
             requested_quality: requested_quality.clamp(30, 95),
-            quality: quality.clamp(30, 95),
+            minimum_quality: 30,
+            quality: quality.clamp(10, 95),
             last_size,
             last_probe: Instant::now(),
         }
+    }
+
+    fn set_minimum_quality(&mut self, minimum_quality: u8) {
+        self.minimum_quality = minimum_quality.clamp(10, 30);
+        self.quality = self.quality.max(self.minimum_quality);
     }
 
     fn set_requested_quality(&mut self, requested_quality: u8) {
@@ -786,7 +833,10 @@ impl AdaptiveJpegEncoder {
         image: &DynamicImage,
         max_jpeg_bytes: usize,
     ) -> Result<(Vec<u8>, u8, u8), String> {
-        let previous_quality = self.quality.min(self.requested_quality).max(30);
+        let previous_quality = self
+            .quality
+            .min(self.requested_quality)
+            .max(self.minimum_quality);
         let should_probe = previous_quality < self.requested_quality
             && self.last_size > 0
             && self.last_size.saturating_mul(100)
@@ -813,13 +863,13 @@ impl AdaptiveJpegEncoder {
                 return Ok((output, quality, attempts));
             }
             self.last_probe = Instant::now();
-            if quality == 30 {
+            if quality == self.minimum_quality {
                 break;
             }
             quality = if quality > previous_quality {
                 previous_quality
             } else {
-                quality.saturating_sub(5).max(30)
+                quality.saturating_sub(5).max(self.minimum_quality)
             };
         }
         Err(format!(
@@ -834,8 +884,10 @@ fn encode_prepared_frame(
     sequence: u32,
     target: &StreamTarget,
     max_jpeg_bytes: usize,
+    minimum_quality: u8,
 ) -> Result<(Vec<u8>, usize, u8, u8), String> {
-    let (jpeg, used_quality, attempts) = encode_jpeg(image, jpeg_quality, max_jpeg_bytes)?;
+    let (jpeg, used_quality, attempts) =
+        encode_jpeg_with_minimum(image, jpeg_quality, max_jpeg_bytes, minimum_quality)?;
     let jpeg_bytes = jpeg.len();
     Ok((
         protocol::encode_frame(sequence, target.width, target.height, max_jpeg_bytes, &jpeg)?,
@@ -877,6 +929,7 @@ fn build_frame(
         sequence,
         target,
         target.max_jpeg_bytes(),
+        30,
     )?;
     Ok((frame, jpeg_bytes))
 }
@@ -1505,6 +1558,11 @@ fn configure_udp_control_socket(socket: &mut WebSocket<TcpStream>) -> Result<(),
         .map_err(|error| format!("Cannot configure UDP control socket: {error}"))
 }
 
+fn is_stream_frame_timeout(message: &Value) -> bool {
+    message.get("type").and_then(Value::as_str) == Some("stream_stopped")
+        && message.get("reason").and_then(Value::as_str) == Some("frame_timeout")
+}
+
 fn service_udp_control(
     socket: &mut WebSocket<TcpStream>,
     heartbeat: &mut UdpControlHeartbeat,
@@ -1523,14 +1581,15 @@ fn service_udp_control(
                         continue;
                     }
                 }
-                let is_pending_pong =
-                    serde_json::from_str::<Value>(&text)
-                        .ok()
-                        .is_some_and(|message| {
-                            message.get("type").and_then(Value::as_str) == Some("pong")
-                                && heartbeat.pending_request_id.as_deref()
-                                    == message.get("request_id").and_then(Value::as_str)
-                        });
+                let message = serde_json::from_str::<Value>(&text).ok();
+                if message.as_ref().is_some_and(is_stream_frame_timeout) {
+                    return Err("Device ended UDP stream after frame timeout".to_string());
+                }
+                let is_pending_pong = message.as_ref().is_some_and(|message| {
+                    message.get("type").and_then(Value::as_str) == Some("pong")
+                        && heartbeat.pending_request_id.as_deref()
+                            == message.get("request_id").and_then(Value::as_str)
+                });
                 if is_pending_pong {
                     heartbeat.pending_request_id = None;
                     heartbeat.misses = 0;
@@ -2158,6 +2217,7 @@ fn run_stream(
             sequence,
             &target,
             max_jpeg_bytes,
+            if video_transport == "udp" { 10 } else { 30 },
         )
         .map(|(frame, jpeg_bytes, used_quality, attempts)| {
             (
@@ -2204,6 +2264,12 @@ fn run_stream(
     };
     let mut adaptive_encoder =
         AdaptiveJpegEncoder::new(jpeg_quality, last_used_quality, jpeg_bytes);
+    if video_transport == "udp" {
+        adaptive_encoder.set_minimum_quality(10);
+    }
+    if let Some(link) = udp_link.as_mut() {
+        link.record_encoded_frame(frame.len());
+    }
     let first_capture_encode_ms = encode_started.elapsed().as_millis() as u32;
     emit(
         &app,
@@ -2274,6 +2340,8 @@ fn run_stream(
     }
     let first_send_ms = send_started.elapsed().as_millis() as u32;
     let mut last_video_sent = Instant::now();
+    let mut encode_backoff_active = false;
+    let mut last_encode_retry = Instant::now() - STATIC_FRAME_INTERVAL;
     let mut static_frames = 0_u32;
     let mut device_ms = 0;
     let mut device_replaced_frames = 0;
@@ -2474,11 +2542,13 @@ fn run_stream(
         let prepared = match image {
             Some(prepared) => {
                 let fingerprint = image_fingerprint(&prepared.image);
-                (fingerprint != last_fingerprint).then_some((prepared, fingerprint))
+                let retry_due =
+                    !encode_backoff_active || last_encode_retry.elapsed() >= STATIC_FRAME_INTERVAL;
+                (fingerprint != last_fingerprint && retry_due).then_some((prepared, fingerprint))
             }
             None => None,
         };
-        let static_frame = prepared.is_none();
+        let mut static_frame = prepared.is_none();
         let (frame, jpeg_bytes, jpeg_encode_attempts): (Vec<u8>, usize, u8) = match prepared {
             Some((mut prepared, fingerprint)) => {
                 prepared.apply_quality_filter(&mut sharpen_workspace);
@@ -2492,8 +2562,12 @@ fn run_stream(
                         .map_or(target.max_jpeg_bytes(), |link| link.max_jpeg_bytes(&target)),
                 ) {
                     Ok((frame, jpeg_bytes, used_quality, attempts)) => {
+                        if let Some(link) = udp_link.as_mut() {
+                            link.record_encoded_frame(frame.len());
+                        }
                         cached_frame = frame.clone();
                         last_fingerprint = fingerprint;
+                        encode_backoff_active = false;
                         last_used_quality = used_quality;
                         source_scale_percent = prepared.source_scale_percent;
                         static_frames = 0;
@@ -2501,6 +2575,8 @@ fn run_stream(
                     }
                     Err(error) => {
                         dropped_frames += 1;
+                        encode_backoff_active = true;
+                        last_encode_retry = Instant::now();
                         emit(
                             &app,
                             "dropping",
@@ -2510,7 +2586,19 @@ fn run_stream(
                             dropped_frames,
                             video_transport,
                         );
-                        continue;
+                        if video_transport != "udp"
+                            || last_video_sent.elapsed() < STATIC_FRAME_INTERVAL
+                        {
+                            continue;
+                        }
+                        static_frame = true;
+                        match replay_frame(&cached_frame, sequence) {
+                            Ok(frame) => (frame, cached_frame.len() - protocol::HEADER_LEN, 0),
+                            Err(error) => {
+                                emit(&app, "error", error, 0, 0, dropped_frames, video_transport);
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -3130,10 +3218,10 @@ mod tests {
     use super::{
         active_stream_error, base64_encode, build_frame, encode_jpeg, encode_jpeg_at_quality,
         ensure_reconnect_target, ensure_reconnect_touch, ensure_status_dimensions,
-        parse_http_response, replay_frame, static_color_bars, validate_region,
-        validate_stream_target, validate_touch_descriptor, AdaptiveJpegEncoder,
+        is_stream_frame_timeout, parse_http_response, replay_frame, static_color_bars,
+        validate_region, validate_stream_target, validate_touch_descriptor, AdaptiveJpegEncoder,
         CaptureRegionConfig, ControlReply, DisplayOrientation, FrameMetrics, ProjectionMode,
-        StreamConfig, StreamEvent, StreamTarget, UdpLinkController, UdpParameters,
+        StreamConfig, StreamEvent, StreamTarget, UdpFeedback, UdpLinkController, UdpParameters,
         UDP_LINK_EVALUATION_INTERVAL, UDP_LINK_RECOVERY_INTERVAL, UDP_LINK_STALL_TIMEOUT,
     };
     use crate::{protocol, touch};
@@ -3459,6 +3547,49 @@ mod tests {
     }
 
     #[test]
+    fn udp_emergency_jpeg_can_encode_below_quality_30() {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(320, 180, |x, y| {
+            Rgb([
+                ((x * 13 + y * 3) & 0xff) as u8,
+                ((x * 5 + y * 17) & 0xff) as u8,
+                ((x * 11 + y * 7) & 0xff) as u8,
+            ])
+        }));
+        let quality_30_size = encode_jpeg_at_quality(&image, 30).unwrap().len();
+        let quality_10_size = encode_jpeg_at_quality(&image, 10).unwrap().len();
+        assert!(quality_10_size < quality_30_size);
+        let mut encoder = AdaptiveJpegEncoder::new(30, 30, 0);
+        encoder.set_minimum_quality(10);
+        let (jpeg, quality, _) = encoder.encode(&image, quality_30_size - 1).unwrap();
+        assert!(jpeg.len() < quality_30_size);
+        assert!(quality < 30);
+        assert!(quality >= 10);
+    }
+
+    #[test]
+    fn udp_encoder_keeps_the_emergency_first_frame_quality() {
+        let image = static_color_bars(160, 90);
+        let quality_10_size = encode_jpeg_at_quality(&image, 10).unwrap().len();
+        let mut encoder = AdaptiveJpegEncoder::new(85, 10, quality_10_size);
+        encoder.set_minimum_quality(10);
+        let (_, quality, attempts) = encoder.encode(&image, quality_10_size).unwrap();
+        assert_eq!(quality, 10);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn recognizes_device_frame_timeout_notification() {
+        assert!(is_stream_frame_timeout(&serde_json::json!({
+            "type": "stream_stopped",
+            "reason": "frame_timeout"
+        })));
+        assert!(!is_stream_frame_timeout(&serde_json::json!({
+            "type": "stream_stopped",
+            "reason": "user"
+        })));
+    }
+
+    #[test]
     fn stream_event_metrics_use_camel_case_and_zero_for_cached_frames() {
         let event = StreamEvent::from_metrics(
             "streaming",
@@ -3506,15 +3637,18 @@ mod tests {
         let now = Instant::now();
         UdpLinkController {
             adaptive: true,
+            feedback_seen: false,
             max_payload: 1200,
             max_fragments: 128,
             fragment_budget: 96,
+            last_successful_fragments: 1,
             fps_cap: 20,
             last_feedback: now,
-            last_completed: now,
+            last_submitted: now,
             last_evaluation: now,
             stable_since: now,
             previous_completed: 0,
+            previous_submitted: 0,
             previous_recovered: 0,
             previous_unrecoverable: 0,
             window_completed: 0,
@@ -3551,8 +3685,60 @@ mod tests {
     #[test]
     fn udp_link_controller_reconnects_before_device_frame_timeout() {
         let mut link = test_udp_link_controller();
-        link.last_completed = Instant::now() - UDP_LINK_STALL_TIMEOUT;
+        link.feedback_seen = true;
+        link.last_submitted = Instant::now() - UDP_LINK_STALL_TIMEOUT;
         assert!(link.update(20));
+        assert_eq!(link.effective_fps(20), 5);
+    }
+
+    #[test]
+    fn udp_completed_frame_does_not_mask_missing_submission() {
+        let mut link = test_udp_link_controller();
+        link.last_submitted = Instant::now() - UDP_LINK_STALL_TIMEOUT;
+        link.observe(UdpFeedback {
+            kind: "udp_feedback".into(),
+            latest_sequence: 1,
+            completed_frames: 1,
+            submitted_frames: 0,
+            recovered_fragments: 0,
+            unrecoverable_frames: 0,
+        });
+        assert!(link.update(20));
+    }
+
+    #[test]
+    fn udp_submitted_frame_refreshes_link_liveness() {
+        let mut link = test_udp_link_controller();
+        link.last_submitted = Instant::now() - UDP_LINK_STALL_TIMEOUT;
+        link.observe(UdpFeedback {
+            kind: "udp_feedback".into(),
+            latest_sequence: 1,
+            completed_frames: 1,
+            submitted_frames: 1,
+            recovered_fragments: 0,
+            unrecoverable_frames: 0,
+        });
+        assert!(!link.update(20));
+    }
+
+    #[test]
+    fn udp_survival_mode_preserves_last_encodable_budget() {
+        let mut link = test_udp_link_controller();
+        link.fragment_budget = 32;
+        link.record_encoded_frame(80 * link.max_payload);
+        link.feedback_seen = true;
+        link.last_submitted = Instant::now() - UDP_LINK_STALL_TIMEOUT;
+        assert!(link.update(20));
+        assert_eq!(link.fragment_budget, 80);
+        assert_eq!(link.effective_fps(20), 5);
+    }
+
+    #[test]
+    fn udp_without_feedback_does_not_start_stall_reconnects() {
+        let mut link = test_udp_link_controller();
+        link.adaptive = false;
+        link.last_submitted = Instant::now() - UDP_LINK_STALL_TIMEOUT;
+        assert!(!link.update(20));
     }
 
     fn hello_reply(width: u16, height: u16, max_frame_bytes: usize) -> ControlReply {
