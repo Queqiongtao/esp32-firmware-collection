@@ -226,9 +226,9 @@ UDP 模式把完整 `CDP1` 按设备协商的 `max_payload` 拆成 `CDU1`。客�
 
 新固件通过 `hello_ack.udp.flow_control=latest_frame_ack` 声明闭环能力。JPEG 分片仍走 UDP，`udp_feedback` 走原 TCP/WebSocket 控制连接。客户端同时最多保留一个在途帧，收到匹配 sequence 的 `submitted`、`unrecoverable`、`submit_failed` 或等待 80～250 ms 自适应期限到期后，才发送当时最新画面；旧帧不重传，迟到和重复反馈不打开发送门。
 
-分片以最多两个报文的小突发发送，令牌桶初始 8 Mbit/s、范围 6～20 Mbit/s，单帧发送预算为 240 ms。失败时速率降低 25%、FPS 降低 20%，最低 5 FPS；只有 5 FPS 下连续 3 次失败才将帧预算降低 15%。稳定 2 秒逐步恢复速率、稳定 5 秒恢复 FPS、稳定 10 秒恢复帧预算。旧固件没有 `flow_control` 时继续使用原累计反馈兼容逻辑。
+分片以最多两个报文的小突发发送，pacing 初始 8 Mbit/s、范围 6～20 Mbit/s；每个突发等待到本帧累计字节对应的绝对线速时间点，不累加逐次休眠误差。单帧硬发送预算为 240 ms，编码前按当前速率、`CDU1` 头和 FEC 开销预留 20 ms 调度余量；P4 在 6 Mbit/s、`max_payload=1200`、FEC 开启时，有效数据分片预算会从 128 自动降至 118。反馈失败时速率降低 25%、FPS 降低 20%，最低 5 FPS；只有 5 FPS 下连续 3 次失败才继续收紧自适应帧预算。稳定 2 秒逐步恢复速率、稳定 5 秒恢复 FPS、稳定 10 秒恢复帧预算。旧固件没有 `flow_control` 时继续使用原累计反馈兼容逻辑。
 
-单帧 UDP 失败只触发媒体速率控制，不重建健康的 TCP 控制连接。只有 WebSocket 心跳失败、连接关闭、UDP socket 发送错误，或设备明确报告 `stream_stopped(reason="frame_timeout")` 时才重新协商会话。未提供新流控能力的旧固件仍以 `submitted_frames` 判断媒体存活并保留原兼容恢复路径。
+单帧反馈失败或本地 pacing 超过 240 ms 只触发丢帧和媒体参数调整，不重建健康的 TCP 控制连接。只有 WebSocket 心跳失败、连接关闭、UDP socket 发送错误，或设备明确报告 `stream_stopped(reason="frame_timeout")` 时才重新协商会话；事件日志中的 `Reconnecting control channel after ...` 会保留本次重连的原始原因。未提供新流控能力的旧固件仍以 `submitted_frames` 判断媒体存活并保留原兼容恢复路径。
 
 WebSocket 控制连接保持非阻塞：
 
@@ -300,6 +300,7 @@ threshold_ms = floor(1000 / fps * 0.9)
 | `Capture` 很高 | 停止并重新建立 Portal 共享；超过 500 ms 优先检查采集端 |
 | `Encode` 很高 | 查看 `JPEG` 的编码次数；变化帧通常为 `1x`，静态缓存重放不显示次数，持续多次表示内容在帧上限附近波动 |
 | `Send` 很高 | UDP 大帧需要分片 pacing；需要画质时改用 TCP，需要低延迟时降低质量或 FPS |
+| UDP 反复显示 `STREAM TIMEOUT` / 重连 | 查看 `Reconnecting control channel after ...` 的原因；若只有 `UDP frame exceeded the 240 ms send budget`，确认使用包含动态线速分片预算的新客户端 |
 | Linux CPU 超过 100% | 先用 `npm run tauri:dev:release` 排除调试构建开销，再查看终端 `PipeWire capture stats` 的回调率、转换率和耗时 |
 | `Scale` 很低、细字偏软 | 使用区域投屏或提高来源界面缩放，减少整屏强缩小 |
 | `Device` 很高 | 降低 FPS/质量；检查设备 JPEG 解码与显示后端指标 |

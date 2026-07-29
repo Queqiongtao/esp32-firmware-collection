@@ -366,6 +366,7 @@ const MAX_TARGET_PIXELS: u64 = 8_294_400;
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const UDP_FRAGMENTS_PER_TICK: usize = 2;
 const UDP_FRAME_SEND_LIMIT: Duration = Duration::from_millis(240);
+const UDP_PACING_WINDOW: Duration = Duration::from_millis(220);
 const UDP_INITIAL_RATE_BPS: u64 = 8_000_000;
 const UDP_MIN_RATE_BPS: u64 = 6_000_000;
 const UDP_MAX_RATE_BPS: u64 = 20_000_000;
@@ -451,6 +452,57 @@ struct UdpLinkController {
     last_budget_increase: Instant,
 }
 
+enum VideoSendError {
+    Transport(String),
+    BudgetExceeded(String),
+    InvalidFrame(String),
+}
+
+impl VideoSendError {
+    fn should_reconnect_control(&self) -> bool {
+        matches!(self, Self::Transport(_))
+    }
+}
+
+impl std::fmt::Display for VideoSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport(message)
+            | Self::BudgetExceeded(message)
+            | Self::InvalidFrame(message) => formatter.write_str(message),
+        }
+    }
+}
+
+fn udp_pacing_fragment_budget(
+    rate_bps: u64,
+    max_payload: usize,
+    fec: bool,
+    max_fragments: usize,
+) -> usize {
+    let rate_bps = rate_bps.clamp(UDP_MIN_RATE_BPS, UDP_MAX_RATE_BPS);
+    let wire_budget = (u128::from(rate_bps) * UDP_PACING_WINDOW.as_nanos() / 8_000_000_000)
+        .min(usize::MAX as u128) as usize;
+    (1..=max_fragments)
+        .take_while(|data_fragments| {
+            let fec_fragments = if fec {
+                data_fragments.div_ceil(protocol::UDP_FEC_DATA_FRAGMENTS_PER_GROUP)
+            } else {
+                0
+            };
+            (data_fragments + fec_fragments).saturating_mul(protocol::UDP_HEADER_LEN + max_payload)
+                <= wire_budget
+        })
+        .last()
+        .unwrap_or(1)
+}
+
+fn udp_pacing_delay(paced_bytes: u64, rate_bps: u64, elapsed: Duration) -> Duration {
+    let rate_bps = rate_bps.clamp(UDP_MIN_RATE_BPS, UDP_MAX_RATE_BPS);
+    let pacing_ns = paced_bytes.saturating_mul(8_000_000_000).div_ceil(rate_bps);
+    Duration::from_nanos(pacing_ns).saturating_sub(elapsed)
+}
+
 impl UdpLinkController {
     fn new(sender: &VideoSender, target: &StreamTarget, requested_fps: u8) -> Option<Self> {
         let VideoSender::Udp { parameters, .. } = sender else {
@@ -502,10 +554,20 @@ impl UdpLinkController {
     }
 
     fn max_jpeg_bytes(&self, target: &StreamTarget) -> usize {
+        let fragment_budget = self.effective_fragment_budget();
         target
             .max_frame_bytes
-            .min(self.fragment_budget * self.max_payload)
+            .min(fragment_budget * self.max_payload)
             .saturating_sub(protocol::HEADER_LEN)
+    }
+
+    fn effective_fragment_budget(&self) -> usize {
+        self.fragment_budget.min(udp_pacing_fragment_budget(
+            self.rate_bps,
+            self.max_payload,
+            self.adaptive,
+            self.max_fragments,
+        ))
     }
 
     fn record_encoded_frame(&mut self, frame_bytes: usize) {
@@ -593,6 +655,13 @@ impl UdpLinkController {
         {
             self.fragment_budget = (self.fragment_budget * 85 / 100).max(32);
         }
+        self.last_congestion = now;
+        self.stable_since = now;
+    }
+
+    fn record_send_overrun(&mut self) {
+        let now = Instant::now();
+        self.fps_cap = (self.fps_cap.saturating_mul(4) / 5).max(5);
         self.last_congestion = now;
         self.stable_since = now;
     }
@@ -1802,7 +1871,7 @@ fn reconnect_udp_control(
             app,
             "reconnecting",
             format!(
-                "Reconnecting control channel ({}/{})",
+                "Reconnecting control channel after {reason} ({}/{})",
                 index + 1,
                 CONTROL_RECONNECT_DELAYS.len()
             ),
@@ -2196,11 +2265,11 @@ fn send_video_frame(
     frame: Vec<u8>,
     sequence: u32,
     udp_rate_bps: Option<u64>,
-) -> Result<(), String> {
+) -> Result<(), VideoSendError> {
     match sender {
         VideoSender::Tcp => socket
             .send(Message::Binary(frame.into()))
-            .map_err(|error| format!("WebSocket send failed: {error}")),
+            .map_err(|error| VideoSendError::Transport(format!("WebSocket send failed: {error}"))),
         VideoSender::Udp {
             socket: udp,
             parameters,
@@ -2215,33 +2284,42 @@ fn send_video_frame(
                 sequence,
                 parameters.max_payload,
                 parameters.fec_enabled(),
-            )?;
+            )
+            .map_err(VideoSendError::InvalidFrame)?;
             let fragment_count = fragments.len();
             let rate_bps = udp_rate_bps
                 .unwrap_or(UDP_INITIAL_RATE_BPS)
                 .clamp(UDP_MIN_RATE_BPS, UDP_MAX_RATE_BPS);
-            let mut burst_bytes = 0_u64;
+            let mut paced_bytes = 0_u64;
             for (index, datagram) in fragments.into_iter().enumerate() {
-                let sent = udp
-                    .send(&datagram)
-                    .map_err(|error| format!("UDP send failed: {error}"))?;
+                let sent = udp.send(&datagram).map_err(|error| {
+                    VideoSendError::Transport(format!("UDP send failed: {error}"))
+                })?;
                 if sent != datagram.len() {
-                    return Err(format!(
+                    return Err(VideoSendError::Transport(format!(
                         "UDP send was truncated: {sent} of {} bytes",
                         datagram.len()
-                    ));
+                    )));
                 }
                 *sent_packets += 1;
                 *sent_bytes += sent as u64;
-                burst_bytes += sent as u64;
+                paced_bytes += sent as u64;
                 if index > 0 && started.elapsed() > UDP_FRAME_SEND_LIMIT {
-                    return Err("UDP frame exceeded the 240 ms send budget".to_string());
+                    return Err(VideoSendError::BudgetExceeded(
+                        "UDP frame exceeded the 240 ms send budget".to_string(),
+                    ));
                 }
                 if index + 1 < fragment_count && (index + 1) % UDP_FRAGMENTS_PER_TICK == 0 {
-                    let pacing_ns = burst_bytes.saturating_mul(8_000_000_000).div_ceil(rate_bps);
-                    thread::sleep(Duration::from_nanos(pacing_ns));
-                    burst_bytes = 0;
+                    let delay = udp_pacing_delay(paced_bytes, rate_bps, started.elapsed());
+                    if !delay.is_zero() {
+                        thread::sleep(delay);
+                    }
                 }
+            }
+            if started.elapsed() > UDP_FRAME_SEND_LIMIT {
+                return Err(VideoSendError::BudgetExceeded(
+                    "UDP frame exceeded the 240 ms send budget".to_string(),
+                ));
             }
             Ok(())
         }
@@ -2552,7 +2630,7 @@ fn run_stream(
             device_replaced_frames,
             udp_fragment_budget: udp_link
                 .as_ref()
-                .map_or(0, |link| link.fragment_budget as u16),
+                .map_or(0, |link| link.effective_fragment_budget() as u16),
             udp_rate_kbps: udp_link
                 .as_ref()
                 .map_or(0, |link| (link.rate_bps / 1000) as u32),
@@ -2797,12 +2875,30 @@ fn run_stream(
             sequence,
             udp_link.as_ref().map(|link| link.rate_bps),
         ) {
-            if matches!(sender, VideoSender::Udp { .. }) {
+            if matches!(&error, VideoSendError::BudgetExceeded(_)) {
+                dropped_frames += 1;
+                if let Some(link) = udp_link.as_mut() {
+                    link.record_send_overrun();
+                }
+                last_fingerprint = last_fingerprint.wrapping_add(1);
+                emit(
+                    &app,
+                    "dropping",
+                    error.to_string(),
+                    0,
+                    jpeg_bytes,
+                    dropped_frames,
+                    video_transport,
+                );
+                continue;
+            }
+            if error.should_reconnect_control() && matches!(sender, VideoSender::Udp { .. }) {
+                let reason = error.to_string();
                 match reconnect_udp_control(
                     &app,
                     &config,
                     &stop,
-                    &error,
+                    &reason,
                     dropped_frames,
                     &target,
                     touch_descriptor,
@@ -2834,7 +2930,7 @@ fn run_stream(
             emit(
                 &app,
                 "error",
-                error,
+                error.to_string(),
                 0,
                 jpeg_bytes,
                 dropped_frames,
@@ -2915,7 +3011,7 @@ fn run_stream(
                 device_replaced_frames,
                 udp_fragment_budget: udp_link
                     .as_ref()
-                    .map_or(0, |link| link.fragment_budget as u16),
+                    .map_or(0, |link| link.effective_fragment_budget() as u16),
                 udp_fec_recovered_fragments: udp_link
                     .as_ref()
                     .map_or(0, |link| link.previous_recovered),
@@ -3403,11 +3499,12 @@ mod tests {
         active_stream_error, base64_encode, build_frame, encode_jpeg, encode_jpeg_at_quality,
         ensure_reconnect_target, ensure_reconnect_touch, ensure_status_dimensions,
         is_stream_frame_timeout, parse_http_response, replay_frame, static_color_bars,
-        validate_region, validate_stream_target, validate_touch_descriptor, AdaptiveJpegEncoder,
-        CaptureRegionConfig, ControlReply, DisplayOrientation, FrameMetrics, ProjectionMode,
-        StreamConfig, StreamEvent, StreamTarget, UdpFeedback, UdpLinkController, UdpParameters,
-        UDP_INITIAL_RATE_BPS, UDP_LINK_EVALUATION_INTERVAL, UDP_LINK_RECOVERY_INTERVAL,
-        UDP_LINK_STALL_TIMEOUT, UDP_MIN_RATE_BPS,
+        udp_pacing_delay, udp_pacing_fragment_budget, validate_region, validate_stream_target,
+        validate_touch_descriptor, AdaptiveJpegEncoder, CaptureRegionConfig, ControlReply,
+        DisplayOrientation, FrameMetrics, ProjectionMode, StreamConfig, StreamEvent, StreamTarget,
+        UdpFeedback, UdpLinkController, UdpParameters, VideoSendError, UDP_INITIAL_RATE_BPS,
+        UDP_LINK_EVALUATION_INTERVAL, UDP_LINK_RECOVERY_INTERVAL, UDP_LINK_STALL_TIMEOUT,
+        UDP_MAX_RATE_BPS, UDP_MIN_RATE_BPS,
     };
     use crate::{protocol, touch};
 
@@ -3955,6 +4052,64 @@ mod tests {
         link.record_failure();
         link.record_failure();
         assert_eq!(link.fragment_budget, original_budget * 85 / 100);
+    }
+
+    #[test]
+    fn udp_pacing_budget_accounts_for_fec_at_each_supported_rate() {
+        assert_eq!(
+            udp_pacing_fragment_budget(UDP_MIN_RATE_BPS, 1200, true, 128),
+            118
+        );
+        assert_eq!(
+            udp_pacing_fragment_budget(UDP_INITIAL_RATE_BPS, 1200, true, 128),
+            128
+        );
+        assert_eq!(
+            udp_pacing_fragment_budget(UDP_MAX_RATE_BPS, 1200, true, 128),
+            128
+        );
+        assert_eq!(
+            udp_pacing_fragment_budget(UDP_MIN_RATE_BPS, 1200, false, 128),
+            128
+        );
+    }
+
+    #[test]
+    fn udp_pacing_delay_targets_cumulative_wire_time() {
+        assert_eq!(
+            udp_pacing_delay(1_200, UDP_INITIAL_RATE_BPS, Duration::from_micros(200)),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            udp_pacing_delay(2_400, UDP_INITIAL_RATE_BPS, Duration::from_micros(2_100)),
+            Duration::from_micros(300)
+        );
+        assert!(udp_pacing_delay(2_400, UDP_INITIAL_RATE_BPS, Duration::from_millis(3)).is_zero());
+    }
+
+    #[test]
+    fn udp_effective_budget_shrinks_before_encoding_at_minimum_rate() {
+        let mut link = test_udp_link_controller();
+        link.closed_loop = true;
+        link.fragment_budget = 128;
+        link.max_fragments = 128;
+        link.rate_bps = UDP_MIN_RATE_BPS;
+        assert_eq!(link.effective_fragment_budget(), 118);
+        assert_eq!(
+            link.max_jpeg_bytes(&StreamTarget {
+                width: 1024,
+                height: 600,
+                max_frame_bytes: 153_600,
+            }),
+            141_576
+        );
+    }
+
+    #[test]
+    fn only_transport_send_errors_reconnect_control() {
+        assert!(VideoSendError::Transport("socket closed".into()).should_reconnect_control());
+        assert!(!VideoSendError::BudgetExceeded("pacing overrun".into()).should_reconnect_control());
+        assert!(!VideoSendError::InvalidFrame("invalid frame".into()).should_reconnect_control());
     }
 
     fn hello_reply(width: u16, height: u16, max_frame_bytes: usize) -> ControlReply {

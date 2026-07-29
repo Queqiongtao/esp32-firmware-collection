@@ -189,7 +189,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 发送端按完整 `CDP1` 字节序列顺序切分，`fragment_offset` 必须为分片序号乘以协商的 `max_payload`。协商 `xor_interleaved` 后，发送端令校验组数为 `ceil(fragment_count / 8)`，数据分片 `i` 属于组 `i % group_count`；每组校验载荷是组内数据补零到 `max_payload` 后的逐字节 XOR。FEC 分片使用组索引作为 `fragment_index`、保持原数据 `fragment_count`，`fragment_offset=0`、`payload_length=max_payload`，并在所有数据分片之后发送。每组丢失不超过一个数据分片时设备可恢复；同组多片丢失仍丢弃整帧。
 
-桌面客户端采用最多 2 个分片的小突发和 6～20 Mbit/s 令牌桶 pacing，初始为 8 Mbit/s；单帧发送预算为 240 ms。支持 `latest_frame_ack` 时同一时刻最多一帧在途，超过反馈期限只放弃该帧并发送最新画面，不重建仍健康的 TCP 控制连接。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃。S3/P4 UDP 接收邮箱默认分别为 48/64 包。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的协商上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；PC 可以根据反馈采用更低的运行时分片预算。P4 的 TCP 完整帧上限为 `393240` 字节。
+桌面客户端采用最多 2 个分片的小突发和 6～20 Mbit/s pacing，初始为 8 Mbit/s；各突发按本帧累计线速对应的绝对时间发送，避免逐次休眠误差累积。单帧硬发送预算为 240 ms，编码预算按当前速率、`CDU1` 头和 FEC 开销预留 20 ms 调度余量；例如 `max_payload=1200`、交错 XOR FEC、6 Mbit/s 时最多使用 118 个数据分片。支持 `latest_frame_ack` 时同一时刻最多一帧在途，超过反馈期限或本地发送预算只放弃该帧并发送最新画面，不重建仍健康的 TCP 控制连接。设备只保留一帧重组缓冲：新帧到来时旧的不完整帧会被替换；250 ms 未收齐且无法通过 FEC 恢复时丢弃。S3/P4 UDP 接收邮箱默认分别为 48/64 包。完整帧仍必须通过 `CDP1` CRC 校验。默认 `max_payload=1200` 时，UDP `hello_ack.max_frame_bytes` 的协商上限为 `153600` 字节，扣除 `CDP1` 头后的 JPEG 上限为 `153576` 字节；PC 可以根据线速和反馈采用更低的运行时分片预算。P4 的 TCP 完整帧上限为 `393240` 字节。
 
 设备首先尝试从 TCP 控制连接取得对端 IPv4，并将 UDP 来源限制为该地址。某些 ESP-IDF WebSocket 场景下该地址可能不可用或为 `0.0.0.0`；此时设备会接受第一个已通过 `CDU1` 头、会话 ID、会话 token、分片和长度校验的 UDP 包，并将其来源 IPv4 绑定为本会话地址。后续来自其他 IPv4 的 UDP 包会以 `source_ip` 拒绝。PC 客户端必须将 UDP socket 绑定到控制连接的本机 IPv4。
 
@@ -197,7 +197,7 @@ TCP 模式中，一个 WebSocket 二进制消息恰好是一帧完整 `CDP1`。U
 
 画面静止、Portal 暂时未提供新图像或 UDP 运行时预算无法容纳当前变化帧时，PC 缓存最后一个成功编码的 JPEG，并以 1 FPS 重复发送。每个保活帧使用新的 `CDP1.sequence` 和对应新的 `CDU1.frame_sequence`，JPEG payload 与 CRC 保持不变；画面变化后立即恢复用户设置的实时 FPS。UDP 弱网应急编码允许实际 JPEG 质量低于用户可选下限 30，最低为 10，但不修改持久化设置。设备将缓存保活帧视为普通视频帧，成功提交后同样刷新无帧超时计时。`SESSION EXPIRED` 仅表示 UDP 媒体暂停，设备保留控制会话、UDP session/token 和来源 IP；收到同一认证 session 的下一包时恢复接收。`stop_stream`、WebSocket 关闭或无帧超时（默认 10 秒）释放会话；释放后设备回到主信息界面。
 
-控制连接意外断开时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height`、有效 `max_frame_bytes` 和可选 `touch` 描述必须与原会话一致；尺寸变化、触摸能力丢失或触摸坐标空间变化时，PC 结束当前流，用户重新启动后再建立对应采集和输入管线。
+控制连接意外断开、心跳超时、UDP socket 发送错误或设备报告 `stream_stopped(reason="frame_timeout")` 时，PC 最多重连 5 次，退避为 1、2、4、5、5 秒；本地 pacing 超出单帧预算不属于控制连接故障。设备仅允许携带有效配对码且 TCP 来源 IPv4 与当前会话相同的新 WebSocket 替换旧会话；来自不同 IPv4 的连接仍得到 `device_busy`。替换会释放旧显示管线占用，并为新会话生成新的 UDP 参数。重连后的 `width`、`height`、有效 `max_frame_bytes` 和可选 `touch` 描述必须与原会话一致；尺寸变化、触摸能力丢失或触摸坐标空间变化时，PC 结束当前流，用户重新启动后再建立对应采集和输入管线。
 
 ## 最新帧策略与 `frame_presented`
 
