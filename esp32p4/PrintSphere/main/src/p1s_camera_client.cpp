@@ -32,8 +32,45 @@ constexpr size_t kImagePersistentReserveBytes = 20U * 1024U;
 constexpr int64_t kAutoRefreshIntervalUs = 1500000;
 constexpr int64_t kTlsReadDeadlineUs = 4000000;
 constexpr int64_t kTlsWriteDeadlineUs = 2000000;
-constexpr uint16_t kTargetWidth = 400;
-constexpr uint16_t kTargetHeight = 224;
+constexpr uint16_t kCameraViewportWidth = 1024;
+constexpr uint16_t kCameraViewportHeight = 576;
+
+struct DecodeSize {
+  uint16_t width;
+  uint16_t height;
+};
+
+constexpr uint16_t align_down_to_8(uint32_t value) {
+  return static_cast<uint16_t>(value & ~7U);
+}
+
+constexpr DecodeSize fit_decode_size(uint16_t source_width, uint16_t source_height,
+                                     uint16_t max_width, uint16_t max_height) {
+  if (source_width == 0U || source_height == 0U || max_width == 0U || max_height == 0U) {
+    return {0U, 0U};
+  }
+  if (source_width <= max_width && source_height <= max_height) {
+    return {source_width, source_height};
+  }
+
+  uint32_t width = max_width;
+  uint32_t height =
+      (static_cast<uint32_t>(max_width) * source_height) / source_width;
+  if (height > max_height) {
+    height = max_height;
+    width = (static_cast<uint32_t>(max_height) * source_width) / source_height;
+  }
+  return {align_down_to_8(width), align_down_to_8(height)};
+}
+
+static_assert(fit_decode_size(1280, 720, 1024, 576).width == 1024 &&
+              fit_decode_size(1280, 720, 1024, 576).height == 576);
+static_assert(fit_decode_size(1920, 1080, 1024, 576).width == 1024 &&
+              fit_decode_size(1920, 1080, 1024, 576).height == 576);
+static_assert(fit_decode_size(1600, 1200, 1024, 576).width == 768 &&
+              fit_decode_size(1600, 1200, 1024, 576).height == 576);
+static_assert(fit_decode_size(640, 360, 1024, 576).width == 640 &&
+              fit_decode_size(640, 360, 1024, 576).height == 360);
 
 bool has_frame_data(const std::shared_ptr<std::vector<uint8_t>>& frame_blob) {
   return frame_blob && !frame_blob->empty();
@@ -343,70 +380,127 @@ bool P1sCameraClient::decode_frame_rgb565(const std::shared_ptr<std::vector<uint
     return false;
   }
 
-  jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-  config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-  config.scale.width = kTargetWidth;
-  config.scale.height = kTargetHeight;
-
-  jpeg_dec_handle_t decoder = nullptr;
-  jpeg_dec_io_t io = {};
-  jpeg_dec_header_info_t header = {};
-
-  if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK || decoder == nullptr) {
-    ESP_LOGW(kTag, "JPEG decoder open failed");
+  jpeg_dec_config_t probe_config = DEFAULT_JPEG_DEC_CONFIG();
+  probe_config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+  jpeg_dec_handle_t probe_decoder = nullptr;
+  jpeg_dec_io_t probe_io = {};
+  jpeg_dec_header_info_t source = {};
+  if (jpeg_dec_open(&probe_config, &probe_decoder) != JPEG_ERR_OK || probe_decoder == nullptr) {
+    ESP_LOGW(kTag, "JPEG probe decoder open failed");
+    return false;
+  }
+  probe_io.inbuf = const_cast<uint8_t*>(jpeg_blob->data());
+  probe_io.inbuf_len = static_cast<int>(jpeg_blob->size());
+  const bool source_ok =
+      jpeg_dec_parse_header(probe_decoder, &probe_io, &source) == JPEG_ERR_OK &&
+      source.width > 0U && source.height > 0U;
+  jpeg_dec_close(probe_decoder);
+  if (!source_ok) {
+    ESP_LOGW(kTag, "JPEG source header parse failed");
     return false;
   }
 
-  io.inbuf = const_cast<uint8_t*>(jpeg_blob->data());
-  io.inbuf_len = static_cast<int>(jpeg_blob->size());
+  const std::array<DecodeSize, 3> candidates = {
+      fit_decode_size(source.width, source.height, kCameraViewportWidth, kCameraViewportHeight),
+      fit_decode_size(source.width, source.height, 800, 448),
+      fit_decode_size(source.width, source.height, 400, 224),
+  };
+  const int64_t decode_started_us = esp_timer_get_time();
+  DecodeSize previous = {0U, 0U};
 
-  bool ok = false;
-  void* aligned_out = nullptr;
-  do {
-    if (jpeg_dec_parse_header(decoder, &io, &header) != JPEG_ERR_OK) {
-      ESP_LOGW(kTag, "JPEG header parse failed");
-      break;
+  for (size_t attempt = 0; attempt < candidates.size(); ++attempt) {
+    const DecodeSize target = candidates[attempt];
+    if (target.width == 0U || target.height == 0U ||
+        (target.width == previous.width && target.height == previous.height)) {
+      continue;
+    }
+    previous = target;
+
+    jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
+    config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
+    const bool scaled = target.width != source.width || target.height != source.height;
+    if (scaled) {
+      config.scale.width = target.width;
+      config.scale.height = target.height;
     }
 
+    jpeg_dec_handle_t decoder = nullptr;
+    jpeg_dec_io_t io = {};
+    jpeg_dec_header_info_t parsed_header = {};
+    if (jpeg_dec_open(&config, &decoder) != JPEG_ERR_OK || decoder == nullptr) {
+      ESP_LOGW(kTag, "JPEG decoder open failed for %ux%u",
+               static_cast<unsigned>(target.width), static_cast<unsigned>(target.height));
+      continue;
+    }
+    io.inbuf = const_cast<uint8_t*>(jpeg_blob->data());
+    io.inbuf_len = static_cast<int>(jpeg_blob->size());
+
+    bool decoded_ok = false;
+    void* aligned_out = nullptr;
     int out_len = 0;
-    if (jpeg_dec_get_outbuf_len(decoder, &out_len) != JPEG_ERR_OK || out_len <= 0) {
-      ESP_LOGW(kTag, "JPEG output length query failed");
-      break;
+    do {
+      if (jpeg_dec_parse_header(decoder, &io, &parsed_header) != JPEG_ERR_OK) {
+        ESP_LOGW(kTag, "JPEG header parse failed for %ux%u",
+                 static_cast<unsigned>(target.width), static_cast<unsigned>(target.height));
+        break;
+      }
+      if (jpeg_dec_get_outbuf_len(decoder, &out_len) != JPEG_ERR_OK || out_len <= 0) {
+        ESP_LOGW(kTag, "JPEG output length query failed for %ux%u",
+                 static_cast<unsigned>(target.width), static_cast<unsigned>(target.height));
+        break;
+      }
+
+      aligned_out = jpeg_calloc_align(static_cast<size_t>(out_len), 16);
+      if (aligned_out == nullptr) {
+        ESP_LOGW(kTag, "JPEG buffer allocation failed for %ux%u (%d bytes)",
+                 static_cast<unsigned>(target.width), static_cast<unsigned>(target.height),
+                 out_len);
+        log_heap_diag("camera jpeg aligned allocation failed");
+        break;
+      }
+      log_ptr_diag("camera jpeg aligned decode buffer", aligned_out,
+                   static_cast<size_t>(out_len));
+
+      io.outbuf = static_cast<uint8_t*>(aligned_out);
+      if (jpeg_dec_process(decoder, &io) != JPEG_ERR_OK) {
+        ESP_LOGW(kTag, "JPEG decode failed for %ux%u", static_cast<unsigned>(target.width),
+                 static_cast<unsigned>(target.height));
+        break;
+      }
+
+      auto decoded = std::make_shared<std::vector<uint8_t>>();
+      decoded->reserve(std::max(static_cast<size_t>(out_len), kImagePersistentReserveBytes));
+      decoded->resize(static_cast<size_t>(out_len));
+      std::memcpy(decoded->data(), aligned_out, static_cast<size_t>(out_len));
+      log_blob_diag("camera rgb565 decoded buffer", decoded);
+      *out_blob = std::move(decoded);
+      *out_width = scaled ? target.width : parsed_header.width;
+      *out_height = scaled ? target.height : parsed_header.height;
+      decoded_ok = true;
+    } while (false);
+
+    if (aligned_out != nullptr) {
+      jpeg_free_align(aligned_out);
     }
-
-    aligned_out = jpeg_calloc_align(static_cast<size_t>(out_len), 16);
-    if (aligned_out == nullptr) {
-      ESP_LOGW(kTag, "JPEG aligned buffer allocation failed");
-      log_heap_diag("camera jpeg aligned allocation failed");
-      break;
-    }
-    log_ptr_diag("camera jpeg aligned decode buffer", aligned_out,
-                 static_cast<size_t>(out_len));
-
-    io.outbuf = static_cast<uint8_t*>(aligned_out);
-    if (jpeg_dec_process(decoder, &io) != JPEG_ERR_OK) {
-      ESP_LOGW(kTag, "JPEG decode failed");
-      break;
-    }
-
-    auto decoded = std::make_shared<std::vector<uint8_t>>();
-    decoded->reserve(std::max(static_cast<size_t>(out_len), kImagePersistentReserveBytes));
-    decoded->resize(static_cast<size_t>(out_len));
-    std::memcpy(decoded->data(), aligned_out, static_cast<size_t>(out_len));
-    log_blob_diag("camera rgb565 decoded buffer", decoded);
-    *out_blob = std::move(decoded);
-    *out_width = config.scale.width > 0U ? config.scale.width : header.width;
-    *out_height = config.scale.height > 0U ? config.scale.height : header.height;
-    ok = true;
-  } while (false);
-
-  if (aligned_out != nullptr) {
-    jpeg_free_align(aligned_out);
-  }
-  if (decoder != nullptr) {
     jpeg_dec_close(decoder);
+
+    if (decoded_ok) {
+      const uint64_t elapsed_ms =
+          static_cast<uint64_t>((esp_timer_get_time() - decode_started_us) / 1000);
+      ESP_LOGI(kTag,
+               "Camera JPEG decoded: source=%ux%u output=%ux%u jpeg=%u rgb565=%d "
+               "elapsed=%llums fallback=%u",
+               static_cast<unsigned>(source.width), static_cast<unsigned>(source.height),
+               static_cast<unsigned>(*out_width), static_cast<unsigned>(*out_height),
+               static_cast<unsigned>(jpeg_blob->size()), out_len,
+               static_cast<unsigned long long>(elapsed_ms), static_cast<unsigned>(attempt));
+      return true;
+    }
   }
-  return ok;
+
+  ESP_LOGW(kTag, "JPEG decode failed at all quality levels (source=%ux%u)",
+           static_cast<unsigned>(source.width), static_cast<unsigned>(source.height));
+  return false;
 }
 
 bool P1sCameraClient::fetch_frame_once(const PrinterConnection& connection) {

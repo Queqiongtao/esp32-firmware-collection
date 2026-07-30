@@ -2,7 +2,7 @@
 
 ## ESP32-P4 到 ESP32-C6
 
-P4 通过 SDIO Slot 1（4-bit、25 MHz）运行 ESP-Hosted 2.12.8，C6 提供 Wi-Fi 数据面。BSP 在 `esp_hosted_connect_to_slave()` 前注册 Hosted 事件，并等待最多 5 秒的 `TRANSPORT_UP`；`TRANSPORT_FAILURE`、`TRANSPORT_DOWN` 或超时会阻止后续 Wi-Fi 初始化。失败日志记录等待耗时、最后事件、是否收到 CP_INIT 和 transport ready 状态。
+P4 通过 SDIO Slot 1（4-bit、25 MHz、TX/RX 队列各 20）运行 ESP-Hosted 2.12.8，C6 提供 Wi-Fi 数据面。BSP 在 `esp_hosted_connect_to_slave()` 前注册 Hosted 事件，并等待最多 5 秒的 `TRANSPORT_UP`；`TRANSPORT_FAILURE`、`TRANSPORT_DOWN` 或超时会阻止后续 Wi-Fi 初始化。失败日志记录等待耗时、最后事件、是否收到 CP_INIT 和 transport ready 状态。本地 MQTT 将 TCP 建连超时与 TLS 证书错误分开记录；连续失败按 1、2、4、8 次幂频率输出 STA IPv4、掩码、网关和目标端点，且重连看门狗晚于 MQTT 自身的 20 秒网络超时，避免同一次失败重复调度客户端重建。
 
 ## 配网与 Web Config
 
@@ -27,7 +27,7 @@ P4 通过 SDIO Slot 1（4-bit、25 MHz）运行 ESP-Hosted 2.12.8，C6 提供 Wi
 - 证书：固件内嵌的 Bambu CA bundle 仅用于局域网打印机 MQTT/TLS，不作为 Bambu Cloud HTTPS 的公共信任根
 - Topic：`device/<serial>/report` 与 `device/<serial>/request`
 - 数据：JSON 状态、`pushall`/`get_version` 请求、灯光及可选打印控制命令
-- 相机：支持的 A1/P1 系列通过 TLS 端口 `6000`，80 字节认证包，16 字节帧头，单帧上限 256 KiB；目标解码尺寸 400x224
+- 相机：支持的 A1/P1 系列通过 TLS 端口 `6000`，80 字节认证包，16 字节帧头，单帧上限 256 KiB；读取 JPEG 源尺寸后等比解码到不超过 1024x576 的 8 像素对齐尺寸，小分辨率源不放大，失败时降级到 800x448 或 400x224
 - RTSP：本工程不实现，因此 H2/X1/X2 等 RTSP 机型无实时相机页
 
 ## 状态融合

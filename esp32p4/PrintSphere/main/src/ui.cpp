@@ -63,13 +63,12 @@ constexpr int kPage2PreviewYOffset = 0;
 constexpr int kPage2TextXOffset = 260;
 constexpr int kPage2SubnoteWithImageY = 20;
 #endif
-constexpr int kPage3CameraWidth = 800;
-constexpr int kPage3CameraHeight = 450;
-constexpr int kPage3CameraYOffset = 10;
-constexpr int kPage3NoteWithImageY = 264;
-constexpr int kPage3SubnoteWithImageY = 264;
-// Status text sits above the 800x450 camera viewport; the layer text sits below.
-constexpr int kPage3StatusAboveImageY = -264;
+constexpr int kPage3CameraWidth = 1024;
+constexpr int kPage3CameraHeight = 576;
+constexpr int kPage3CameraYOffset = 0;
+constexpr int kPage3OverlayWidth = 1024;
+constexpr int kPage3StatusOverlayY = -252;
+constexpr int kPage3SubnoteOverlayY = 252;
 constexpr int kSwipeThresholdPx = 24;
 constexpr int kGestureAxisLockMarginPx = 16;
 constexpr int kBrightnessHorizontalTolerancePx = 18;
@@ -2111,10 +2110,29 @@ void Ui::apply_snapshot_locked(const PrinterSnapshot& snapshot, bool force_ring_
 
   if (camera_text_image_mode_ != has_camera_image) {
     if (has_camera_image) {
-      // Status note moves above the image; layer/subnote sits below.
-      lv_obj_align(page3_note_, LV_ALIGN_CENTER, 0, kPage3StatusAboveImageY);
-      lv_obj_align(page3_subnote_, LV_ALIGN_CENTER, 0, kPage3SubnoteWithImageY);
+      lv_obj_set_width(page3_note_, kPage3OverlayWidth);
+      lv_obj_set_width(page3_subnote_, kPage3OverlayWidth);
+      lv_label_set_long_mode(page3_note_, LV_LABEL_LONG_DOT);
+      lv_label_set_long_mode(page3_subnote_, LV_LABEL_LONG_DOT);
+      lv_obj_set_style_bg_color(page3_note_, lv_color_hex(0x000000), 0);
+      lv_obj_set_style_bg_color(page3_subnote_, lv_color_hex(0x000000), 0);
+      lv_obj_set_style_bg_opa(page3_note_, LV_OPA_60, 0);
+      lv_obj_set_style_bg_opa(page3_subnote_, LV_OPA_60, 0);
+      lv_obj_set_style_pad_hor(page3_note_, 20, 0);
+      lv_obj_set_style_pad_hor(page3_subnote_, 20, 0);
+      lv_obj_set_style_pad_ver(page3_note_, 6, 0);
+      lv_obj_set_style_pad_ver(page3_subnote_, 6, 0);
+      lv_obj_align(page3_note_, LV_ALIGN_CENTER, 0, kPage3StatusOverlayY);
+      lv_obj_align(page3_subnote_, LV_ALIGN_CENTER, 0, kPage3SubnoteOverlayY);
     } else {
+      lv_obj_set_width(page3_note_, 760);
+      lv_obj_set_width(page3_subnote_, 760);
+      lv_label_set_long_mode(page3_note_, LV_LABEL_LONG_WRAP);
+      lv_label_set_long_mode(page3_subnote_, LV_LABEL_LONG_WRAP);
+      lv_obj_set_style_bg_opa(page3_note_, LV_OPA_TRANSP, 0);
+      lv_obj_set_style_bg_opa(page3_subnote_, LV_OPA_TRANSP, 0);
+      lv_obj_set_style_pad_all(page3_note_, 0, 0);
+      lv_obj_set_style_pad_all(page3_subnote_, 0, 0);
       lv_obj_align(page3_note_, LV_ALIGN_CENTER, 0, 0);
       lv_obj_align(page3_subnote_, LV_ALIGN_CENTER, 0, 28);
     }

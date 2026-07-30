@@ -16,7 +16,9 @@
 #include "printsphere/status_resolver.hpp"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_random.h"
+#include "esp_tls_errors.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 
@@ -139,7 +141,9 @@ constexpr uint32_t kPeriodicPushallMs = 60000;
 // only if it still stays silent do we force a reconnect.
 constexpr uint32_t kNoDataProbeMs = 30000;
 constexpr uint32_t kNoDataReconnectMs = 15000;
-constexpr uint32_t kDisconnectedStallMs = 20000;
+// MQTT's TCP connect timeout is 20 s. Keep this watchdog comfortably later so
+// MQTT_EVENT_ERROR owns failed-connect accounting and schedules one rebuild.
+constexpr uint32_t kDisconnectedStallMs = 25000;
 constexpr uint32_t kRebuildDelayMs = 1500;
 constexpr size_t kMaxMqttPayloadBytes = 64U * 1024U;
 
@@ -584,6 +588,32 @@ void log_wifi_link_diagnostics(const char* context) {
            context != nullptr ? context : "MQTT", static_cast<int>(ap.rssi),
            wifi_rssi_quality_label(ap.rssi), static_cast<unsigned int>(ap.primary),
            wifi_second_channel_name(ap.second));
+}
+
+bool should_log_network_path_diagnostics(uint32_t failure_number) {
+  return failure_number != 0U && (failure_number & (failure_number - 1U)) == 0U;
+}
+
+void log_network_path_diagnostics(const char* host, uint16_t port, uint32_t failure_number,
+                                  const char* phase) {
+  log_wifi_link_diagnostics("MQTT error");
+
+  esp_netif_t* sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+  esp_netif_ip_info_t ip_info = {};
+  if (sta_netif == nullptr || esp_netif_get_ip_info(sta_netif, &ip_info) != ESP_OK) {
+    ESP_LOGW(kTag,
+             "MQTT network path: STA IPv4 unavailable target=%s:%u failure=%u phase=%s",
+             host != nullptr ? host : "-", static_cast<unsigned>(port),
+             static_cast<unsigned>(failure_number), phase != nullptr ? phase : "transport");
+    return;
+  }
+
+  ESP_LOGW(kTag,
+           "MQTT network path: ip=" IPSTR " netmask=" IPSTR " gateway=" IPSTR
+           " target=%s:%u failure=%u phase=%s",
+           IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw),
+           host != nullptr ? host : "-", static_cast<unsigned>(port),
+           static_cast<unsigned>(failure_number), phase != nullptr ? phase : "transport");
 }
 
 int json_int_local(const cJSON* object, const char* key, int fallback) {
@@ -1511,7 +1541,9 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
       store_runtime_state(std::move(runtime), true);
       ESP_LOGW(kTag, "MQTT disconnected (was_connected=%d connect_elapsed=%llums)",
                was_connected, static_cast<unsigned long long>(connect_elapsed_ms));
-      log_wifi_link_diagnostics("MQTT disconnected");
+      if (was_connected) {
+        log_wifi_link_diagnostics("MQTT disconnected");
+      }
       break;
     }
 
@@ -1581,7 +1613,6 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
       }
       watchdog_probe_tick_ = 0;
       log_heap_status("MQTT error");
-      log_wifi_link_diagnostics("MQTT error");
 
       // Determine whether this is a permanent auth error or a transient transport error.
       bool is_auth_error = false;
@@ -1593,6 +1624,21 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
           error != nullptr && error->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT;
       const int transport_sock_errno =
           is_transport_error ? error->esp_transport_sock_errno : 0;
+      const bool tcp_connect_timeout =
+          is_transport_error && error->esp_tls_last_esp_err == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT &&
+          error->esp_tls_stack_err == 0 && error->esp_tls_cert_verify_flags == 0;
+      std::string active_host;
+      uint16_t active_port = 0;
+      {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        active_host = active_connection_.host;
+        active_port = active_connection_.mqtt_port;
+      }
+      const uint32_t failure_number = consecutive_mqtt_errors_ + 1U;
+      if (should_log_network_path_diagnostics(failure_number)) {
+        log_network_path_diagnostics(active_host.c_str(), active_port, failure_number,
+                                     tcp_connect_timeout ? "tcp-connect" : "transport");
+      }
 
       if (is_auth_error) {
         // Auth errors: show immediately — user must fix credentials.
@@ -1644,11 +1690,6 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
         } else {
           ESP_LOGE(kTag, "MQTT event error without details");
         }
-        std::string active_host;
-        {
-          std::lock_guard<std::mutex> lock(config_mutex_);
-          active_host = active_connection_.host;
-        }
         LocalPrinterRuntimeState runtime = runtime_state_copy();
         if (!had_established_session && is_transport_error &&
             transport_sock_errno == ECONNREFUSED) {
@@ -1667,7 +1708,7 @@ void PrinterClient::handle_mqtt_event(esp_mqtt_event_handle_t event) {
           runtime.non_error_stop = false;
           runtime.show_stop_banner = false;
         } else if (!had_established_session && is_transport_error &&
-                   (transport_sock_errno == ETIMEDOUT ||
+                   (tcp_connect_timeout || transport_sock_errno == ETIMEDOUT ||
                     transport_sock_errno == EHOSTUNREACH ||
                     transport_sock_errno == ENETUNREACH)) {
           runtime.connection = PrinterConnectionState::kError;
