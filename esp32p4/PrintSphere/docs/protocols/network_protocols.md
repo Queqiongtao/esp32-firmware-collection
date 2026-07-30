@@ -18,12 +18,13 @@ P4 通过 SDIO Slot 1（4-bit、25 MHz）运行 ESP-Hosted 2.12.8，C6 提供 Wi
 - HTTPS：账户登录、2FA/验证码、绑定列表、偏好、任务和封面下载
 - MQTT/TLS：区域 broker 的 `8883` 端口，MQTT 3.1.1
 - Topic：`device/<serial>/report` 与 `device/<serial>/request`
-- 认证：Cloud access token；TLS 使用系统证书包或随业务固定的证书
+- 认证：Cloud access token；Cloud HTTPS 和 MQTT/TLS 使用 ESP-IDF 公共 CA bundle，并启用交叉签名证书链验证，以兼容服务端返回的 GlobalSign 等交叉签名链
 - 限制：Cloud API 属于外部服务，字段和认证流程可能变化，需保留失败退避
 
 ## 本地打印机
 
 - MQTT/TLS：打印机局域网接口，用户名默认 `bblp`，密码为 access code
+- 证书：固件内嵌的 Bambu CA bundle 仅用于局域网打印机 MQTT/TLS，不作为 Bambu Cloud HTTPS 的公共信任根
 - Topic：`device/<serial>/report` 与 `device/<serial>/request`
 - 数据：JSON 状态、`pushall`/`get_version` 请求、灯光及可选打印控制命令
 - 相机：支持的 A1/P1 系列通过 TLS 端口 `6000`，80 字节认证包，16 字节帧头，单帧上限 256 KiB；目标解码尺寸 400x224

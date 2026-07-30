@@ -9,6 +9,8 @@
 
 这些结果只证明编译、链接、静态分区容量和打包流程通过；产物位于被忽略的 `release/`，尚无本工程真机证据，不属于可发布版本。
 
+2026-07-30 针对 Bambu 中国区 Cloud 登录在 TLS 握手阶段出现 `No matching trusted root certificate found` 和 `mbedtls_ssl_handshake returned -0x3000` 完成修复。原工程与迁移工程内嵌的 4 个 Bambu 局域网 CA 文件及其 SHA-256 一致；Cloud 请求实际使用 ESP-IDF 公共 CA bundle。`api.bambulab.cn` 当日返回 `GlobalSign GCC R3 DV TLS CA 2020` 到 `GlobalSign Root CA - R3` 的交叉签名链，因此启用 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y`，未启用已弃用根证书或跳过 Cloud 证书校验。使用 ESP-IDF `v6.0.1` 执行 `./dev.sh build` 通过，生成配置同时启用 `CONFIG_MBEDTLS_X509_TRUSTED_CERT_CALLBACK=y`；应用镜像为 `0x330190` 字节，最小 5 MiB app 槽剩余 `0x1cfe70` 字节（36%）。本次仅完成编译验证，尚未烧录并复测 Cloud 登录，真机结论保持待验证。
+
 ## 构建门禁
 
 1. 在工程根执行 `./dev.sh build`，无 warning-as-error 或链接错误。
@@ -31,7 +33,7 @@
 | --- | --- | --- |
 | 配网 | USB 串行、Setup AP、家庭 Wi-Fi | 三路径可配置，重启后自动重连 |
 | Web Config | PIN、锁定、所有设置页 | 未授权被拒，设置持久化 |
-| Cloud | 登录、验证码/2FA、绑定、封面 | 状态持续更新，失败有退避 |
+| Cloud | 公共 CA/交叉签名 TLS、登录、验证码/2FA、绑定、封面 | TLS 握手无 `-0x3000`；状态持续更新，失败有退避 |
 | Local | MQTT TLS、pushall、断线重连 | 状态和命令闭环，无任务泄漏 |
 | Hybrid | Cloud/LAN 切换和断网 | 数据源切换无明显回退或假在线 |
 | AMS | 0/1/多 AMS、外置料盘、错误 | 四槽无裁切，状态对应正确 |
