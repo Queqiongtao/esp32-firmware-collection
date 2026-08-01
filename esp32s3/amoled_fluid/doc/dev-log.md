@@ -100,3 +100,16 @@
 - **修复**：`CONFIG_BLOCK_PHYSICS_IMU_INVERT_X=y` 追加到 `sdkconfig.defaults` 并同步生成后的 `sdkconfig`（同样需同步两处）
 - 构建验证：`./dev.sh build` 通过，`amoled_fluid.bin` 0x42670，无编译告警
 - 待办：真机复验四个倾斜方向均与滑动方向一致；随后调参与测量帧率/CPU/PSRAM
+
+## 2026-08-01（手感调优：下落提速 + 倾斜跟手）
+
+真机反馈：方块下落感觉很慢、不跟手。
+
+- **慢的原因**：1g 重力加速度仅 18（Q8.8，0.07 px/step²）起步加速度小；速度上限 1024（4 px/step ≈ 240 px/s）压住了终端下落速度，垂直跨屏约需 1.9s
+- **不跟手的原因**：IMU 低通 alpha=24（τ≈110ms），重力方向滞后于倾斜动作
+- **调优**：
+  - `GRAVITY_ACC_Q8` 18 -> 56（起步加速度约 3 倍，满倾终端速度 ~14 px/step）
+  - `MAX_VEL_Q8` 1024 -> 2048 并改为 Kconfig（8 px/step ≈ 480 px/s，垂直跨屏约 0.9s）
+  - `ACCEL_LP_ALPHA` 24 -> 64（τ≈40ms，倾斜响应明显跟手）
+- 构建验证：`./dev.sh build` 通过，`amoled_fluid.bin` 0x42670，无编译告警
+- 待办：真机复验手感，按喜好继续调 `GRAVITY_ACC_Q8` / `MAX_VEL_Q8` / `ACCEL_LP_ALPHA` / `DAMPING_Q8`；随后测量帧率/CPU/PSRAM

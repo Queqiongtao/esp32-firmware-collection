@@ -24,7 +24,6 @@ static const char *TAG = "block_physics";
 #define BLOCK_RGB565_WIRE(r, g, b)                                                                 \
     ((uint16_t)(((BLOCK_RGB565(r, g, b) & 0x00FFu) << 8) | ((BLOCK_RGB565(r, g, b) & 0xFF00u) >> 8)))
 
-#define BLOCK_MAX_VEL_Q8 1024          /* 速度上限（Q8.8，4 px/step） */
 #define BLOCK_POS_CORR_Q8 204          /* 每次迭代穿透修正比例（Q8.8，80%） */
 #define BLOCK_SHAKE_DECAY_Q8 250       /* 晃动能量每步衰减（Q8.8，97.7%） */
 #define BLOCK_IMU_TIMEOUT_US 500000    /* IMU 失联 0.5s 后回退默认重力 */
@@ -260,23 +259,23 @@ static void step_physics(block_physics_t *self)
         if (shake > (uint32_t)shake_thr) {
             const int32_t raw = (int32_t)(shake - (uint32_t)shake_thr);
             int32_t imp = (raw * shake_gain) >> 8;
-            if (imp > BLOCK_MAX_VEL_Q8 / 2) {
-                imp = BLOCK_MAX_VEL_Q8 / 2;
+            if (imp > CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8 / 2) {
+                imp = CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8 / 2;
             }
             b.vx += (int32_t)irand((uint32_t)(2 * imp + 1)) - imp;
             b.vy += (int32_t)irand((uint32_t)(2 * imp + 1)) - imp;
         }
         b.vx = (b.vx * damping) >> 8;
         b.vy = (b.vy * damping) >> 8;
-        if (b.vx > BLOCK_MAX_VEL_Q8) {
-            b.vx = BLOCK_MAX_VEL_Q8;
-        } else if (b.vx < -BLOCK_MAX_VEL_Q8) {
-            b.vx = -BLOCK_MAX_VEL_Q8;
+        if (b.vx > CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
+            b.vx = CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8;
+        } else if (b.vx < -CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
+            b.vx = -CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8;
         }
-        if (b.vy > BLOCK_MAX_VEL_Q8) {
-            b.vy = BLOCK_MAX_VEL_Q8;
-        } else if (b.vy < -BLOCK_MAX_VEL_Q8) {
-            b.vy = -BLOCK_MAX_VEL_Q8;
+        if (b.vy > CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
+            b.vy = CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8;
+        } else if (b.vy < -CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
+            b.vy = -CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8;
         }
         b.x += b.vx;
         b.y += b.vy;

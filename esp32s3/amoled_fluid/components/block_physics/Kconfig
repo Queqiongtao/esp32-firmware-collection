@@ -37,7 +37,7 @@ config BLOCK_PHYSICS_ITERATIONS
 
 config BLOCK_PHYSICS_GRAVITY_ACC_Q8
     int "Gravity acceleration at 1g (Q8.8 px/step^2)"
-    default 18
+    default 56
     range 4 120
 
 config BLOCK_PHYSICS_DAMPING_Q8
@@ -57,8 +57,13 @@ config BLOCK_PHYSICS_FRICTION_Q8
 
 config BLOCK_PHYSICS_ACCEL_LP_ALPHA
     int "IMU accel low-pass alpha (Q8.8)"
-    default 24
+    default 64
     range 1 255
+
+config BLOCK_PHYSICS_MAX_VEL_Q8
+    int "Maximum block velocity (Q8.8 px/step)"
+    default 2048
+    range 256 4096
 
 config BLOCK_PHYSICS_SHAKE_THRESHOLD
     int "Shake energy threshold (raw LSB)"

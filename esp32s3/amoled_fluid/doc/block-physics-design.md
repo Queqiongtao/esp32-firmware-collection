@@ -49,11 +49,12 @@
 | PHYSICS_HZ | 60 | 物理更新频率 |
 | RENDER_HZ | 30 | 渲染目标帧率 |
 | ITERATIONS | 3 | 每步碰撞迭代次数 |
-| GRAVITY_ACC_Q8 | 18 | 1g 重力加速度（Q8.8 px/step²） |
+| GRAVITY_ACC_Q8 | 56 | 1g 重力加速度（Q8.8 px/step²，真机调大改善下落速度） |
 | DAMPING_Q8 | 252 | 速度阻尼（Q8.8） |
 | RESTITUTION_Q8 | 32 | 反弹恢复系数（Q8.8） |
 | FRICTION_Q8 | 140 | 接触摩擦（Q8.8） |
-| ACCEL_LP_ALPHA | 24 | IMU 低通 alpha（Q8.8） |
+| ACCEL_LP_ALPHA | 64 | IMU 低通 alpha（Q8.8，调大提升倾斜跟手度） |
+| MAX_VEL_Q8 | 2048 | 方块最大速度（Q8.8 px/step，8 px/step ≈ 480 px/s） |
 | SHAKE_THRESHOLD | 6000 | 晃动能量阈值（原始 LSB） |
 | SHAKE_GAIN_Q8 | 10 | 晃动冲量增益（Q8.8） |
 | IMU_SWAP_XY / INVERT_X / INVERT_Y | y / y / n | 真机轴映射标定（SWAP_XY、INVERT_X 已按实测开启） |
