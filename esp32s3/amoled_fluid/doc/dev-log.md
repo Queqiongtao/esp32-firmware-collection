@@ -83,3 +83,12 @@
 - **文档**：README、doc 索引、display-pipeline、touch-input 同步；`fluid-effect-design.md` 替换为 `block-physics-design.md`
 - 构建验证：`./dev.sh build` 通过，无编译告警
 - 待办：真机标定 IMU 轴映射（Kconfig `IMU_SWAP_XY/INVERT_X/INVERT_Y`）、调参、测量帧率/CPU/PSRAM
+
+## 2026-08-01（真机标定：IMU 轴映射）
+
+真机反馈：方块沿重力方向的运动与设备实际倾斜方向相差 90°。
+
+- **根因**：QMI8658 的 X/Y 轴与屏幕的 X/Y 方向不对齐（传感器在 PCB 上相对屏幕旋转 90°），低通重力分量直接映射到屏幕坐标导致方向整体偏转 90°
+- **修复**：`CONFIG_BLOCK_PHYSICS_IMU_SWAP_XY=y` 写入 `sdkconfig.defaults` 并同步生成后的 `sdkconfig`（注意：既有 sdkconfig 中显式"未设置"会覆盖新默认，需同步修改两处）；重新构建后 `block_physics.cpp` 按交换后的轴编译
+- 构建验证：`./dev.sh build` 通过，`amoled_fluid.bin` 0x42670，无编译告警
+- 待办：真机复验倾斜/晃动方向；若某轴向仍反向，用 `INVERT_X` / `INVERT_Y` 修正；随后调参与测量帧率/CPU/PSRAM
