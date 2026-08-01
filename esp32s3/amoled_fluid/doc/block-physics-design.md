@@ -29,7 +29,7 @@
 ## IMU 输入管线（main 采样任务，100 Hz）
 
 - `board_imu_read` 原始 6 轴数据（QMI8658，±2g / ±2000dps，16384 LSB/g）注入 `block_physics_imu_update`
-- 轴映射/符号由 Kconfig 标定（`BLOCK_PHYSICS_IMU_SWAP_XY` / `INVERT_X` / `INVERT_Y`）。真机标定（2026-08-01）：传感器 X/Y 与屏幕方向相差 90°，`BLOCK_PHYSICS_IMU_SWAP_XY` 已默认开启
+- 轴映射/符号由 Kconfig 标定（`BLOCK_PHYSICS_IMU_SWAP_XY` / `INVERT_X` / `INVERT_Y`）。真机标定（2026-08-01）：传感器相对屏幕旋转 90° 且水平方向镜像，`BLOCK_PHYSICS_IMU_SWAP_XY` 与 `INVERT_X` 均已默认开启
 - 低通滤波（alpha=24/256，τ≈110ms）取屏幕平面重力分量，反推方块加速度：`grav = lp * G_Q8 >> 14`
 - 高通滤波 + 陀螺仪幅度合成晃动能量；能量超阈值时对每个方块施加随机方向冲量，能量按步衰减（250/256）
 
@@ -56,11 +56,11 @@
 | ACCEL_LP_ALPHA | 24 | IMU 低通 alpha（Q8.8） |
 | SHAKE_THRESHOLD | 6000 | 晃动能量阈值（原始 LSB） |
 | SHAKE_GAIN_Q8 | 10 | 晃动冲量增益（Q8.8） |
-| IMU_SWAP_XY / INVERT_X / INVERT_Y | y / n / n | 真机轴映射标定（SWAP_XY 已按实测开启） |
+| IMU_SWAP_XY / INVERT_X / INVERT_Y | y / y / n | 真机轴映射标定（SWAP_XY、INVERT_X 已按实测开启） |
 | STATS_INTERVAL_MS | 2000 | 周期统计日志 |
 
 ## 待办 / 真机验证
 
-- IMU 轴映射已标定（X/Y 交换）；若左/右或上/下仍反向，用 `INVERT_X` / `INVERT_Y` 修正
+- IMU 轴映射已标定：X/Y 交换 + 水平方向取反（`SWAP_XY` + `INVERT_X`）；若后续仍有反向，用 `INVERT_Y` 修正
 - 真机调参：重力强度、阻尼、恢复系数、晃动阈值/增益
 - 测量物理/渲染耗时、实际 FPS、CPU/PSRAM 占用并记录到 [dev-log.md](dev-log.md)

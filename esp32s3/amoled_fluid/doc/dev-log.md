@@ -92,3 +92,11 @@
 - **修复**：`CONFIG_BLOCK_PHYSICS_IMU_SWAP_XY=y` 写入 `sdkconfig.defaults` 并同步生成后的 `sdkconfig`（注意：既有 sdkconfig 中显式"未设置"会覆盖新默认，需同步修改两处）；重新构建后 `block_physics.cpp` 按交换后的轴编译
 - 构建验证：`./dev.sh build` 通过，`amoled_fluid.bin` 0x42670，无编译告警
 - 待办：真机复验倾斜/晃动方向；若某轴向仍反向，用 `INVERT_X` / `INVERT_Y` 修正；随后调参与测量帧率/CPU/PSRAM
+
+## 2026-08-01（真机标定：水平方向镜像）
+
+交换 X/Y 后复验：屏幕长边（上下/垂直）方向正确，短边（左右/水平）方向反向——对应传感器相对屏幕为旋转 90° + 水平镜像。
+
+- **修复**：`CONFIG_BLOCK_PHYSICS_IMU_INVERT_X=y` 追加到 `sdkconfig.defaults` 并同步生成后的 `sdkconfig`（同样需同步两处）
+- 构建验证：`./dev.sh build` 通过，`amoled_fluid.bin` 0x42670，无编译告警
+- 待办：真机复验四个倾斜方向均与滑动方向一致；随后调参与测量帧率/CPU/PSRAM
