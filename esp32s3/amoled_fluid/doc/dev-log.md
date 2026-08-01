@@ -71,3 +71,15 @@
   - 新增向心力（`FLUID_CENTER_K=96`，8.8 定点，作用于非触摸液滴）：缓慢把液滴/聚团拉回屏幕中央，打破墙角陷阱
 - 仿真验证（正确 isqrt 重跑）：修复后 16000 帧质心距中心约 5 格、散布 13~14 格、最小间距 7~9 格——液滴保持分散停留在屏幕中央区域
 - 构建验证：`./dev.sh build` 通过，无编译告警
+
+## 2026-08-01（方案转向：方块物理 + IMU）
+
+用户确认 metaball 流体不是目标效果，新目标为：屏上很多方块，摇动设备（IMU）让方块跟随晃动，模拟物理引擎。
+
+- **方案决策**：直接替换 metaball（删除 `components/fluid_render/`），不做双模式；方块视觉 40~60 个混合大小彩色方块；交互纯 IMU（倾斜=重力方向、晃动=随机冲量），不响应触摸
+- **开源选型调研**（详见 `doc/block-physics-design.md`）：Box2D Lite（碰撞/堆叠算法参考）、Android AOSP AccelerometerPlay（加速度计驱动/Verlet 输入处理参考）；不引入完整 Box2D / Chipmunk2D / Physac——ESP32-S3 无 FPU，float 冲量求解 CPU 成本高
+- **实现**：新增 `components/block_physics/`——自研定点（Q8.8 位置/速度、Q16.16 质量）AABB 物理：Verlet 积分 + 穿透分离（按质量分摊、每次 80%、3 次迭代）+ 冲量反弹 + 摩擦 + 墙边界；重力来自 IMU 低通滤波（alpha=24/256），晃动来自高通+陀螺能量（阈值 6000、增益 10）；IMU 失联 0.5s 回退默认向下重力；物理 core0 @60Hz、渲染 core1 @30FPS（PSRAM 三缓冲 + 全帧 draw_bitmap）；默认 50 块、尺寸 12~36px、9 色，参数全部进 Kconfig
+- **main 改造**：删除触摸轮询，新增 100Hz IMU 采样任务注入 `block_physics_imu_update`；启动流程 board_display -> physics create -> board_imu_init -> imu_task -> physics start
+- **文档**：README、doc 索引、display-pipeline、touch-input 同步；`fluid-effect-design.md` 替换为 `block-physics-design.md`
+- 构建验证：`./dev.sh build` 通过，无编译告警
+- 待办：真机标定 IMU 轴映射（Kconfig `IMU_SWAP_XY/INVERT_X/INVERT_Y`）、调参、测量帧率/CPU/PSRAM

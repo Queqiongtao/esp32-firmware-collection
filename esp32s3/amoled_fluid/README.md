@@ -1,6 +1,6 @@
 # amoled_fluid
 
-面向 Waveshare `ESP32-S3-Touch-AMOLED-1.8` 开发板的 AMOLED 流体效果实验工程。当前阶段是完整工程骨架：硬件与 `esp32s3/waveshare_amoled_1_8` 完全一致，板级能力直接复用其本地 `board_amoled_1_8` 组件，后续在此基础上逐步实现流体效果。
+面向 Waveshare `ESP32-S3-Touch-AMOLED-1.8` 开发板的 AMOLED 方块物理效果实验工程：屏幕上分布 40~60 个混合大小彩色方块，摇动/倾斜设备（板载 QMI8658 IMU）时方块跟随重力与晃动冲量运动、互相碰撞堆叠，模拟物理引擎效果。
 
 ## Board
 
@@ -20,20 +20,20 @@
 
 ## Current Status
 
-当前为可构建、可点亮的第一版流体效果工程：
+当前为可构建、可点亮的第一版方块物理效果工程：
 
 - `dev.sh` 构建/烧录/监控/清理/menuconfig 辅助脚本
 - 本地 `components/board_amoled_1_8/` 板级组件：I2C、TCA9554 EXIO、SH8601 显示初始化与背光、FT3168 触摸
-- 新增 `components/fluid_render/` 渲染组件：92x112 网格 Metaball 液态模拟（定点运算、30 Hz）、两步定点双线性放大、PSRAM 双缓冲全帧提交、模拟/渲染双核任务；v2 真实感：液滴尺寸各异、沿运动方向拉伸、左上离轴高光、融合处变暗、液滴间凝聚力/随机游走
-- 触摸交互：按下绑定液滴拖拽、抬起后高亮衰减；无触摸时液滴自动漂移呼吸
+- 新增 `components/block_physics/` 物理组件：自研定点（Q8.8/Q16.16）AABB 方块物理（算法参考 Box2D Lite，输入处理参考 Android AccelerometerPlay），60 Hz 物理 + 30 FPS 渲染双核任务、PSRAM 三缓冲全帧提交
+- IMU 交互：倾斜 -> 方块沿重力方向滑动；晃动 -> 随机冲量飞散；静置 -> 缓慢稳定堆叠；IMU 失联回退默认重力
 - 板级外设接口（PMU、SD、RTC、IMU、音频）随参考工程保留，未在本工程验证
-- 启动流程：板级初始化 -> 流体渲染启动 -> 触摸轮询注入
+- 启动流程：板级初始化 -> 方块物理创建 -> IMU 采样任务（100 Hz）-> 物理/渲染双核启动
 
 待办：
 
-- 真机复验 RGB565 字节序（调试模式 `CONFIG_FLUID_RENDER_DEBUG_COLOR_SEQ` 显示纯色序列）
-- 真机测量帧率、CPU/PSRAM 占用并记录到 [doc/dev-log.md](doc/dev-log.md)
-- 后续迭代：TE 同步、脏区局部刷新、多点触摸、主题切换
+- 真机标定 IMU 轴映射与符号（`CONFIG_BLOCK_PHYSICS_IMU_SWAP_XY/INVERT_X/INVERT_Y`）
+- 真机调参（重力、阻尼、恢复系数、晃动阈值）并测量帧率、CPU/PSRAM 占用，记录到 [doc/dev-log.md](doc/dev-log.md)
+- 后续迭代：TE 同步、脏区局部刷新、方块旋转/复杂形状
 
 ## Default Board Configuration
 
@@ -61,8 +61,8 @@
 
 ## Key Files
 
-- `main/main.cpp`: 应用入口，板级初始化 + 流体渲染编排 + 触摸事件注入
+- `main/main.cpp`: 应用入口，板级初始化 + 方块物理编排 + IMU 采样任务
 - `components/board_amoled_1_8/`: 板级支持组件（与参考工程同源）
-- `components/fluid_render/`: 流体模拟与渲染组件（Metaball、双线性放大、双核任务）
+- `components/block_physics/`: 方块物理与渲染组件（AABB 求解、IMU 重力/晃动、双核任务）
 - `sdkconfig.defaults`: 目标芯片、Flash/PSRAM 与板级 pinout 配置
 - `doc/`: 技术文档索引见 [doc/README.md](doc/README.md)

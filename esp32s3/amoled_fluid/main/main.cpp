@@ -1,17 +1,43 @@
 #include <inttypes.h>
 #include <stdio.h>
 
+#include "block_physics.h"
 #include "board_amoled_1_8.h"
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_flash.h"
 #include "esp_log.h"
-#include "fluid_render.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "amoled_fluid";
-static constexpr int TOUCH_POLL_INTERVAL_MS = 10;
+static constexpr int IMU_POLL_INTERVAL_MS = 10; /* 100 Hz */
+
+static struct {
+    block_physics_handle_t physics;
+} s_imu_ctx;
+
+/* IMU 采样任务：100Hz 读取原始数据并注入方块物理（QMI8658 轴映射由 Kconfig 标定） */
+static void imu_task(void *arg)
+{
+    (void)arg;
+    TickType_t last_wake = xTaskGetTickCount();
+    int16_t ax = 0;
+    int16_t ay = 0;
+    int16_t az = 0;
+    int16_t gx = 0;
+    int16_t gy = 0;
+    int16_t gz = 0;
+    while (1) {
+        esp_err_t err = board_imu_read(&ax, &ay, &az, &gx, &gy, &gz);
+        if (err == ESP_OK) {
+            block_physics_imu_update(s_imu_ctx.physics, ax, ay, az, gx, gy, gz);
+        } else {
+            ESP_LOGW(TAG, "imu read failed: %s", esp_err_to_name(err));
+        }
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_POLL_INTERVAL_MS));
+    }
+}
 
 extern "C" void app_main(void)
 {
@@ -34,8 +60,7 @@ extern "C" void app_main(void)
              cfg->lcd_d0_gpio, cfg->lcd_d1_gpio, cfg->lcd_d2_gpio, cfg->lcd_d3_gpio,
              cfg->lcd_te_gpio, cfg->lcd_power_exio_num, cfg->lcd_rst_exio_num,
              cfg->lcd_h_res, cfg->lcd_v_res);
-    ESP_LOGI(TAG, "board cfg: touch(int=%d gpio_rst=%d exio_rst=%d)",
-             cfg->touch_int_gpio, cfg->touch_rst_gpio, cfg->touch_rst_exio_num);
+    ESP_LOGI(TAG, "board cfg: imu(qmi8658=0x%02X)", cfg->qmi8658_addr);
 
     esp_err_t err = board_display_init();
     if (err != ESP_OK) {
@@ -55,70 +80,37 @@ extern "C" void app_main(void)
         }
     }
 
-    fluid_render_handle_t fluid = NULL;
+    block_physics_handle_t physics = NULL;
     if (panel != NULL) {
-        fluid_render_config_t fluid_cfg = fluid_render_default_config();
-        fluid_cfg.h_res = cfg->lcd_h_res;
-        fluid_cfg.v_res = cfg->lcd_v_res;
-        err = fluid_render_create(&fluid_cfg, panel, &fluid);
+        block_physics_config_t physics_cfg = block_physics_default_config();
+        physics_cfg.h_res = cfg->lcd_h_res;
+        physics_cfg.v_res = cfg->lcd_v_res;
+        err = block_physics_create(&physics_cfg, panel, &physics);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "fluid render create failed: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "block physics create failed: %s", esp_err_to_name(err));
         } else {
-            err = fluid_render_start(fluid);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "fluid render start failed: %s", esp_err_to_name(err));
+            err = board_imu_init();
+            if (err == ESP_OK) {
+                s_imu_ctx.physics = physics;
+                if (xTaskCreatePinnedToCore(imu_task, "imu_poll", 3072, NULL, 4, NULL, 0) != pdPASS) {
+                    ESP_LOGE(TAG, "imu task create failed");
+                } else {
+                    ESP_LOGI(TAG, "imu sampling started @ %d Hz", 1000 / IMU_POLL_INTERVAL_MS);
+                }
             } else {
-                ESP_LOGI(TAG, "fluid render started (%dx%d grid @ %d Hz, %d blobs)",
-                         fluid_cfg.sim_w, fluid_cfg.sim_h, fluid_cfg.sim_hz, fluid_cfg.blob_count);
+                ESP_LOGW(TAG, "imu init failed (%s), physics falls back to default gravity",
+                         esp_err_to_name(err));
+            }
+            err = block_physics_start(physics);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "block physics start failed: %s", esp_err_to_name(err));
             }
         }
     } else {
-        ESP_LOGE(TAG, "display unavailable, fluid effect disabled");
+        ESP_LOGE(TAG, "display unavailable, block physics disabled");
     }
-
-    esp_lcd_touch_handle_t touch = NULL;
-    err = board_touch_new(&touch);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "board touch new failed: %s", esp_err_to_name(err));
-    } else {
-        ESP_LOGI(TAG, "touch self-test armed");
-    }
-
-    bool touch_active = false;
-    uint16_t last_touch_x = 0;
-    uint16_t last_touch_y = 0;
 
     while (1) {
-        if (touch != NULL) {
-            uint16_t touch_x = 0;
-            uint16_t touch_y = 0;
-            uint8_t pressed = 0;
-            uint8_t point_num = 0;
-            err = board_touch_read(&touch_x, &touch_y, &pressed, &point_num);
-            const bool release_event = (!pressed && point_num == BOARD_TOUCH_RELEASE_EVENT_POINT_NUM);
-            if (err != ESP_OK) {
-                if (touch_active) {
-                    fluid_render_touch_event(fluid, false, last_touch_x, last_touch_y);
-                }
-                ESP_LOGW(TAG, "touch read failed: %s", esp_err_to_name(err));
-                touch_active = false;
-            } else if (pressed) {
-                if (!touch_active) {
-                    ESP_LOGI(TAG, "touch down: x=%u y=%u points=%u", touch_x, touch_y, point_num);
-                }
-                fluid_render_touch_event(fluid, true, touch_x, touch_y);
-                touch_active = true;
-                last_touch_x = touch_x;
-                last_touch_y = touch_y;
-            } else if (touch_active || release_event) {
-                const uint16_t release_x = release_event ? touch_x : last_touch_x;
-                const uint16_t release_y = release_event ? touch_y : last_touch_y;
-                ESP_LOGI(TAG, "touch up: x=%u y=%u", release_x, release_y);
-                fluid_render_touch_event(fluid, false, release_x, release_y);
-                touch_active = false;
-            }
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(TOUCH_POLL_INTERVAL_MS));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

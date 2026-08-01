@@ -1,0 +1,90 @@
+menu "Block Physics"
+
+config BLOCK_PHYSICS_BLOCK_COUNT
+    int "Block count"
+    default 50
+    range 40 60
+
+config BLOCK_PHYSICS_BLOCK_MIN_SIZE
+    int "Minimum block size (px)"
+    default 12
+    range 4 64
+
+config BLOCK_PHYSICS_BLOCK_MAX_SIZE
+    int "Maximum block size (px)"
+    default 36
+    range 8 96
+
+config BLOCK_PHYSICS_COLOR_COUNT
+    int "Palette color count (max 16)"
+    default 9
+    range 4 16
+
+config BLOCK_PHYSICS_PHYSICS_HZ
+    int "Physics update rate (Hz)"
+    default 60
+    range 30 120
+
+config BLOCK_PHYSICS_RENDER_HZ
+    int "Render target rate (Hz)"
+    default 30
+    range 10 60
+
+config BLOCK_PHYSICS_ITERATIONS
+    int "Collision iterations per physics step"
+    default 3
+    range 1 8
+
+config BLOCK_PHYSICS_GRAVITY_ACC_Q8
+    int "Gravity acceleration at 1g (Q8.8 px/step^2)"
+    default 18
+    range 4 120
+
+config BLOCK_PHYSICS_DAMPING_Q8
+    int "Velocity damping per step (Q8.8)"
+    default 252
+    range 200 255
+
+config BLOCK_PHYSICS_RESTITUTION_Q8
+    int "Bounce restitution (Q8.8)"
+    default 32
+    range 0 255
+
+config BLOCK_PHYSICS_FRICTION_Q8
+    int "Contact friction (Q8.8, fraction of tangential velocity removed)"
+    default 140
+    range 0 255
+
+config BLOCK_PHYSICS_ACCEL_LP_ALPHA
+    int "IMU accel low-pass alpha (Q8.8)"
+    default 24
+    range 1 255
+
+config BLOCK_PHYSICS_SHAKE_THRESHOLD
+    int "Shake energy threshold (raw LSB)"
+    default 6000
+    range 0 200000
+
+config BLOCK_PHYSICS_SHAKE_GAIN_Q8
+    int "Shake impulse gain (Q8.8)"
+    default 10
+    range 1 255
+
+config BLOCK_PHYSICS_IMU_SWAP_XY
+    bool "Swap IMU X/Y axes (真机标定用)"
+    default n
+
+config BLOCK_PHYSICS_IMU_INVERT_X
+    bool "Invert IMU X axis (真机标定用)"
+    default n
+
+config BLOCK_PHYSICS_IMU_INVERT_Y
+    bool "Invert IMU Y axis (真机标定用)"
+    default n
+
+config BLOCK_PHYSICS_STATS_INTERVAL_MS
+    int "Stats log interval (ms, 0 disables)"
+    default 2000
+    range 0 60000
+
+endmenu
