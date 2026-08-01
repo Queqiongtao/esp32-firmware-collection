@@ -20,17 +20,20 @@
 
 ## Current Status
 
-当前为板级可用的工程骨架：
+当前为可构建、可点亮的第一版流体效果工程：
 
 - `dev.sh` 构建/烧录/监控/清理/menuconfig 辅助脚本
 - 本地 `components/board_amoled_1_8/` 板级组件：I2C、TCA9554 EXIO、SH8601 显示初始化与背光、FT3168 触摸
+- 新增 `components/fluid_render/` 渲染组件：92x112 网格 Metaball 液态模拟（定点运算、30 Hz）、两步定点双线性放大、PSRAM 双缓冲全帧提交、模拟/渲染双核任务；v2 真实感：液滴尺寸各异、沿运动方向拉伸、左上离轴高光、融合处变暗、液滴间凝聚力/随机游走
+- 触摸交互：按下绑定液滴拖拽、抬起后高亮衰减；无触摸时液滴自动漂移呼吸
 - 板级外设接口（PMU、SD、RTC、IMU、音频）随参考工程保留，未在本工程验证
-- 启动流程：板级初始化 -> 显示自检 -> I2C 扫描 -> 触摸轮询
+- 启动流程：板级初始化 -> 流体渲染启动 -> 触摸轮询注入
 
-尚未实现：
+待办：
 
-- 流体效果（目标功能，方案待讨论，见 [doc/fluid-effect-design.md](doc/fluid-effect-design.md)）
-- 任何渲染/效果组件
+- 真机复验 RGB565 字节序（调试模式 `CONFIG_FLUID_RENDER_DEBUG_COLOR_SEQ` 显示纯色序列）
+- 真机测量帧率、CPU/PSRAM 占用并记录到 [doc/dev-log.md](doc/dev-log.md)
+- 后续迭代：TE 同步、脏区局部刷新、多点触摸、主题切换
 
 ## Default Board Configuration
 
@@ -58,7 +61,8 @@
 
 ## Key Files
 
-- `main/main.cpp`: 应用入口，板级初始化 + 显示自检 + 触摸轮询
+- `main/main.cpp`: 应用入口，板级初始化 + 流体渲染编排 + 触摸事件注入
 - `components/board_amoled_1_8/`: 板级支持组件（与参考工程同源）
+- `components/fluid_render/`: 流体模拟与渲染组件（Metaball、双线性放大、双核任务）
 - `sdkconfig.defaults`: 目标芯片、Flash/PSRAM 与板级 pinout 配置
 - `doc/`: 技术文档索引见 [doc/README.md](doc/README.md)

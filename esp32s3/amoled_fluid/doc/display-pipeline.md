@@ -34,7 +34,7 @@
 ## 帧缓冲策略
 
 - 当前自检代码在 PSRAM 分配整帧缓冲（`heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`），一次性 `draw_bitmap` 提交。
-- 流体渲染建议：渲染任务在 PSRAM 双缓冲（ping-pong）中绘制，绘制完成后 DMA 提交；双缓冲可避免“边画边传”的撕裂。
+- 流体渲染（v1 已实现）：模拟任务产出 92x112 势能场，渲染任务两步定点双线性放大（先水平再垂直，中间缓冲 368x112）写入 PSRAM ping-pong 双帧缓冲后全帧 `draw_bitmap` 提交；双缓冲避免“边画边传”的撕裂。
 - 若要防撕裂到像素级，可引入 TE 中断/轮询同步（GPIO13），把提交时机对齐到面板帧边界；这是后续讨论项，不在当前骨架实现。
 - PSRAM 带宽远高于 QSPI 屏接口，瓶颈通常不在 PSRAM，而在 CPU 填充速度与面板接口；实测优先级：面板接口 > CPU 填充 > PSRAM。
 
@@ -49,10 +49,11 @@
 - SH8601 使用 **RGB565、RGB 元素序**，线路字节为“高字节在前”（big-endian）。
 - ESP32-S3 是小端架构，直接把逻辑 `0xF800`（红）交给 `esp_lcd_panel_draw_bitmap` 时，低字节先发，颜色会偏蓝。
 - Companion Display 的做法是编译期宏 `SH8601_RGB565()` 交换字节，JPEG 解码路径用 `swap_color_bytes=1`。
-- 本工程自检沿用了参考工程 `waveshare_amoled_1_8` 的直传写法（未交换字节），**该写法在真机上的实际颜色表现待验证**。
-- 流体渲染层落地前，必须先实测确认字节序约定，并统一封装（如本地 `RGB565()` 宏或统一颜色空间层），避免每个效果各写一套。
+- 本工程流体渲染层（v1）沿用同一结论：组件内封装 `FLUID_RGB565()`/`FLUID_RGB565_WIRE()`，调色板初始化时即完成字节交换，运行时零开销。
+- **真机颜色表现仍待复验**：启用 `CONFIG_FLUID_RENDER_DEBUG_COLOR_SEQ` 可在启动时显示红/绿/蓝纯色序列确认方向；结论确认后回写本文并关闭该开关。
 
 ## 当前实现文件
 
 - `components/board_amoled_1_8/board_display.cpp`：SPI 总线、panel IO、SH8601 创建与初始化命令、亮度命令
-- `main/main.cpp`：自检绘制（纯色/彩条）、提交入口 `esp_lcd_panel_draw_bitmap`
+- `components/fluid_render/fluid_render.cpp`：势能场模拟、定点放大、调色板、双核任务与帧缓冲管理
+- `main/main.cpp`：板级初始化、渲染器编排、触摸事件注入
