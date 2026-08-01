@@ -16,6 +16,7 @@ esp32-firmware-collection/
 ├── esp32s3/
 │   ├── clock/
 │   ├── amoled_subscreen/
+│   ├── amoled_fluid/
 │   ├── waveshare_amoled_1_8/
 │   └── blink/
 ├── esp32p4/
