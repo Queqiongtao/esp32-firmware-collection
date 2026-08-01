@@ -9,6 +9,8 @@
 #include "esp_err.h"
 #include "esp_jpeg_dec.h"
 #include "esp_tls.h"
+#include "driver/jpeg_decode.h"
+#include "driver/ppa.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "printsphere/config_store.hpp"
@@ -46,7 +48,10 @@ class P1sCameraClient {
   PrinterConnection desired_connection() const;
   bool ensure_connected(const PrinterConnection& connection);
   void disconnect();
-  bool fetch_frame_once(const PrinterConnection& connection);
+  bool fetch_next_frame(const PrinterConnection& connection);
+  bool decode_frame_rgb565_cached(const std::shared_ptr<std::vector<uint8_t>>& jpeg_blob,
+                                  std::shared_ptr<std::vector<uint8_t>>* out_blob,
+                                  uint16_t* out_width, uint16_t* out_height);
   void set_snapshot(P1sCameraSnapshot snapshot);
   void set_status_snapshot(bool configured, bool enabled, bool connected, const char* detail);
   void set_frame_snapshot(bool configured, bool enabled, bool connected, const char* detail,
@@ -61,6 +66,12 @@ class P1sCameraClient {
   static bool decode_frame_rgb565(const std::shared_ptr<std::vector<uint8_t>>& jpeg_blob,
                                   std::shared_ptr<std::vector<uint8_t>>* out_blob, uint16_t* out_width,
                                   uint16_t* out_height);
+  bool ensure_hw_resources(uint16_t source_width, uint16_t source_height, uint16_t target_width,
+                           uint16_t target_height);
+  bool decode_frame_hw(const std::shared_ptr<std::vector<uint8_t>>& jpeg_blob,
+                       uint16_t source_width, uint16_t source_height, uint16_t target_width,
+                       uint16_t target_height, std::shared_ptr<std::vector<uint8_t>>* out_blob,
+                       uint16_t* out_width, uint16_t* out_height);
 
   mutable std::mutex mutex_{};
   P1sCameraSnapshot snapshot_{};
@@ -78,6 +89,25 @@ class P1sCameraClient {
   std::atomic<bool> reconfigure_requested_{false};
   bool idle_notified_ = false;
   uint32_t consecutive_connect_failures_ = 0;
+  bool hw_init_attempted_ = false;
+  bool hw_resources_ok_ = false;
+  // Decode-size cache and frame-rate statistics (camera task thread only).
+  uint16_t cached_source_width_ = 0;
+  uint16_t cached_source_height_ = 0;
+  uint16_t cached_decode_width_ = 0;
+  uint16_t cached_decode_height_ = 0;
+  uint8_t last_decode_fallback_ = 0;
+  uint32_t stats_window_frames_ = 0;
+  uint32_t stats_window_fallbacks_ = 0;
+  int64_t stats_window_fetch_total_us_ = 0;
+  int64_t stats_window_start_us_ = 0;
+  // Hardware decode + PPA scale resources (camera task thread only).
+  jpeg_decoder_handle_t hw_decoder_ = nullptr;
+  ppa_client_handle_t ppa_client_ = nullptr;
+  uint8_t* hw_decode_buf_ = nullptr;
+  size_t hw_decode_buf_cap_ = 0;
+  uint8_t* ppa_out_buf_ = nullptr;
+  size_t ppa_out_buf_cap_ = 0;
 };
 
 }  // namespace printsphere

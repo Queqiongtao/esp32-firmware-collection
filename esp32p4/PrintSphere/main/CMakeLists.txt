@@ -11,6 +11,8 @@ set(PRINTSPHERE_MAIN_REQUIRES
     mqtt
     esp_netif
     lwip
+    esp_driver_jpeg
+    esp_driver_ppa
     espressif__esp_new_jpeg
     espressif__esp_codec_dev
     esp-tls

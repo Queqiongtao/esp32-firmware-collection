@@ -798,7 +798,7 @@ void Application::run() {
     const TickType_t loop_delay =
         (snapshot.print_active || camera_page_active || page_transition_active ||
          !ui_.is_low_power_mode_active())
-            ? pdMS_TO_TICKS(page_transition_active ? 100 : 500)
+            ? pdMS_TO_TICKS(page_transition_active ? 100 : (camera_page_active ? 200 : 500))
             : pdMS_TO_TICKS(1500);
     last_source_mode_ = source_mode_;
     last_wifi_connected_ = wifi_connected;

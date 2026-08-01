@@ -15,6 +15,8 @@
 
 2026-07-31 针对本地 MQTT 在 TCP `connect()` 阶段持续出现 `ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT`，确认同一 Wi-Fi 内开发机可与 `192.168.51.83:8883` 完成 TLS 1.2 握手，打印机证书 CN 为 `01P00C532100111`，故障不属于 CA、access code 或打印机端口关闭。将迁移工程的 ESP-Hosted SDIO TX/RX 队列由 `6/6` 恢复为组件默认及同板 P4 工程使用的 `20/20`，并将断连看门狗延后至 MQTT 20 秒网络超时之后，避免同一次失败由看门狗和 `MQTT_EVENT_ERROR` 重复调度重建；TCP 超时诊断按失败次数 1、2、4、8 次幂限频记录 STA IPv4、掩码、网关和目标。使用 ESP-IDF `v6.0.1` 执行 `./dev.sh build` 通过，生成配置确认 `CONFIG_ESP_HOSTED_SDIO_TX_Q_SIZE=20`、`CONFIG_ESP_HOSTED_SDIO_RX_Q_SIZE=20`；应用镜像为 `0x330a30` 字节，最小 5 MiB app 槽剩余 `0x1cf5d0` 字节（36%）。验证时 `/dev/ttyUSB0`、`/dev/ttyACM*` 及 `/dev/serial/by-id/*` 均未枚举，尚未完成本次固件烧录、本地 MQTT 订阅和相机连续帧复测，真机结论保持待验证。
 
+2026-07-31 针对相机预览流畅度，将 1.5 秒定时取帧改为长连接持续取帧：目标帧率由新配置 `CONFIG_PRINTSPHERE_CAMERA_TARGET_FPS`（默认 5fps，范围 1~10）控制并按“目标间隔 − 本帧耗时”自适应节流；解码缓存上次成功源/输出尺寸，跳过每帧重复的 JPEG 源尺寸探测；相机页激活时主循环合并周期从 500ms 降到 200ms；新增每 30 帧一次的 `Camera stats` 日志（实际帧率、平均取帧耗时、降级次数），手动刷新仍跳过节流立即取帧。使用 ESP-IDF `v6.0.1` 执行 `./dev.sh idf reconfigure` 后 `./dev.sh build` 通过，确认 `CONFIG_PRINTSPHERE_CAMERA_TARGET_FPS=5`；应用镜像为 `0x330f60` 字节，最小 5 MiB app 槽剩余 `0x1cf0a0` 字节（36%）。本次仅完成编译验证，尚未烧录真机；相机实际帧率、端到端延迟、PSRAM 余量、30 分钟连续取帧稳定性及 0°/180° 画面效果保持待验证。
+
 ## 构建门禁
 
 1. 在工程根执行 `./dev.sh build`，无 warning-as-error 或链接错误。

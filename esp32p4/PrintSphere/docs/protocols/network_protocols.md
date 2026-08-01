@@ -27,7 +27,7 @@ P4 通过 SDIO Slot 1（4-bit、25 MHz、TX/RX 队列各 20）运行 ESP-Hosted 
 - 证书：固件内嵌的 Bambu CA bundle 仅用于局域网打印机 MQTT/TLS，不作为 Bambu Cloud HTTPS 的公共信任根
 - Topic：`device/<serial>/report` 与 `device/<serial>/request`
 - 数据：JSON 状态、`pushall`/`get_version` 请求、灯光及可选打印控制命令
-- 相机：支持的 A1/P1 系列通过 TLS 端口 `6000`，80 字节认证包，16 字节帧头，单帧上限 256 KiB；读取 JPEG 源尺寸后等比解码到不超过 1024x576 的 8 像素对齐尺寸，小分辨率源不放大，失败时降级到 800x448 或 400x224
+- 相机：支持的 A1/P1 系列通过 TLS 端口 `6000`，80 字节认证包，16 字节帧头，单帧上限 256 KiB；长连接持续取帧并按 `PRINTSPHERE_CAMERA_TARGET_FPS`（默认 5）目标帧率自适应节流，手动刷新跳过节流立即取帧；读取 JPEG 源尺寸后等比解码到不超过 1024x576 的 8 像素对齐尺寸，小分辨率源不放大，失败时降级到 800x448 或 400x224，并缓存上次成功解码尺寸避免每帧重复探测；相机推流快于目标帧率时 TCP 缓冲会积压约 1~2 帧（延迟约 100~200 ms），属预期边界
 - RTSP：本工程不实现，因此 H2/X1/X2 等 RTSP 机型无实时相机页
 
 ## 状态融合

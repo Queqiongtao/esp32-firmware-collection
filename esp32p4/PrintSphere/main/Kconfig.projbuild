@@ -4,6 +4,11 @@ menu "PrintSphere P4"
         bool "Enable experimental print control buttons"
         default n
 
+    config PRINTSPHERE_CAMERA_TARGET_FPS
+        int "Camera preview target frame rate (fps)"
+        range 1 10
+        default 5
+
     config EXAMPLE_USE_DMA2D_COPY_FRAME
         bool "Use ESP LCD DMA2D draw hook"
         default y
