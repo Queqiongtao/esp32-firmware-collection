@@ -31,7 +31,7 @@
 - `board_imu_read` 原始 6 轴数据（QMI8658，±2g / ±2000dps，16384 LSB/g）注入 `block_physics_imu_update`
 - 轴映射/符号由 Kconfig 标定（`BLOCK_PHYSICS_IMU_SWAP_XY` / `INVERT_X` / `INVERT_Y`）。真机标定（2026-08-01）：传感器相对屏幕旋转 90° 且水平方向镜像，`BLOCK_PHYSICS_IMU_SWAP_XY` 与 `INVERT_X` 均已默认开启
 - 低通滤波（alpha=24/256，τ≈110ms）取屏幕平面重力分量，反推方块加速度：`grav = lp * G_Q8 >> 14`
-- 高通滤波 + 陀螺仪幅度合成晃动能量；能量超阈值时对每个方块施加随机方向冲量，能量按步衰减（250/256）
+- 晃动检测：陀螺角速度差分（jerk）+ 加速度高通合成能量，且**连续 4 拍超阈值**才触发（匀速翻转/单次快速转动不会误触发）；触发后对每个方块施加随机方向冲量，能量按步衰减（250/256）
 
 ## 任务架构与渲染（core1，30 FPS）
 
@@ -48,15 +48,16 @@
 | COLOR_COUNT | 9 | 调色板颜色数 |
 | PHYSICS_HZ | 60 | 物理更新频率 |
 | RENDER_HZ | 30 | 渲染目标帧率 |
-| ITERATIONS | 3 | 每步碰撞迭代次数 |
-| GRAVITY_ACC_Q8 | 56 | 1g 重力加速度（Q8.8 px/step²，真机调大改善下落速度） |
-| DAMPING_Q8 | 252 | 速度阻尼（Q8.8） |
-| RESTITUTION_Q8 | 32 | 反弹恢复系数（Q8.8） |
-| FRICTION_Q8 | 140 | 接触摩擦（Q8.8） |
-| ACCEL_LP_ALPHA | 64 | IMU 低通 alpha（Q8.8，调大提升倾斜跟手度） |
+| ITERATIONS | 4 | 每步碰撞迭代次数 |
+| GRAVITY_ACC_Q8 | 96 | 1g 重力加速度（Q8.8 px/step²，接近自由落体） |
+| DAMPING_Q8 | 255 | 空气阻尼（Q8.8，近零，阻力主要体现在接触摩擦） |
+| RESTITUTION_Q8 | 115 | 反弹恢复系数（Q8.8，≈0.45，落地/碰撞可见 2~4 次递减反弹） |
+| FRICTION_Q8 | 60 | 接触摩擦（Q8.8，降低后面堆体自然滑塌散开） |
+| DRAG_VARIATION_Q8 | 24 | 每方块气阻差异（Q8.8，0 关闭；下落时方块自然错开破"整坨"） |
+| ACCEL_LP_ALPHA | 48 | IMU 低通 alpha（Q8.8，跟手与稳定平衡） |
 | MAX_VEL_Q8 | 2048 | 方块最大速度（Q8.8 px/step，8 px/step ≈ 480 px/s） |
-| SHAKE_THRESHOLD | 6000 | 晃动能量阈值（原始 LSB） |
-| SHAKE_GAIN_Q8 | 10 | 晃动冲量增益（Q8.8） |
+| SHAKE_THRESHOLD | 8000 | 晃动能量阈值（原始 LSB） |
+| SHAKE_GAIN_Q8 | 8 | 晃动冲量增益（Q8.8） |
 | IMU_SWAP_XY / INVERT_X / INVERT_Y | y / y / n | 真机轴映射标定（SWAP_XY、INVERT_X 已按实测开启） |
 | STATS_INTERVAL_MS | 2000 | 周期统计日志 |
 

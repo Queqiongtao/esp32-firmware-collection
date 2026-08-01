@@ -27,6 +27,8 @@ static const char *TAG = "block_physics";
 #define BLOCK_POS_CORR_Q8 204          /* 每次迭代穿透修正比例（Q8.8，80%） */
 #define BLOCK_SHAKE_DECAY_Q8 250       /* 晃动能量每步衰减（Q8.8，97.7%） */
 #define BLOCK_IMU_TIMEOUT_US 500000    /* IMU 失联 0.5s 后回退默认重力 */
+#define BLOCK_SHAKE_SUSTAIN_HITS 4     /* 连续 N 拍超阈值才视为晃动，避免单次快速转动误触发 */
+#define BLOCK_REST_VN_Q8 128           /* 法向相对速度 <0.5 px/step 视为静止接触（Q8.8） */
 
 /* 方块：轴对齐 AABB，中心坐标与速度均为 Q8.8 定点，质量 = 面积 */
 struct Block {
@@ -38,6 +40,7 @@ struct Block {
     uint8_t h;
     uint16_t color;    /* 已交换字节序的 RGB565 */
     uint32_t inv_mass; /* Q16.16 = 65536/(w*h) */
+    uint16_t drag_q;   /* 个体气阻系数（Q8.8，<=256，破"整坨"用） */
     bool contact;      /* 本步是否与墙/其他方块接触 */
 };
 
@@ -68,6 +71,10 @@ struct block_physics {
     int32_t grav_x;   /* 屏幕重力加速度（Q8.8 px/step^2） */
     int32_t grav_y;
     uint32_t shake;   /* 晃动能量（原始 LSB 和，物理侧逐帧衰减） */
+    uint8_t shake_hits; /* 连续超阈值采样计数（imu 侧维护） */
+    int16_t last_gx;  /* 上次陀螺读数（jerk 计算用） */
+    int16_t last_gy;
+    int16_t last_gz;
     bool imu_effective; /* 最近一步 IMU 是否生效（供 stats） */
 
     uint64_t last_physics_us;
@@ -119,6 +126,8 @@ static void init_block(Block *b, int hr, int vr, const uint16_t *palette)
     b->h = (uint8_t)(min_sz + irand((uint32_t)(max_sz - min_sz + 1)));
     b->color = palette[irand(CONFIG_BLOCK_PHYSICS_COLOR_COUNT)];
     b->inv_mass = (1u << 16) / ((uint32_t)b->w * b->h);
+    const int drag_var = CONFIG_BLOCK_PHYSICS_DRAG_VARIATION_Q8;
+    b->drag_q = (uint16_t)(256 - irand((uint32_t)(drag_var + 1)));
     const int half_w = b->w / 2;
     const int half_h = b->h / 2;
     b->x = ((int32_t)irand((uint32_t)(hr - b->w)) + half_w) << 8;
@@ -182,10 +191,15 @@ static void solve_pair(Block &a, Block &b)
         b.x += (sign * ((ox * (int32_t)b.inv_mass) / total) * BLOCK_POS_CORR_Q8) >> 8;
         const int32_t vn = sign * (a.vx - b.vx);
         if (vn > 0) {
-            const int32_t dv_a = (((vn * rest_k) >> 8) * (int32_t)a.inv_mass) / total;
-            const int32_t dv_b = (((vn * rest_k) >> 8) * (int32_t)b.inv_mass) / total;
-            a.vx -= sign * dv_a;
-            b.vx += sign * dv_b;
+            if (vn <= BLOCK_REST_VN_Q8) {
+                /* 静止接触：法向相对速度极小则清零，堆叠稳定不抖 */
+                a.vx = b.vx;
+            } else {
+                const int32_t dv_a = (((vn * rest_k) >> 8) * (int32_t)a.inv_mass) / total;
+                const int32_t dv_b = (((vn * rest_k) >> 8) * (int32_t)b.inv_mass) / total;
+                a.vx -= sign * dv_a;
+                b.vx += sign * dv_b;
+            }
         }
         const int32_t vt = sign * (a.vy - b.vy);
         if (vt != 0) {
@@ -201,10 +215,15 @@ static void solve_pair(Block &a, Block &b)
         b.y += (sign * ((oy * (int32_t)b.inv_mass) / total) * BLOCK_POS_CORR_Q8) >> 8;
         const int32_t vn = sign * (a.vy - b.vy);
         if (vn > 0) {
-            const int32_t dv_a = (((vn * rest_k) >> 8) * (int32_t)a.inv_mass) / total;
-            const int32_t dv_b = (((vn * rest_k) >> 8) * (int32_t)b.inv_mass) / total;
-            a.vy -= sign * dv_a;
-            b.vy += sign * dv_b;
+            if (vn <= BLOCK_REST_VN_Q8) {
+                /* 静止接触：法向相对速度极小则清零，堆叠稳定不抖 */
+                a.vy = b.vy;
+            } else {
+                const int32_t dv_a = (((vn * rest_k) >> 8) * (int32_t)a.inv_mass) / total;
+                const int32_t dv_b = (((vn * rest_k) >> 8) * (int32_t)b.inv_mass) / total;
+                a.vy -= sign * dv_a;
+                b.vy += sign * dv_b;
+            }
         }
         const int32_t vt = sign * (a.vx - b.vx);
         if (vt != 0) {
@@ -267,6 +286,9 @@ static void step_physics(block_physics_t *self)
         }
         b.vx = (b.vx * damping) >> 8;
         b.vy = (b.vy * damping) >> 8;
+        /* 个体气阻差异：下落/滑动时方块间产生细微速度差，自然错开 */
+        b.vx = (b.vx * b.drag_q) >> 8;
+        b.vy = (b.vy * b.drag_q) >> 8;
         if (b.vx > CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
             b.vx = CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8;
         } else if (b.vx < -CONFIG_BLOCK_PHYSICS_MAX_VEL_Q8) {
@@ -291,12 +313,18 @@ static void step_physics(block_physics_t *self)
             if (b.vx < 0) {
                 b.vx = -(b.vx * rest_q) >> 8;
             }
+            if (block_iabs(b.vx) < BLOCK_REST_VN_Q8) {
+                b.vx = 0;
+            }
             b.vy = (b.vy * inv_friction) >> 8;
             b.contact = true;
         } else if (b.x > max_x) {
             b.x = max_x;
             if (b.vx > 0) {
                 b.vx = -(b.vx * rest_q) >> 8;
+            }
+            if (block_iabs(b.vx) < BLOCK_REST_VN_Q8) {
+                b.vx = 0;
             }
             b.vy = (b.vy * inv_friction) >> 8;
             b.contact = true;
@@ -306,12 +334,18 @@ static void step_physics(block_physics_t *self)
             if (b.vy < 0) {
                 b.vy = -(b.vy * rest_q) >> 8;
             }
+            if (block_iabs(b.vy) < BLOCK_REST_VN_Q8) {
+                b.vy = 0;
+            }
             b.vx = (b.vx * inv_friction) >> 8;
             b.contact = true;
         } else if (b.y > max_y) {
             b.y = max_y;
             if (b.vy > 0) {
                 b.vy = -(b.vy * rest_q) >> 8;
+            }
+            if (block_iabs(b.vy) < BLOCK_REST_VN_Q8) {
+                b.vy = 0;
             }
             b.vx = (b.vx * inv_friction) >> 8;
             b.contact = true;
@@ -572,10 +606,26 @@ void block_physics_imu_update(block_physics_handle_t handle,
     const int32_t hpx = axs - handle->lp_x;
     const int32_t hpy = ays - handle->lp_y;
     const int32_t hpz = (int32_t)az - handle->lp_z;
-    const int32_t energy = block_iabs(hpx) + block_iabs(hpy) + block_iabs(hpz) +
-                           block_iabs(gx) + block_iabs(gy) + block_iabs(gz);
-    if ((uint32_t)energy > handle->shake) {
-        handle->shake = (uint32_t)energy;
+    /* 抖动判据：陀螺角速度差分（jerk）+ 加速度高通；匀速翻转时差分趋近 0，不触发 */
+    const int32_t jerk = block_iabs((int32_t)gx - handle->last_gx) +
+                         block_iabs((int32_t)gy - handle->last_gy) +
+                         block_iabs((int32_t)gz - handle->last_gz);
+    handle->last_gx = gx;
+    handle->last_gy = gy;
+    handle->last_gz = gz;
+    const int32_t energy = block_iabs(hpx) + block_iabs(hpy) + block_iabs(hpz) + jerk;
+    /* 连续多拍超阈值才视为晃动：单次快速转动（如翻转）通常只持续 2~3 拍，不会触发 */
+    if (energy > CONFIG_BLOCK_PHYSICS_SHAKE_THRESHOLD) {
+        if (handle->shake_hits < 255) {
+            handle->shake_hits++;
+        }
+    } else {
+        handle->shake_hits = 0;
+    }
+    if (handle->shake_hits >= BLOCK_SHAKE_SUSTAIN_HITS) {
+        if ((uint32_t)energy > handle->shake) {
+            handle->shake = (uint32_t)energy;
+        }
     }
     handle->imu_active = true;
     handle->last_imu_us = esp_timer_get_time();

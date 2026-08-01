@@ -32,32 +32,37 @@ config BLOCK_PHYSICS_RENDER_HZ
 
 config BLOCK_PHYSICS_ITERATIONS
     int "Collision iterations per physics step"
-    default 3
+    default 4
     range 1 8
 
 config BLOCK_PHYSICS_GRAVITY_ACC_Q8
     int "Gravity acceleration at 1g (Q8.8 px/step^2)"
-    default 56
+    default 96
     range 4 120
 
 config BLOCK_PHYSICS_DAMPING_Q8
     int "Velocity damping per step (Q8.8)"
-    default 252
+    default 255
     range 200 255
 
 config BLOCK_PHYSICS_RESTITUTION_Q8
     int "Bounce restitution (Q8.8)"
-    default 32
+    default 115
     range 0 255
 
 config BLOCK_PHYSICS_FRICTION_Q8
     int "Contact friction (Q8.8, fraction of tangential velocity removed)"
-    default 140
+    default 60
     range 0 255
+
+config BLOCK_PHYSICS_DRAG_VARIATION_Q8
+    int "Per-block drag variation (Q8.8, 0 disables)"
+    default 24
+    range 0 128
 
 config BLOCK_PHYSICS_ACCEL_LP_ALPHA
     int "IMU accel low-pass alpha (Q8.8)"
-    default 64
+    default 48
     range 1 255
 
 config BLOCK_PHYSICS_MAX_VEL_Q8
@@ -67,12 +72,12 @@ config BLOCK_PHYSICS_MAX_VEL_Q8
 
 config BLOCK_PHYSICS_SHAKE_THRESHOLD
     int "Shake energy threshold (raw LSB)"
-    default 6000
+    default 8000
     range 0 200000
 
 config BLOCK_PHYSICS_SHAKE_GAIN_Q8
     int "Shake impulse gain (Q8.8)"
-    default 10
+    default 8
     range 1 255
 
 config BLOCK_PHYSICS_IMU_SWAP_XY
