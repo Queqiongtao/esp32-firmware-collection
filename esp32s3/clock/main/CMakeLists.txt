@@ -6,6 +6,7 @@ set(MAIN_SRCS
     "rtc_time_sync.cpp"
     "imu_demo.cpp"
     "lv_font_clock_96.c"
+    "lv_font_clock_144.c"
     "clock_theme_minimal.cpp"
     "clock_theme_segment.cpp"
     "lv_font_seg_96.c"

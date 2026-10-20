@@ -65,6 +65,7 @@ Build output:
 - `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback
 - `main/clock_theme.h`: theme interface
 - `main/clock_theme_minimal.cpp`
+- `main/lv_font_clock_144.c`: 144 px clock font used by the minimal theme
 - `main/clock_theme_segment.cpp`
 - `main/clock_theme_analog.cpp`
 - `main/clock_theme_outline_analog.cpp`

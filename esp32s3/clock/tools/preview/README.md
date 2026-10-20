@@ -32,4 +32,5 @@
 
 - 快照对象是 `lv_screen_active()`，因为 M5 Simple 的秒点等元素挂在 screen 上而不是主题根。
 - 预览只验证构图与配色；亮度、Gamma、刷新流畅度仍需上板确认。
+- 新增主题字体时，需要同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
 - 修改 `main/` 下主题源码后重新执行 `run.sh` 即可，无需刷机。

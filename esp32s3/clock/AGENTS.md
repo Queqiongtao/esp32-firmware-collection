@@ -23,6 +23,7 @@
 - `main/clock_theme.h`：时钟主题接口。
 - `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_outline_analog.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_watch.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，包括 Classic、Simple、BigNumber、NumberFlow。
+- `main/lv_font_*.c`：主题位图字体资源；新增字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
 - `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，RTC 无效时使用固件编译时间兜底。
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟旋转角计算。

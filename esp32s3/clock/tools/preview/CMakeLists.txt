@@ -32,6 +32,7 @@ add_executable(preview
     ${MAIN_DIR}/clock_theme_outline_analog.cpp
     ${MAIN_DIR}/clock_theme_m5_watch.cpp
     ${MAIN_DIR}/lv_font_clock_96.c
+    ${MAIN_DIR}/lv_font_clock_144.c
     ${MAIN_DIR}/lv_font_seg_96.c
     ${MAIN_DIR}/lv_font_seg_36.c
     ${M5_FONTS}

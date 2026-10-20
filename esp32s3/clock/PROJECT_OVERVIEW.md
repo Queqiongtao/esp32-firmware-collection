@@ -187,6 +187,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/main.cpp`：应用入口、主题注册、LVGL snapshot、旋转弹簧、按钮和 IMU 回调接入。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
+- `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_watch.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步。
