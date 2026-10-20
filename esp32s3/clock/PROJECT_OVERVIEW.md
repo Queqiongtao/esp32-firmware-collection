@@ -20,7 +20,6 @@
   - `segment`
   - `analog`
   - `outline_analog`
-  - `mooncat`
   - `m5_classic`
   - `m5_simple`
   - `m5_big_number`
@@ -68,11 +67,10 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 2. `segment`
 3. `analog`
 4. `outline_analog`
-5. `mooncat`
-6. `m5_classic`
-7. `m5_simple`
-8. `m5_big_number`
-9. `m5_number_flow`
+5. `m5_classic`
+6. `m5_simple`
+7. `m5_big_number`
+8. `m5_number_flow`
 
 支持的触发方式：
 
@@ -109,7 +107,7 @@ typedef struct {
 - `build()` 在父对象下创建 466 x 466 的主题根容器，并返回根对象。
 - `update()` 根据当前 `struct tm` 更新时间、日期、指针或数字，并返回根主题内容是否实际变化。
 - `reset()` 在主题进入时重置内部状态。
-- `destroy_overlay()` 删除不属于主题根对象的覆盖层，例如 Mooncat 和 M5 Simple 秒点。
+- `destroy_overlay()` 删除不属于主题根对象的覆盖层，例如 M5 Simple 秒点。
 - `tick()` 用于主题内部动画，例如 M5 Simple 秒点动画和 M5 NumberFlow 数字滚动。
 
 主题对象树平时会被隐藏。主框架复用一张 466 x 466 RGB565 draw buffer，在刷新时临时显示根主题、隐藏 snapshot 图片和覆盖层，调用 `lv_snapshot_take_to_draw_buf()`，随后恢复显示层级。旋转过程中产生的时间变化会延迟到弹簧停稳后再截图。
@@ -195,8 +193,6 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 ./dev.sh flash-monitor
 ./dev.sh -p /dev/ttyUSB0 flash-monitor
 ```
-
-从干净构建目录编译时，主机需要提供 `ffmpeg` 和 `ffprobe`，用于从 `main/assets/mooncat.gif` 生成动画帧。
 
 构建成功后生成：
 

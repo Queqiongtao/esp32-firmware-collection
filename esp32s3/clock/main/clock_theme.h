@@ -26,7 +26,6 @@ extern const clock_theme_t g_clock_theme_minimal;
 extern const clock_theme_t g_clock_theme_segment;
 extern const clock_theme_t g_clock_theme_analog;
 extern const clock_theme_t g_clock_theme_outline_analog;
-extern const clock_theme_t g_clock_theme_mooncat;
 extern const clock_theme_t g_clock_theme_m5_classic;
 extern const clock_theme_t g_clock_theme_m5_simple;
 extern const clock_theme_t g_clock_theme_m5_big_number;

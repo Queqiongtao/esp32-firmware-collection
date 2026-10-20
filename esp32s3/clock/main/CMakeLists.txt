@@ -12,7 +12,6 @@ set(MAIN_SRCS
     "lv_font_seg_36.c"
     "clock_theme_analog.cpp"
     "clock_theme_outline_analog.cpp"
-    "clock_theme_mooncat.cpp"
     "clock_theme_m5_watch.cpp"
     "m5_assets/images/watch_face/classic/classic_hour_hand.c"
     "m5_assets/images/watch_face/classic/classic_minute_hand.c"
@@ -33,27 +32,6 @@ set(MAIN_SRCS
     "m5_assets/fonts/lv_font_maple_mono_medium_28.c")
 
 set(MAIN_INCLUDE_DIRS ".")
-
-if(NOT CMAKE_BUILD_EARLY_EXPANSION)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-    set(MOONCAT_GIF ${CMAKE_CURRENT_SOURCE_DIR}/assets/mooncat.gif)
-    set(MOONCAT_GENERATOR ${CMAKE_CURRENT_SOURCE_DIR}/mooncat_frames_gen.py)
-    set(MOONCAT_FRAMES_C ${CMAKE_CURRENT_BINARY_DIR}/mooncat_frames.c)
-    set(MOONCAT_FRAMES_H ${CMAKE_CURRENT_BINARY_DIR}/mooncat_frames.h)
-
-    add_custom_command(
-        OUTPUT ${MOONCAT_FRAMES_C} ${MOONCAT_FRAMES_H}
-        COMMAND ${Python3_EXECUTABLE} ${MOONCAT_GENERATOR}
-                --input ${MOONCAT_GIF}
-                --output-c ${MOONCAT_FRAMES_C}
-                --output-h ${MOONCAT_FRAMES_H}
-        DEPENDS ${MOONCAT_GIF} ${MOONCAT_GENERATOR}
-        VERBATIM)
-
-    list(APPEND MAIN_SRCS ${MOONCAT_FRAMES_C})
-    list(APPEND MAIN_INCLUDE_DIRS ${CMAKE_CURRENT_BINARY_DIR})
-endif()
 
 idf_component_register(
     SRCS ${MAIN_SRCS}

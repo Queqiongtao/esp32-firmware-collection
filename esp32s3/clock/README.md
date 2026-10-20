@@ -9,7 +9,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 ## Features
 
 - 466 x 466 AMOLED clock UI with switchable themes
-- Switchable themes: minimal, segment, analog, outline analog, mooncat, and four M5 WatchFace themes
+- Switchable themes: minimal, segment, analog, outline analog, and four M5 WatchFace themes
 - Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image
 - PCF85063 external RTC syncs system time, with build time as fallback
 - QMI8658 IMU computes in-plane gravity angle for clock rotation
@@ -37,8 +37,6 @@ Use the root helper script instead of assuming ESP-IDF is manually activated:
 ./dev.sh flash-monitor
 ./dev.sh -p /dev/ttyUSB0 flash-monitor
 ```
-
-Clean builds require `ffmpeg` and `ffprobe` on the host to regenerate the Mooncat animation frames.
 
 Build output:
 

@@ -21,7 +21,7 @@
 
 - `main/main.cpp`：应用入口、主题切换、LVGL snapshot、旋转弹簧、GPIO0 按钮/触摸手势/电源键接入、设置菜单、自动息屏。
 - `main/clock_theme.h`：时钟主题接口。
-- `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_outline_analog.cpp`、`main/clock_theme_mooncat.cpp`：本工程原有时钟主题。
+- `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_outline_analog.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_watch.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，包括 Classic、Simple、BigNumber、NumberFlow。
 - `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，RTC 无效时使用固件编译时间兜底。

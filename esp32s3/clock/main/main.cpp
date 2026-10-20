@@ -38,7 +38,6 @@ static const clock_theme_t *const s_themes[] = {
     &g_clock_theme_segment,
     &g_clock_theme_analog,
     &g_clock_theme_outline_analog,
-    &g_clock_theme_mooncat,
     &g_clock_theme_m5_classic,
     &g_clock_theme_m5_simple,
     &g_clock_theme_m5_big_number,
