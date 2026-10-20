@@ -7,6 +7,7 @@
 ## 修改规则
 
 - 默认使用中文沟通和 Git 提交信息，提交前缀固定为 `P4-PrintSphere: `。
+- 未经用户明确要求，不要执行 `git commit` 或 `git push`；只完成代码修改、构建验证和结果汇报，等用户确认后再提交。
 - 工程固定使用 ESP-IDF `6.0.1`、ESP32-P4、LVGL `9.5.0`；升级必须先更新 `docs/architecture/technology_stack.md` 并单独验证。
 - 所有计划、架构、协议、硬件和测试资料放在 `docs/` 对应目录，并与实现同步。
 - 板级代码收敛在 `components/jc1060p470_bsp`；业务层不得直接重复初始化显示、I2C、I2S 或 Hosted 资源。

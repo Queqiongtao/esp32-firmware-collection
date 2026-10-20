@@ -25,3 +25,4 @@
 - Rust 参考核心落地后，在本工程目录使用 `cargo test --workspace` 和 `cargo clippy --workspace --all-targets`。
 - ESP32、RK 和移动端适配器是独立子工程，各自提供构建说明，不在仓库根目录假定统一工具链。
 - Git 提交信息默认使用前缀 `WDP-wireless_display: `。
+- 未经用户明确要求，不要执行 `git commit` 或 `git push`；只完成代码修改、构建验证和结果汇报，等用户确认后再提交。
