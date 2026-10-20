@@ -159,7 +159,7 @@ typedef struct {
 
 - `Classic` 使用 canvas 绘制 466 x 466 刻度，并使用原始三根指针图片。
 - `Simple` 使用原始字体、10 套主题色和秒点平滑运动。
-- `BigNumber` 使用原始数字图片和 4 套 palette。
+- `BigNumber` 使用原始数字图片和 4 套 palette；本工程补充日期，并用上排冰蓝、下排珊瑚的冷暖分色区分小时与分钟。
 - `NumberFlow` 在本工程内实现两位数字滚动效果，替代 M5 依赖库中的 `NumberFlow` 控件。
 
 注意：M5 原项目中 WatchFace 内部触摸点击可切换 palette、display mode 或秒点显示状态。当前工程采用 snapshot 旋转架构，主题对象常态隐藏，触摸事件没有直接接入这些内部交互。本工程目前以默认显示效果一致为目标，主题切换由 GPIO0 或触摸滑动完成。
