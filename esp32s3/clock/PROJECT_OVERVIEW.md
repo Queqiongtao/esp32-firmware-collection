@@ -141,7 +141,14 @@ typedef struct {
 - `BigNumber`
 - `NumberFlow`
 
-相关实现集中在 `main/clock_theme_m5_watch.cpp`，资源位于：
+相关实现按主题拆分为：
+
+- `main/clock_theme_m5_classic.cpp`
+- `main/clock_theme_m5_simple.cpp`
+- `main/clock_theme_m5_big_number.cpp`
+- `main/clock_theme_m5_number_flow.cpp`
+
+资源位于：
 
 - `main/m5_assets/images/watch_face/classic/`
 - `main/m5_assets/images/watch_face/big_number/`
@@ -188,7 +195,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
-- `main/clock_theme_m5_watch.cpp`：M5 WatchFace 迁移主题。
+- `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步。
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟平面角计算。

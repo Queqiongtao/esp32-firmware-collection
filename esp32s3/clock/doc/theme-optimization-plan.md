@@ -1,7 +1,7 @@
 # 主题优化计划
 
 > 目标：把 8 个时钟主题做得更好看、布局更合理、更吸睛。
-> 约束：各主题独立风格，不要求视觉统一；补齐日期；M5 四个主题后续单独讨论；小步交付。
+> 约束：各主题独立风格，不要求视觉统一；补齐日期；M5 四主题保留原识别度、逐主题优化；小步交付。
 > 文档位置：`esp32s3/clock/doc/theme-optimization-plan.md`（本文件为唯一事实来源）。
 
 ---
@@ -19,7 +19,8 @@
 | segment 重设计 | ✅ 已完成（待上板确认） | Amber Deck：琥珀数字 + 珊瑚强调，最大半径 221.4 |
 | analog 重设计 | ✅ 已完成（待上板确认） | 机械计时：多层表圈 + 3 点日期窗 + 6 点小秒盘 |
 | outline 重设计 | ✅ 已完成（待上板确认） | 线框轨道：同心细环 + 放射刻度 + 红色秒点 |
-| M5 四主题优化 | ⏸ 暂停 | 等 4 个原生主题完成后再讨论 |
+| M5 四主题结构统一 | ✅ 已完成 | 四主题拆分为独立文件，24 张预览 PPM 与重构前逐字节一致 |
+| M5 四主题优化 | 🟨 进行中 | 结构已统一，待逐主题调整样式 |
 | 上板验证 | ⬜ 未开始 | 每轮改动后需真机确认 |
 
 ---
@@ -233,13 +234,26 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - 小时针角度加入秒数微调 `sec / 12`，分针按秒连续移动
 - `outline_analog_update()` 每秒更新两针、日期和秒点位置，无额外定时器
 
-### 5. M5 四主题（暂停）
+### 5. M5 四主题（结构已统一，待样式优化）
+
+**结构统一**
+
+- `clock_theme_m5_classic.cpp`：Classic
+- `clock_theme_m5_simple.cpp`：Simple
+- `clock_theme_m5_big_number.cpp`：BigNumber
+- `clock_theme_m5_number_flow.cpp`：NumberFlow
+- 每个文件独立持有本主题的 palette、静态控件、helper 和生命周期回调，与四个原生主题保持一致
+- `main/CMakeLists.txt`、`tools/preview/CMakeLists.txt` 同步改为四个源文件
+- 重构前后 24 张 M5 预览 PPM（4 主题 × 6 个时刻）逐字节一致
+- `./dev.sh build` 通过，`esp-clock.bin` = 0x15c2d0
+
+**待优化**
 
 - `m5_classic`：星期颜色对比度偏低，日期胶囊偏紧
 - `m5_simple`：暂无硬伤
 - `m5_big_number`：无日期，留白大
 - `m5_number_flow`：面板无 H/M/S 标识
-- 待 4 个原生主题完成后讨论：保持还原度 or 允许重设计
+- 已确认保留 M5 原始识别度，按主题做定点修复，不整体重设计
 
 ---
 
@@ -250,7 +264,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - [x] 2. segment 重设计 → 预览 → 用户确认（已确认，待上板验证）
 - [x] 3. analog 重设计 → 预览 → 用户确认（已确认，待上板验证）
 - [x] 4. outline 重设计 → 预览 → 用户确认（已确认，待上板验证）
-- [ ] 5. M5 四主题讨论与实施
+- [x] 5.1 M5 四主题结构统一（一主题一文件，预览像素一致）
+- [ ] 5.2 M5 四主题样式优化（逐主题确认）
 - [ ] 6. 整体上板验证（GPIO0、滑动、旋转、菜单）
 
 每轮流程：改代码 → `./dev.sh build` → `./tools/preview/run.sh` → 出图确认 → 下一个。
@@ -289,3 +304,4 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 | 2026-10-20 | analog 机械计时方案确认 |
 | 2026-10-20 | outline 改为线框轨道：四层细环 + 121 线放射刻度 + 红色秒点 + 6 点日期环 |
 | 2026-10-20 | outline 线框轨道方案确认，保留指针遮挡日期 |
+| 2026-10-20 | M5 四主题拆分为独立文件，先统一结构再做样式；重构前后预览像素一致 |
