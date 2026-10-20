@@ -34,6 +34,8 @@
 - `components/attitude/`：保留的姿态估计算法，当前时钟应用不依赖、不启动。
 - `components/ui_physics/`：角度弹簧平滑逻辑。
 - `components/esp32_s3_touch_amoled_1_75/`：本地 Waveshare BSP。
+- `tools/preview/`：主机端主题预览工具，用 LVGL 桌面构建渲染主题 PNG，不参与 ESP-IDF 构建。
+- `doc/theme-optimization-plan.md`：主题优化路线、进度和逐主题设计稿。
 
 ## 常用命令
 
@@ -45,6 +47,14 @@
 ./dev.sh flash-monitor
 ./dev.sh -p /dev/ttyUSB0 flash-monitor
 ```
+
+只调整主题视觉时，可以先在主机端出图自查，不必刷机：
+
+```bash
+./tools/preview/run.sh
+```
+
+产物在 `tools/preview/out/`，会同时输出圆屏遮罩图和越界报告。
 
 构建成功时会生成 `build/esp-clock.bin`。当前工程使用自定义分区表，factory app 分区大小为 6 MB。
 
@@ -82,5 +92,6 @@
 ```
 
 - 涉及串口、刷机或硬件交互时，先用 `./dev.sh ports` 确认端口。
+- 只调整主题视觉时，先跑 `./tools/preview/run.sh` 检查构图、圆屏裁切和越界报告，再上板确认观感。
 - 如果没有硬件，最终说明中要明确哪些行为只完成了编译验证，哪些需要上板验证。
 - 纯文档变更不需要构建，但需要检查路径、命令和模块描述是否与源码一致。

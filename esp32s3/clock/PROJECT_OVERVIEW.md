@@ -119,6 +119,19 @@ typedef struct {
 3. 在 `main/main.cpp` 的 `s_themes` 数组中注册。
 4. 如有新资源，在 `main/CMakeLists.txt` 中加入源文件。
 
+### 主题预览工具
+
+`tools/preview/` 是主机端离屏预览工具，使用 LVGL 官方桌面构建把主题渲染成 PNG，不参与 ESP-IDF 构建。适合快速检查构图、对齐、圆屏裁切和配色，避免每改一次主题都刷机：
+
+```bash
+./tools/preview/run.sh
+./tools/preview/run.sh --time 23:59:59
+```
+
+产物在 `tools/preview/out/`：`r1.0/` 是叠加圆屏遮罩的单主题图，`raw/` 是原图，`contact_native.png` 等是对比图，`report.txt` 记录非黑像素范围与安全区越界告警。预览只验证构图与配色，亮度、Gamma 和刷新流畅度仍需上板确认。
+
+主题优化路线、当前进度和各主题设计稿见 `doc/theme-optimization-plan.md`。
+
 ## M5 WatchFace 迁移
 
 工程迁移了 `M5StopWatch-UserDemo` 中的四个 WatchFace：
@@ -182,6 +195,8 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `components/pcf85063/`：PCF85063 I2C 驱动。
 - `components/ui_physics/`：角度弹簧。
 - `components/esp32_s3_touch_amoled_1_75/`：本地 Waveshare BSP。
+- `tools/preview/`：主机端主题预览工具，用 LVGL 桌面构建渲染主题 PNG。
+- `doc/theme-optimization-plan.md`：主题优化路线、进度与设计稿。
 
 ## 构建和烧录
 

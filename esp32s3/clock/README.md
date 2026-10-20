@@ -38,6 +38,14 @@ Use the root helper script instead of assuming ESP-IDF is manually activated:
 ./dev.sh -p /dev/ttyUSB0 flash-monitor
 ```
 
+Theme preview runs on the host without flashing:
+
+```bash
+./tools/preview/run.sh
+```
+
+It renders every theme to `tools/preview/out/` as PNG; see `tools/preview/README.md` for details.
+
 Build output:
 
 - Firmware image: `build/esp-clock.bin`
@@ -63,3 +71,5 @@ Build output:
 - `components/qmi8658/`: QMI8658 I2C driver
 - `components/pcf85063/`: PCF85063 I2C driver
 - `components/ui_physics/`: angle spring smoothing
+- `tools/preview/`: host-side theme renderer using the LVGL desktop build
+- `doc/theme-optimization-plan.md`: theme roadmap, progress, and design notes
