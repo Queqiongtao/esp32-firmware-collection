@@ -49,10 +49,13 @@ static size_t s_current_theme_index = 0;
 
 static constexpr gpio_num_t CLOCK_BUTTON_GPIO = GPIO_NUM_0;
 static constexpr uint8_t CLOCK_BUTTON_ACTIVE_LEVEL = 0;
+static constexpr int32_t CLOCK_DISPLAY_SIZE = 466;
 
 static constexpr uint32_t PWR_BUTTON_POLL_TIMER_MS = 30;
 static constexpr uint32_t PWR_BUTTON_DEBOUNCE_MS = 50;
 static constexpr uint32_t PWR_BUTTON_SINGLE_CLICK_MAX_MS = 800;
+static constexpr uint32_t CLOCK_INPUT_TIMER_MS = 15;
+static constexpr uint32_t CLOCK_SETTINGS_SAVE_DELAY_MS = 500;
 static constexpr uint32_t PWR_BUTTON_PIN_MASK = IO_EXPANDER_PIN_NUM_4;
 static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 0;
 
@@ -78,6 +81,12 @@ static lv_obj_t *s_current_theme_root = NULL;
 static lv_obj_t *s_clock_snapshot_image = NULL;
 static lv_obj_t *s_settings_menu = NULL;
 static lv_draw_buf_t *s_clock_snapshot = NULL;
+static lv_timer_t *s_clock_update_timer = NULL;
+static lv_timer_t *s_theme_animation_timer = NULL;
+static lv_timer_t *s_clock_rotation_timer = NULL;
+static lv_timer_t *s_auto_sleep_timer = NULL;
+static lv_timer_t *s_input_timer = NULL;
+static lv_timer_t *s_settings_save_timer = NULL;
 static spring_angle_t s_clock_rotation_spring = {};
 static uint32_t s_clock_rotation_last_tick_ms = 0;
 static uint32_t s_clock_rotation_last_perf_log_ms = 0;
@@ -94,6 +103,9 @@ static float s_clock_rotation_submitted_target_deg = 0.0f;
 static bool s_clock_rotation_submitted_target_valid = false;
 static bool s_clock_rotation_started = false;
 static bool s_clock_rotation_target_dirty = false;
+static bool s_clock_snapshot_dirty = false;
+static bool s_settings_save_pending = false;
+static volatile bool s_clock_rendering_enabled = true;
 static volatile int s_theme_switch_pending_step = 0;
 static volatile bool s_button_single_click_pending = false;
 static volatile bool s_pwr_single_click_pending = false;
@@ -107,12 +119,19 @@ static bool s_pwr_button_stable_pressed = false;
 static bool s_pwr_button_candidate_pressed = false;
 static uint32_t s_pwr_button_candidate_since_ms = 0;
 static uint32_t s_pwr_button_press_start_ms = 0;
+static uint32_t s_pwr_button_last_poll_ms = 0;
 
 static void keep_touch_layer_foreground(void);
 static void close_settings_menu(void);
 static void open_settings_menu(void);
 static bool note_user_activity(void);
 static bool sleep_screen(const char *reason);
+static void update_clock_rendering_state(void);
+static void update_clock(lv_timer_t *timer);
+static void update_theme_animation(lv_timer_t *timer);
+static void update_clock_rotation(lv_timer_t *timer);
+static void update_pwr_button(lv_timer_t *timer);
+static void apply_clock_rotation(float angle_deg);
 
 static bool is_clock_rotation_active(void)
 {
@@ -124,11 +143,86 @@ static const clock_theme_t *current_theme(void)
     return s_themes[s_current_theme_index];
 }
 
+static bool has_pending_rotation_target(void)
+{
+    portENTER_CRITICAL(&s_clock_rotation_lock);
+    const bool pending = s_clock_rotation_target_dirty;
+    portEXIT_CRITICAL(&s_clock_rotation_lock);
+    return pending;
+}
+
+static void start_rotation_timer_locked(void)
+{
+    if (!s_clock_rendering_enabled ||
+        s_clock_rotation_timer == NULL ||
+        !lv_timer_get_paused(s_clock_rotation_timer)) {
+        return;
+    }
+
+    s_clock_rotation_last_tick_ms = lv_tick_get();
+    lv_timer_resume(s_clock_rotation_timer);
+    lv_timer_ready(s_clock_rotation_timer);
+}
+
+static void update_clock_rendering_state(void)
+{
+    const bool enabled = !s_screen_sleeping && s_settings_menu == NULL;
+    s_clock_rendering_enabled = enabled;
+    imu_demo_set_active(enabled);
+
+    if (!enabled) {
+        if (s_clock_update_timer != NULL) {
+            lv_timer_pause(s_clock_update_timer);
+        }
+        if (s_theme_animation_timer != NULL) {
+            lv_timer_pause(s_theme_animation_timer);
+        }
+        if (s_clock_rotation_timer != NULL) {
+            lv_timer_pause(s_clock_rotation_timer);
+        }
+        return;
+    }
+
+    s_clock_rotation_last_tick_ms = lv_tick_get();
+    if (s_clock_update_timer != NULL) {
+        lv_timer_resume(s_clock_update_timer);
+    }
+
+    if (s_theme_animation_timer != NULL) {
+        if (current_theme()->tick != NULL) {
+            lv_timer_resume(s_theme_animation_timer);
+        } else {
+            lv_timer_pause(s_theme_animation_timer);
+        }
+    }
+
+    if (s_clock_rotation_timer != NULL) {
+        if (has_pending_rotation_target() || !spring_angle_is_settled(&s_clock_rotation_spring)) {
+            start_rotation_timer_locked();
+        } else {
+            lv_timer_pause(s_clock_rotation_timer);
+        }
+    }
+
+    update_clock(NULL);
+    if (is_clock_rotation_active() || s_clock_snapshot_dirty) {
+        apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+    }
+}
+
 static void set_current_theme_overlay_visible(bool visible)
 {
     const clock_theme_t *theme = current_theme();
     if (theme->set_overlay_visible != NULL) {
         theme->set_overlay_visible(visible);
+    }
+}
+
+static void destroy_current_theme_overlay(void)
+{
+    const clock_theme_t *theme = current_theme();
+    if (theme->destroy_overlay != NULL) {
+        theme->destroy_overlay();
     }
 }
 
@@ -183,20 +277,40 @@ static void refresh_clock_snapshot(void)
     lv_obj_clear_flag(s_current_theme_root, LV_OBJ_FLAG_HIDDEN);
     set_current_theme_overlay_visible(false);
     lv_obj_add_flag(s_clock_snapshot_image, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_update_layout(s_current_theme_root);
 
-    lv_draw_buf_t *snapshot = lv_snapshot_take(s_current_theme_root, LV_COLOR_FORMAT_RGB565);
+    lv_draw_buf_t *snapshot = s_clock_snapshot;
+    if (snapshot == NULL) {
+        snapshot = lv_snapshot_create_draw_buf(s_current_theme_root, LV_COLOR_FORMAT_RGB565);
+        s_clock_snapshot = snapshot;
+    }
+
+    lv_result_t snapshot_result = LV_RESULT_INVALID;
+    if (snapshot != NULL) {
+        snapshot_result =
+            lv_snapshot_take_to_draw_buf(s_current_theme_root, LV_COLOR_FORMAT_RGB565, snapshot);
+    }
+
+    lv_draw_buf_t *old_snapshot = s_clock_snapshot;
+    if (snapshot_result != LV_RESULT_OK) {
+        snapshot = lv_snapshot_take(s_current_theme_root, LV_COLOR_FORMAT_RGB565);
+        if (snapshot != NULL) {
+            s_clock_snapshot = snapshot;
+        }
+    }
+
     lv_obj_add_flag(s_current_theme_root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(s_clock_snapshot_image, LV_OBJ_FLAG_HIDDEN);
     set_current_theme_overlay_visible(true);
 
     if (snapshot == NULL) {
         ESP_LOGW(TAG, "Failed to refresh clock snapshot");
+        s_clock_snapshot_dirty = true;
+        s_clock_rotation_applied_valid = false;
+        apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+        keep_touch_layer_foreground();
         return;
     }
 
-    lv_draw_buf_t *old_snapshot = s_clock_snapshot;
-    s_clock_snapshot = snapshot;
     lv_image_set_src(s_clock_snapshot_image, s_clock_snapshot);
 
     const int32_t image_width = lv_image_get_src_width(s_clock_snapshot_image);
@@ -204,10 +318,11 @@ static void refresh_clock_snapshot(void)
     lv_image_set_pivot(s_clock_snapshot_image, image_width / 2, image_height / 2);
     lv_obj_center(s_clock_snapshot_image);
 
-    if (old_snapshot != NULL) {
+    if (old_snapshot != NULL && old_snapshot != s_clock_snapshot) {
         lv_draw_buf_destroy(old_snapshot);
     }
 
+    s_clock_snapshot_dirty = false;
     ++s_clock_rotation_perf_snapshots;
     s_clock_rotation_applied_valid = false;
     apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
@@ -294,12 +409,51 @@ static void reset_current_theme(void)
     }
 }
 
-static void save_settings(void)
+static void save_settings_now(void)
 {
     esp_err_t err = clock_settings_save(&s_settings);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Save settings failed: %s", esp_err_to_name(err));
     }
+}
+
+static void on_settings_save_timer(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!s_settings_save_pending) {
+        return;
+    }
+
+    s_settings_save_pending = false;
+    save_settings_now();
+}
+
+static void schedule_settings_save(void)
+{
+    s_settings_save_pending = true;
+    if (s_settings_save_timer == NULL) {
+        s_settings_save_pending = false;
+        save_settings_now();
+        return;
+    }
+
+    lv_timer_set_repeat_count(s_settings_save_timer, 1);
+    lv_timer_reset(s_settings_save_timer);
+    lv_timer_resume(s_settings_save_timer);
+}
+
+static void flush_settings_save(void)
+{
+    if (!s_settings_save_pending) {
+        return;
+    }
+
+    s_settings_save_pending = false;
+    if (s_settings_save_timer != NULL) {
+        lv_timer_pause(s_settings_save_timer);
+        lv_timer_set_repeat_count(s_settings_save_timer, -1);
+    }
+    save_settings_now();
 }
 
 static bool is_touch_action_blocked(void)
@@ -313,12 +467,15 @@ static bool wake_screen_if_sleeping(void)
         return false;
     }
 
-    s_screen_sleeping = false;
     esp_err_t err = bsp_display_brightness_set(s_settings.brightness_percent);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Wake brightness failed: %s", esp_err_to_name(err));
+        return false;
     }
+
+    s_screen_sleeping = false;
     s_last_activity_ms = lv_tick_get();
+    update_clock_rendering_state();
     return true;
 }
 
@@ -336,6 +493,7 @@ static bool sleep_screen(const char *reason)
 
     s_screen_sleeping = true;
     ESP_LOGI(TAG, "screen %s sleep", reason);
+    update_clock_rendering_state();
     return true;
 }
 
@@ -374,21 +532,21 @@ static void on_menu_brightness(int brightness_percent, void *user_ctx)
             ESP_LOGW(TAG, "Set brightness failed: %s", esp_err_to_name(err));
         }
     }
-    save_settings();
+    schedule_settings_save();
 }
 
 static void on_menu_sleep(uint32_t sleep_timeout_sec, void *user_ctx)
 {
     (void)user_ctx;
     s_settings.sleep_timeout_sec = sleep_timeout_sec;
-    save_settings();
+    schedule_settings_save();
 }
 
 static void on_menu_wifi(bool enabled, void *user_ctx)
 {
     (void)user_ctx;
     s_settings.wifi_enabled = enabled;
-    save_settings();
+    schedule_settings_save();
     ESP_LOGI(TAG, "WiFi setting is %s (connection is not configured yet)", enabled ? "on" : "off");
 }
 
@@ -416,8 +574,14 @@ static void open_settings_menu(void)
         .user_ctx = NULL,
     };
     s_settings_menu = clock_settings_menu_create(screen, &menu_config);
+    if (s_settings_menu == NULL) {
+        ESP_LOGW(TAG, "Failed to create settings menu");
+        return;
+    }
+
     clock_touch_gesture_set_enabled(false);
     keep_touch_layer_foreground();
+    update_clock_rendering_state();
 }
 
 static void close_settings_menu(void)
@@ -426,10 +590,12 @@ static void close_settings_menu(void)
         return;
     }
 
+    flush_settings_save();
     lv_obj_del(s_settings_menu);
     s_settings_menu = NULL;
     clock_touch_gesture_set_enabled(true);
     keep_touch_layer_foreground();
+    update_clock_rendering_state();
 }
 
 static void toggle_settings_menu(void)
@@ -476,14 +642,9 @@ static void process_pending_input_actions(void)
 
 static void update_clock_rotation(lv_timer_t *timer)
 {
-    (void)timer;
-
-    process_pending_input_actions();
-
-    const int theme_switch_step = s_theme_switch_pending_step;
-    if (theme_switch_step != 0) {
-        s_theme_switch_pending_step = 0;
-        switch_theme(theme_switch_step);
+    if (!s_clock_rendering_enabled) {
+        lv_timer_pause(timer);
+        return;
     }
 
     ++s_clock_rotation_perf_ticks;
@@ -509,20 +670,38 @@ static void update_clock_rotation(lv_timer_t *timer)
 
     if (target_dirty) {
         spring_angle_set_target(&s_clock_rotation_spring, target_deg);
-    } else if (spring_angle_is_settled(&s_clock_rotation_spring)) {
+    }
+
+    if (!target_dirty && spring_angle_is_settled(&s_clock_rotation_spring)) {
         portENTER_CRITICAL(&s_clock_rotation_lock);
         s_clock_rotation_started = false;
         portEXIT_CRITICAL(&s_clock_rotation_lock);
 
         ++s_clock_rotation_perf_skip_settled;
-        if ((uint32_t)(now_ms - s_clock_rotation_last_perf_log_ms) >= CLOCK_ROTATION_PERF_LOG_MS) {
-            s_clock_rotation_last_perf_log_ms = now_ms;
-            reset_clock_rotation_perf_counters();
+        if (s_clock_snapshot_dirty) {
+            refresh_clock_snapshot();
+        } else {
+            apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
         }
+        lv_timer_pause(timer);
         return;
     }
 
     spring_angle_update(&s_clock_rotation_spring, dt_s);
+    if (spring_angle_is_settled(&s_clock_rotation_spring)) {
+        portENTER_CRITICAL(&s_clock_rotation_lock);
+        s_clock_rotation_started = false;
+        portEXIT_CRITICAL(&s_clock_rotation_lock);
+
+        if (s_clock_snapshot_dirty) {
+            refresh_clock_snapshot();
+        } else {
+            apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+        }
+        lv_timer_pause(timer);
+        return;
+    }
+
     apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
     log_clock_rotation_perf(now_ms);
 }
@@ -586,6 +765,31 @@ static void update_pwr_button(lv_timer_t *timer)
     }
 }
 
+static void update_inputs(lv_timer_t *timer)
+{
+    (void)timer;
+
+    process_pending_input_actions();
+
+    const int theme_switch_step = s_theme_switch_pending_step;
+    if (theme_switch_step != 0) {
+        s_theme_switch_pending_step = 0;
+        switch_theme(theme_switch_step);
+    }
+
+    const uint32_t now_ms = lv_tick_get();
+    if ((uint32_t)(now_ms - s_pwr_button_last_poll_ms) >= PWR_BUTTON_POLL_TIMER_MS) {
+        s_pwr_button_last_poll_ms = now_ms;
+        update_pwr_button(NULL);
+    }
+
+    if (s_clock_rendering_enabled &&
+        has_pending_rotation_target() &&
+        s_clock_rotation_timer != NULL) {
+        start_rotation_timer_locked();
+    }
+}
+
 static void on_imu_clock_angle(float angle_deg, void *user_ctx)
 {
     (void)user_ctx;
@@ -631,19 +835,32 @@ static void update_clock(lv_timer_t *timer)
 {
     (void)timer;
 
+    if (!s_clock_rendering_enabled || s_screen_sleeping || s_settings_menu != NULL) {
+        return;
+    }
+
     time_t now = 0;
     struct tm timeinfo = {};
 
     time(&now);
     localtime_r(&now, &timeinfo);
 
-    s_themes[s_current_theme_index]->update(&timeinfo);
-    refresh_clock_snapshot();
+    if (s_themes[s_current_theme_index]->update(&timeinfo)) {
+        s_clock_snapshot_dirty = true;
+    }
+
+    if (s_clock_snapshot_dirty && !is_clock_rotation_active()) {
+        refresh_clock_snapshot();
+    }
 }
 
 static void update_theme_animation(lv_timer_t *timer)
 {
     (void)timer;
+
+    if (!s_clock_rendering_enabled || s_screen_sleeping || s_settings_menu != NULL) {
+        return;
+    }
 
     const clock_theme_t *theme = current_theme();
     if (theme->tick == NULL) {
@@ -655,7 +872,10 @@ static void update_theme_animation(lv_timer_t *timer)
 
     if (theme->tick(lv_tick_get())) {
         if (theme->tick_updates_overlay_only == NULL || !theme->tick_updates_overlay_only()) {
-            refresh_clock_snapshot();
+            s_clock_snapshot_dirty = true;
+            if (!is_clock_rotation_active()) {
+                refresh_clock_snapshot();
+            }
         }
     }
 }
@@ -668,6 +888,7 @@ static void switch_theme(int step)
 
     lv_obj_t *screen = lv_screen_active();
     set_current_theme_overlay_visible(false);
+    destroy_current_theme_overlay();
     lv_obj_del(s_current_theme_root);
 
     const int normalized_step = step % (int)s_theme_count;
@@ -678,7 +899,15 @@ static void switch_theme(int step)
 
     s_clock_rotation_applied_valid = false;
     reset_current_theme();
+    s_clock_snapshot_dirty = true;
     update_clock(NULL);
+    if (s_theme_animation_timer != NULL && s_clock_rendering_enabled) {
+        if (s_themes[s_current_theme_index]->tick != NULL) {
+            lv_timer_resume(s_theme_animation_timer);
+        } else {
+            lv_timer_pause(s_theme_animation_timer);
+        }
+    }
     keep_touch_layer_foreground();
 }
 
@@ -729,6 +958,14 @@ static void create_clock_ui(void)
 
     s_clock_snapshot_image = lv_image_create(screen);
     lv_obj_center(s_clock_snapshot_image);
+    s_clock_snapshot =
+        lv_draw_buf_create(CLOCK_DISPLAY_SIZE,
+                           CLOCK_DISPLAY_SIZE,
+                           LV_COLOR_FORMAT_RGB565,
+                           LV_STRIDE_AUTO);
+    if (s_clock_snapshot == NULL) {
+        ESP_LOGW(TAG, "Failed to allocate reusable clock snapshot buffer");
+    }
 
     clock_touch_gesture_create(screen,
                                on_touch_theme_switch,
@@ -750,13 +987,29 @@ static void create_clock_ui(void)
     s_clock_rotation_target_dirty = false;
     portEXIT_CRITICAL(&s_clock_rotation_lock);
 
-    update_clock(NULL);
-    keep_touch_layer_foreground();
     s_last_activity_ms = lv_tick_get();
-    lv_timer_create(update_clock, 1000, NULL);
-    lv_timer_create(update_theme_animation, CLOCK_THEME_ANIMATION_TIMER_MS, NULL);
-    lv_timer_create(update_clock_rotation, CLOCK_ROTATION_TIMER_MS, NULL);
-    lv_timer_create(update_auto_sleep, 1000, NULL);
+    s_clock_snapshot_dirty = true;
+    s_clock_update_timer = lv_timer_create(update_clock, 1000, NULL);
+    s_theme_animation_timer =
+        lv_timer_create(update_theme_animation, CLOCK_THEME_ANIMATION_TIMER_MS, NULL);
+    s_clock_rotation_timer =
+        lv_timer_create(update_clock_rotation, CLOCK_ROTATION_TIMER_MS, NULL);
+    if (s_clock_rotation_timer != NULL) {
+        lv_timer_pause(s_clock_rotation_timer);
+    }
+    s_auto_sleep_timer = lv_timer_create(update_auto_sleep, 1000, NULL);
+    s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
+
+    s_settings_save_timer =
+        lv_timer_create(on_settings_save_timer, CLOCK_SETTINGS_SAVE_DELAY_MS, NULL);
+    if (s_settings_save_timer != NULL) {
+        lv_timer_set_auto_delete(s_settings_save_timer, false);
+        lv_timer_set_repeat_count(s_settings_save_timer, -1);
+        lv_timer_pause(s_settings_save_timer);
+    }
+
+    update_clock_rendering_state();
+    keep_touch_layer_foreground();
 }
 
 static void on_theme_button(void *button_handle, void *user_ctx)
@@ -826,14 +1079,7 @@ static void pwr_button_init(void)
     s_pwr_button_candidate_pressed = pressed;
     s_pwr_button_candidate_since_ms = now_ms;
     s_pwr_button_press_start_ms = pressed ? now_ms : 0;
-    if (bsp_display_lock(UINT32_MAX) == ESP_OK) {
-        lv_timer_create(update_pwr_button, PWR_BUTTON_POLL_TIMER_MS, NULL);
-        bsp_display_unlock();
-    } else {
-        ESP_LOGW(TAG, "PWR button timer create lock failed");
-        return;
-    }
-
+    s_pwr_button_last_poll_ms = now_ms;
     s_pwr_button_ready = true;
     ESP_LOGI(TAG, "PWR button polling on EXIO4");
 }

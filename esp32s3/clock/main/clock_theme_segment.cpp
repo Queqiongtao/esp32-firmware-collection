@@ -162,7 +162,7 @@ static lv_obj_t *segment_build(lv_obj_t *parent)
     return container;
 }
 
-static void segment_update(const struct tm *timeinfo)
+static bool segment_update(const struct tm *timeinfo)
 {
     char time_text[8] = {};
     char sec_text[4] = {};
@@ -177,6 +177,7 @@ static void segment_update(const struct tm *timeinfo)
     lv_label_set_text(s_time_fg, time_text);
     lv_label_set_text(s_seconds_fg, sec_text);
     lv_label_set_text(s_date_fg, date_text);
+    return true;
 }
 
 const clock_theme_t g_clock_theme_segment = {

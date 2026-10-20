@@ -66,6 +66,8 @@ static lv_obj_t *analog_build(lv_obj_t *parent)
     lv_obj_remove_style_all(container);
     lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(container, ANALOG_SIZE, ANALOG_SIZE);
+    lv_obj_set_style_bg_color(container, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(container, LV_OPA_COVER, 0);
     lv_obj_center(container);
 
     make_ring(container);
@@ -107,10 +109,10 @@ static lv_obj_t *analog_build(lv_obj_t *parent)
     return container;
 }
 
-static void analog_update(const struct tm *timeinfo)
+static bool analog_update(const struct tm *timeinfo)
 {
     if (s_scale == NULL) {
-        return;
+        return false;
     }
 
     const int32_t sec_val = timeinfo->tm_sec * 60;
@@ -125,6 +127,7 @@ static void analog_update(const struct tm *timeinfo)
     lv_scale_set_line_needle_value(s_scale, s_second_tail, ANALOG_SEC_TAIL_LEN, sec_tail_val);
     lv_scale_set_line_needle_value(s_scale, s_second_back, ANALOG_SEC_LEN, sec_val);
     lv_scale_set_line_needle_value(s_scale, s_second_fg, ANALOG_SEC_LEN, sec_val);
+    return true;
 }
 
 const clock_theme_t g_clock_theme_analog = {

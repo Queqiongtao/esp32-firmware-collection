@@ -15,6 +15,8 @@ static lv_obj_t *minimal_build(lv_obj_t *parent)
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_remove_style_all(container);
     lv_obj_set_size(container, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(container, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(container, LV_OPA_COVER, 0);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_row(container, 16, 0);
@@ -39,7 +41,7 @@ static lv_obj_t *minimal_build(lv_obj_t *parent)
     return container;
 }
 
-static void minimal_update(const struct tm *timeinfo)
+static bool minimal_update(const struct tm *timeinfo)
 {
     static const char *const kWeekdayAbbr[7] = {
         "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
@@ -57,6 +59,7 @@ static void minimal_update(const struct tm *timeinfo)
     lv_label_set_text(s_time_label, time_text);
     lv_label_set_text(s_seconds_label, sec_text);
     lv_label_set_text(s_date_label, date_text);
+    return true;
 }
 
 const clock_theme_t g_clock_theme_minimal = {

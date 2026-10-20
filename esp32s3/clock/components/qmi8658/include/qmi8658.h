@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "driver/i2c_master.h"
@@ -18,6 +19,7 @@ typedef struct {
     uint16_t device_address;
     uint32_t scl_speed_hz;
     int timeout_ms;
+    bool enable_gyro;
 } qmi8658_config_t;
 
 typedef struct {
@@ -38,7 +40,13 @@ typedef struct {
     int16_t raw_temperature;
 } qmi8658_sample_t;
 
+typedef struct {
+    float accel_g[3];
+    int16_t raw_accel[3];
+} qmi8658_accel_sample_t;
+
 esp_err_t qmi8658_init(qmi8658_t *imu, const qmi8658_config_t *config);
+esp_err_t qmi8658_read_accel(qmi8658_t *imu, qmi8658_accel_sample_t *sample);
 esp_err_t qmi8658_read(qmi8658_t *imu, qmi8658_sample_t *sample);
 
 #ifdef __cplusplus

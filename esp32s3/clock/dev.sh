@@ -4,6 +4,7 @@ set -euo pipefail
 DEFAULT_PORT="/dev/ttyACM0"
 PORT="${PORT:-$DEFAULT_PORT}"
 PORT_WAS_SET=0
+EIM_LOG_FILE="${EIM_LOG_FILE:-/tmp/eim-clock.log}"
 
 usage() {
     cat <<'EOF'
@@ -46,7 +47,7 @@ die() {
 }
 
 run_idf() {
-    eim run "idf.py $*"
+    eim --log-file "$EIM_LOG_FILE" run "idf.py $*"
 }
 
 list_ports() {

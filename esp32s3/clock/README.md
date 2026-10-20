@@ -10,11 +10,10 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 
 - 466 x 466 AMOLED clock UI with switchable themes
 - Switchable themes: minimal, segment, analog, outline analog, mooncat, and four M5 WatchFace themes
-- Current theme is snapshotted with `lv_snapshot_take()` and rotated as an image
+- Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image
 - PCF85063 external RTC syncs system time, with build time as fallback
 - QMI8658 IMU computes in-plane gravity angle for clock rotation
-- Quick wrist flick switches to the next theme
-- GPIO0 single click still switches theme as a fallback
+- GPIO0 and touch swipes switch themes
 - Theme switch order and implementation details are documented in `PROJECT_OVERVIEW.md`
 
 ## Hardware
@@ -39,6 +38,8 @@ Use the root helper script instead of assuming ESP-IDF is manually activated:
 ./dev.sh -p /dev/ttyUSB0 flash-monitor
 ```
 
+Clean builds require `ffmpeg` and `ffprobe` on the host to regenerate the Mooncat animation frames.
+
 Build output:
 
 - Firmware image: `build/esp-clock.bin`
@@ -46,16 +47,14 @@ Build output:
 
 ## Runtime Notes
 
-- The IMU task samples QMI8658 at 100 Hz.
-- Gyro bias calibration uses 200 samples after boot; keep the board still during this phase.
-- Theme switching by gesture is based on a short wrist rotation and is rate-limited to avoid repeated triggers.
+- The IMU task samples QMI8658 acceleration at 100 Hz and keeps sampling paused while the menu is open or the screen is asleep.
 - GPIO0 is also a boot-related pin; holding it during power-on or reset can affect boot mode.
-- The rotation pipeline keeps an RGB565 snapshot in memory, and refresh may briefly hold both old and new snapshots at once.
+- The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes.
 
 ## Key Files
 
 - `main/main.cpp`: app entry, theme switching, LVGL snapshot, rotation spring, GPIO0 button wiring
-- `main/imu_demo.cpp`: IMU sampling, gyro bias calibration, clock angle update, wrist-flick gesture detection
+- `main/imu_demo.cpp`: accelerometer sampling and clock angle update
 - `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback
 - `main/clock_theme.h`: theme interface
 - `main/clock_theme_minimal.cpp`
@@ -64,5 +63,4 @@ Build output:
 - `main/clock_theme_outline_analog.cpp`
 - `components/qmi8658/`: QMI8658 I2C driver
 - `components/pcf85063/`: PCF85063 I2C driver
-- `components/attitude/`: attitude estimation
 - `components/ui_physics/`: angle spring smoothing

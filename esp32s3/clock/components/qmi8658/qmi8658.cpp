@@ -12,6 +12,7 @@ static constexpr uint8_t REG_CTRL1 = 0x02;
 static constexpr uint8_t REG_CTRL2 = 0x03;
 static constexpr uint8_t REG_CTRL3 = 0x04;
 static constexpr uint8_t REG_CTRL7 = 0x08;
+static constexpr uint8_t REG_ACCEL_X_L = 0x35;
 static constexpr uint8_t REG_TEMP_L = 0x33;
 
 static constexpr uint8_t CTRL1_ADDR_AUTO_INCREMENT = BIT(6);
@@ -117,15 +118,39 @@ esp_err_t qmi8658_init(qmi8658_t *imu, const qmi8658_config_t *config)
     ESP_RETURN_ON_ERROR(
         write_reg(imu, REG_CTRL2, CTRL2_ACC_RANGE_8G | CTRL2_ACC_ODR_125HZ),
         TAG, "write CTRL2 failed");
+    if (config->enable_gyro) {
+        ESP_RETURN_ON_ERROR(
+            write_reg(imu, REG_CTRL3, CTRL3_GYR_RANGE_512DPS | CTRL3_GYR_ODR_125HZ),
+            TAG, "write CTRL3 failed");
+    }
     ESP_RETURN_ON_ERROR(
-        write_reg(imu, REG_CTRL3, CTRL3_GYR_RANGE_512DPS | CTRL3_GYR_ODR_125HZ),
-        TAG, "write CTRL3 failed");
-    ESP_RETURN_ON_ERROR(
-        write_reg(imu, REG_CTRL7, CTRL7_ACC_ENABLE | CTRL7_GYR_ENABLE),
+        write_reg(imu,
+                  REG_CTRL7,
+                  CTRL7_ACC_ENABLE | (config->enable_gyro ? CTRL7_GYR_ENABLE : 0)),
         TAG, "write CTRL7 failed");
 
     ESP_LOGI(TAG, "QMI8658 initialized at 0x%02X, chip id 0x%02X",
              imu->device_address, imu->chip_id);
+
+    return ESP_OK;
+}
+
+esp_err_t qmi8658_read_accel(qmi8658_t *imu, qmi8658_accel_sample_t *sample)
+{
+    ESP_RETURN_ON_FALSE(imu != NULL && imu->dev_handle != NULL, ESP_ERR_INVALID_ARG, TAG, "imu is invalid");
+    ESP_RETURN_ON_FALSE(sample != NULL, ESP_ERR_INVALID_ARG, TAG, "sample is null");
+
+    uint8_t data[6] = {};
+    ESP_RETURN_ON_ERROR(read_regs(imu, REG_ACCEL_X_L, data, sizeof(data)), TAG, "read accel failed");
+
+    memset(sample, 0, sizeof(*sample));
+    sample->raw_accel[0] = le16(&data[0]);
+    sample->raw_accel[1] = le16(&data[2]);
+    sample->raw_accel[2] = le16(&data[4]);
+
+    for (int i = 0; i < 3; ++i) {
+        sample->accel_g[i] = sample->raw_accel[i] / imu->accel_lsb_per_g;
+    }
 
     return ESP_OK;
 }

@@ -342,7 +342,7 @@ static lv_obj_t *m5_classic_build(lv_obj_t *parent)
     return container;
 }
 
-static void m5_classic_update(const struct tm *timeinfo)
+static bool m5_classic_update(const struct tm *timeinfo)
 {
     char time_text[8] = {};
     char date_text[4] = {};
@@ -367,6 +367,7 @@ static void m5_classic_update(const struct tm *timeinfo)
     set_hand_rotation(s_m5_classic_hour, hour_angle);
     set_hand_rotation(s_m5_classic_minute, minute_angle);
     set_hand_rotation(s_m5_classic_second, second_angle);
+    return true;
 }
 
 // M5 Simple
@@ -375,6 +376,7 @@ namespace {
 static constexpr int SIMPLE_TICK_COUNT = 12;
 static constexpr float SIMPLE_DOT_RADIUS = 214.0f;
 static constexpr float SIMPLE_TICK_RADIUS = 194.0f;
+static constexpr int32_t SIMPLE_DOT_SIZE = 14;
 
 static lv_obj_t *s_m5_simple_time = NULL;
 static lv_obj_t *s_m5_simple_date = NULL;
@@ -388,6 +390,28 @@ static float s_m5_simple_anim_start = 0.0f;
 static float s_m5_simple_anim_target = 0.0f;
 static uint32_t s_m5_simple_anim_start_tick = 0;
 static bool s_m5_simple_anim_active = false;
+static float s_m5_simple_dot_offset_x = 0.0f;
+static float s_m5_simple_dot_offset_y = 0.0f;
+static float s_m5_simple_rotation_deg = 0.0f;
+
+static void position_simple_dot(void)
+{
+    if (s_m5_simple_dot == NULL) {
+        return;
+    }
+
+    const float radians = s_m5_simple_rotation_deg * PI / 180.0f;
+    const float cos_a = cosf(radians);
+    const float sin_a = sinf(radians);
+    const int32_t x = lroundf(cos_a * s_m5_simple_dot_offset_x -
+                             sin_a * s_m5_simple_dot_offset_y);
+    const int32_t y = lroundf(sin_a * s_m5_simple_dot_offset_x +
+                             cos_a * s_m5_simple_dot_offset_y);
+
+    lv_obj_set_pos(s_m5_simple_dot,
+                   CENTER + x - SIMPLE_DOT_SIZE / 2,
+                   CENTER + y - SIMPLE_DOT_SIZE / 2);
+}
 
 static void apply_simple_dot(float angle_deg)
 {
@@ -396,9 +420,9 @@ static void apply_simple_dot(float angle_deg)
     }
 
     const float radians = (angle_deg - 90.0f) * PI / 180.0f;
-    const int32_t x = lroundf(SIMPLE_DOT_RADIUS * cosf(radians));
-    const int32_t y = lroundf(SIMPLE_DOT_RADIUS * sinf(radians));
-    lv_obj_align(s_m5_simple_dot, LV_ALIGN_CENTER, x, y);
+    s_m5_simple_dot_offset_x = SIMPLE_DOT_RADIUS * cosf(radians);
+    s_m5_simple_dot_offset_y = SIMPLE_DOT_RADIUS * sinf(radians);
+    position_simple_dot();
 }
 
 static lv_obj_t *make_simple_ring(lv_obj_t *parent)
@@ -511,10 +535,35 @@ static void reset_simple_state(void)
     apply_simple_theme(0);
 }
 
+static void destroy_simple_overlay(void)
+{
+    if (s_m5_simple_dot != NULL) {
+        lv_obj_del(s_m5_simple_dot);
+        s_m5_simple_dot = NULL;
+    }
+}
+
+static void set_simple_overlay_visible(bool visible)
+{
+    set_obj_hidden(s_m5_simple_dot, !visible);
+}
+
+static void set_simple_rotation(float angle_deg)
+{
+    s_m5_simple_rotation_deg = angle_deg;
+    position_simple_dot();
+}
+
+static bool simple_tick_updates_overlay_only(void)
+{
+    return true;
+}
+
 } // namespace
 
 static lv_obj_t *m5_simple_build(lv_obj_t *parent)
 {
+    destroy_simple_overlay();
     lv_obj_t *container = make_root(parent, lv_color_hex(0x000000));
     s_m5_simple_root = container;
     s_m5_simple_time = NULL;
@@ -534,7 +583,9 @@ static lv_obj_t *m5_simple_build(lv_obj_t *parent)
     s_m5_simple_date = make_label(container, &lv_font_montserrat_24, lv_color_hex(0xA0A0A0));
     lv_obj_align(s_m5_simple_date, LV_ALIGN_CENTER, 0, 70);
 
-    s_m5_simple_dot = make_panel(container, 14, 14, LV_RADIUS_CIRCLE, lv_color_hex(0xA0A0A0), LV_OPA_COVER);
+    s_m5_simple_dot =
+        make_panel(parent, SIMPLE_DOT_SIZE, SIMPLE_DOT_SIZE, LV_RADIUS_CIRCLE,
+                   lv_color_hex(0xA0A0A0), LV_OPA_COVER);
     apply_simple_dot(0.0f);
 
     reset_simple_state();
@@ -542,7 +593,7 @@ static lv_obj_t *m5_simple_build(lv_obj_t *parent)
     return container;
 }
 
-static void m5_simple_update(const struct tm *timeinfo)
+static bool m5_simple_update(const struct tm *timeinfo)
 {
     char time_text[8] = {};
     char date_text[32] = {};
@@ -552,15 +603,24 @@ static void m5_simple_update(const struct tm *timeinfo)
              timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
              kWeekdayAbbr[timeinfo->tm_wday % 7]);
 
-    lv_label_set_text(s_m5_simple_time, time_text);
-    lv_label_set_text(s_m5_simple_date, date_text);
+    const bool time_changed = strcmp(lv_label_get_text(s_m5_simple_time), time_text) != 0;
+    const bool date_changed = strcmp(lv_label_get_text(s_m5_simple_date), date_text) != 0;
+    if (time_changed) {
+        lv_label_set_text(s_m5_simple_time, time_text);
+    }
+    if (date_changed) {
+        lv_label_set_text(s_m5_simple_date, date_text);
+    }
     set_simple_target_angle((float)(timeinfo->tm_sec * 6));
+    return time_changed || date_changed;
 }
 
 // M5 BigNumber
 namespace {
 
 static lv_obj_t *s_m5_big_digits[4] = {};
+static int s_m5_big_last_hour = -1;
+static int s_m5_big_last_minute = -1;
 
 static lv_obj_t *make_big_digit(lv_obj_t *parent, int32_t x, int32_t y, uint32_t color)
 {
@@ -583,6 +643,8 @@ static lv_obj_t *m5_big_number_build(lv_obj_t *parent)
 {
     lv_obj_t *container = make_root(parent, lv_color_hex(0x000000));
     memset(s_m5_big_digits, 0, sizeof(s_m5_big_digits));
+    s_m5_big_last_hour = -1;
+    s_m5_big_last_minute = -1;
 
     s_m5_big_digits[0] = make_big_digit(container, -42, -51, 0xCBDB8C);
     s_m5_big_digits[1] = make_big_digit(container, 42, -51, 0xD3EA71);
@@ -593,8 +655,15 @@ static lv_obj_t *m5_big_number_build(lv_obj_t *parent)
     return container;
 }
 
-static void m5_big_number_update(const struct tm *timeinfo)
+static bool m5_big_number_update(const struct tm *timeinfo)
 {
+    if (timeinfo->tm_hour == s_m5_big_last_hour &&
+        timeinfo->tm_min == s_m5_big_last_minute) {
+        return false;
+    }
+
+    s_m5_big_last_hour = timeinfo->tm_hour;
+    s_m5_big_last_minute = timeinfo->tm_min;
     const int digits[4] = {
         timeinfo->tm_hour / 10,
         timeinfo->tm_hour % 10,
@@ -605,6 +674,7 @@ static void m5_big_number_update(const struct tm *timeinfo)
     for (int i = 0; i < 4; ++i) {
         lv_image_set_src(s_m5_big_digits[i], get_big_number_image(digits[i]));
     }
+    return true;
 }
 
 // M5 NumberFlow, static LVGL equivalent layout.
@@ -677,18 +747,18 @@ static void set_flow_digit_color(FlowDigits *flow, uint32_t color)
     }
 }
 
-static void set_flow_value(FlowDigits *flow, int value)
+static bool set_flow_value(FlowDigits *flow, int value)
 {
     if (flow->value < 0) {
         flow->value = value;
         flow->previous_value = value;
         set_flow_label_value(flow->current, value);
         lv_obj_center(flow->current);
-        return;
+        return true;
     }
 
     if (flow->value == value) {
-        return;
+        return false;
     }
 
     flow->previous_value = flow->value;
@@ -699,6 +769,7 @@ static void set_flow_value(FlowDigits *flow, int value)
     set_flow_label_value(flow->current, flow->previous_value);
     set_flow_label_value(flow->next, flow->value);
     lv_obj_clear_flag(flow->next, LV_OBJ_FLAG_HIDDEN);
+    return true;
 }
 
 static bool tick_flow_digit(FlowDigits *flow, uint32_t now_ms)
@@ -781,18 +852,22 @@ static lv_obj_t *m5_number_flow_build(lv_obj_t *parent)
     return container;
 }
 
-static void m5_number_flow_update(const struct tm *timeinfo)
+static bool m5_number_flow_update(const struct tm *timeinfo)
 {
     char text[32] = {};
 
-    set_flow_value(&s_m5_flow_digits[0], timeinfo->tm_hour);
-    set_flow_value(&s_m5_flow_digits[1], timeinfo->tm_min);
-    set_flow_value(&s_m5_flow_digits[2], timeinfo->tm_sec);
+    bool changed = set_flow_value(&s_m5_flow_digits[0], timeinfo->tm_hour);
+    changed = set_flow_value(&s_m5_flow_digits[1], timeinfo->tm_min) || changed;
+    changed = set_flow_value(&s_m5_flow_digits[2], timeinfo->tm_sec) || changed;
 
     snprintf(text, sizeof(text), "%d/%d/%d %s",
              timeinfo->tm_year + 1900, timeinfo->tm_mon + 1, timeinfo->tm_mday,
              kWeekdayAbbr[timeinfo->tm_wday % 7]);
-    lv_label_set_text(s_m5_flow_date, text);
+    const bool date_changed = strcmp(lv_label_get_text(s_m5_flow_date), text) != 0;
+    if (date_changed) {
+        lv_label_set_text(s_m5_flow_date, text);
+    }
+    return changed || date_changed;
 }
 
 static bool m5_number_flow_tick(uint32_t now_ms)
@@ -816,7 +891,11 @@ const clock_theme_t g_clock_theme_m5_simple = {
     .build = m5_simple_build,
     .update = m5_simple_update,
     .reset = reset_simple_state,
+    .destroy_overlay = destroy_simple_overlay,
     .tick = tick_simple,
+    .tick_updates_overlay_only = simple_tick_updates_overlay_only,
+    .set_overlay_visible = set_simple_overlay_visible,
+    .set_rotation = set_simple_rotation,
 };
 
 const clock_theme_t g_clock_theme_m5_big_number = {

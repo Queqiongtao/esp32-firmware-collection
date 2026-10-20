@@ -109,10 +109,10 @@ static lv_obj_t *outline_analog_build(lv_obj_t *parent)
     return container;
 }
 
-static void outline_analog_update(const struct tm *timeinfo)
+static bool outline_analog_update(const struct tm *timeinfo)
 {
     if (s_scale == NULL) {
-        return;
+        return false;
     }
 
     const int32_t sec_val = timeinfo->tm_sec * 60;
@@ -131,6 +131,7 @@ static void outline_analog_update(const struct tm *timeinfo)
     (void)s_ring;
     (void)s_center_outer;
     (void)s_center_inner;
+    return true;
 }
 
 const clock_theme_t g_clock_theme_outline_analog = {
