@@ -201,13 +201,16 @@ static lv_obj_t *m5_classic_build(lv_obj_t *parent)
     s_m5_classic_time = make_label(container, &lv_font_maple_mono_medium_28, lv_color_hex(0xD9D9D9));
     lv_obj_align(s_m5_classic_time, LV_ALIGN_CENTER, 0, 104);
 
-    s_m5_classic_weekday = make_label(container, &lv_font_maple_mono_medium_24, lv_color_hex(0x717171));
-    lv_obj_align(s_m5_classic_weekday, LV_ALIGN_CENTER, 0, 138);
+    s_m5_classic_weekday = make_label(container, &lv_font_maple_mono_medium_24, lv_color_hex(0xA8A8A8));
+    lv_obj_align(s_m5_classic_weekday, LV_ALIGN_CENTER, 0, 142);
 
-    s_m5_classic_date_panel = make_panel(container, 48, 34, LV_RADIUS_CIRCLE, lv_color_hex(0x101010), LV_OPA_COVER);
+    s_m5_classic_date_panel = make_panel(container, 56, 38, LV_RADIUS_CIRCLE, lv_color_hex(0x0D0D0D), LV_OPA_COVER);
+    lv_obj_set_style_border_width(s_m5_classic_date_panel, 1, 0);
+    lv_obj_set_style_border_color(s_m5_classic_date_panel, lv_color_hex(0x3A3A3A), 0);
+    lv_obj_set_style_border_opa(s_m5_classic_date_panel, LV_OPA_COVER, 0);
     lv_obj_align(s_m5_classic_date_panel, LV_ALIGN_CENTER, 125, 0);
 
-    s_m5_classic_date = make_label(s_m5_classic_date_panel, &lv_font_maple_mono_medium_24, lv_color_hex(0x8B8B8B));
+    s_m5_classic_date = make_label(s_m5_classic_date_panel, &lv_font_maple_mono_medium_24, lv_color_hex(0xB8B8B8));
     lv_obj_center(s_m5_classic_date);
 
     s_m5_classic_hour = make_hand(container, &classic_hour_hand, 126, 14, 18);
