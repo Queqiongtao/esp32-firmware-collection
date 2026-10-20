@@ -11,6 +11,7 @@ typedef void (*clock_touch_long_press_cb_t)(void *user_ctx);
 typedef void (*clock_touch_activity_cb_t)(lv_event_code_t code, void *user_ctx);
 
 lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
+                                     lv_indev_t *indev,
                                      clock_touch_gesture_cb_t cb,
                                      void *user_ctx,
                                      clock_touch_long_press_cb_t long_press_cb,

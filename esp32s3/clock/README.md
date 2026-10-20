@@ -49,6 +49,7 @@ Build output:
 
 - The IMU task samples QMI8658 acceleration at 100 Hz and keeps sampling paused while the menu is open or the screen is asleep.
 - GPIO0 is also a boot-related pin; holding it during power-on or reset can affect boot mode.
+- Touch settings require a roughly 2-second stationary long press; moving more than 16 px cancels long press and leaves the gesture available for swipe handling.
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes.
 
 ## Key Files

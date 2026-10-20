@@ -968,6 +968,7 @@ static void create_clock_ui(void)
     }
 
     clock_touch_gesture_create(screen,
+                               bsp_display_get_input_dev(),
                                on_touch_theme_switch,
                                NULL,
                                on_touch_long_press,

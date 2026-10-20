@@ -10,7 +10,8 @@ static const char *TAG = "ClockTouch";
 
 static constexpr int32_t CLOCK_TOUCH_LAYER_SIZE_PX = 466;
 static constexpr uint32_t CLOCK_TOUCH_SWITCH_COOLDOWN_MS = 350;
-static constexpr uint32_t CLOCK_TOUCH_SWIPE_MAX_DURATION_MS = 800;
+static constexpr uint32_t CLOCK_TOUCH_LONG_PRESS_MS = 2000;
+static constexpr int32_t CLOCK_TOUCH_LONG_PRESS_MOVE_TOLERANCE_PX = 16;
 static constexpr int32_t CLOCK_TOUCH_SWIPE_MIN_DELTA_PX = 100;
 static constexpr float CLOCK_TOUCH_SWIPE_AXIS_RATIO = 2.0f;
 static constexpr float DEG_TO_RAD = 0.017453292519943295f;
@@ -23,9 +24,9 @@ static void *s_long_press_user_ctx = NULL;
 static clock_touch_activity_cb_t s_activity_cb = NULL;
 static void *s_activity_user_ctx = NULL;
 static uint32_t s_last_theme_switch_ms = 0;
-static uint32_t s_press_tick_ms = 0;
 static lv_point_t s_press_point = {};
 static bool s_press_valid = false;
+static bool s_press_moved = false;
 static bool s_long_press_fired = false;
 static bool s_touch_enabled = true;
 static float s_rotation_deg = 0.0f;
@@ -66,6 +67,14 @@ static void notify_activity(lv_event_code_t code)
     }
 }
 
+static bool point_moved_beyond_long_press_tolerance(const lv_point_t *point)
+{
+    const int32_t dx = point->x - s_press_point.x;
+    const int32_t dy = point->y - s_press_point.y;
+    const int32_t tolerance = CLOCK_TOUCH_LONG_PRESS_MOVE_TOLERANCE_PX;
+    return (dx * dx + dy * dy) >= (tolerance * tolerance);
+}
+
 static void on_clock_touch_event(lv_event_t *event)
 {
     const lv_event_code_t code = lv_event_get_code(event);
@@ -74,21 +83,48 @@ static void on_clock_touch_event(lv_event_t *event)
         notify_activity(code);
         if (get_touch_point(event, &s_press_point)) {
             s_press_valid = true;
+            s_press_moved = false;
             s_long_press_fired = false;
-            s_press_tick_ms = lv_tick_get();
             ESP_LOGD(TAG, "touch pressed: x=%" PRId32 ", y=%" PRId32,
                      s_press_point.x, s_press_point.y);
         }
         return;
     }
 
+    if (code == LV_EVENT_PRESSING) {
+        lv_point_t point = {};
+        if (s_press_valid && !s_press_moved && get_touch_point(event, &point) &&
+            point_moved_beyond_long_press_tolerance(&point)) {
+            s_press_moved = true;
+        }
+        return;
+    }
+
     if (code == LV_EVENT_LONG_PRESSED) {
         notify_activity(code);
+        lv_point_t point = {};
+        const bool moved =
+            s_press_moved ||
+            (s_press_valid && get_touch_point(event, &point) &&
+             point_moved_beyond_long_press_tolerance(&point));
+        if (!s_press_valid || moved) {
+            s_press_moved = moved;
+            return;
+        }
+
         s_long_press_fired = true;
         s_press_valid = false;
         if (s_touch_enabled && s_long_press_cb != NULL) {
             s_long_press_cb(s_long_press_user_ctx);
         }
+        return;
+    }
+
+    if (code == LV_EVENT_PRESS_LOST) {
+        s_press_valid = false;
+        s_press_moved = false;
+        s_long_press_fired = false;
+        notify_activity(code);
         return;
     }
 
@@ -98,6 +134,7 @@ static void on_clock_touch_event(lv_event_t *event)
 
     if (!s_touch_enabled || s_long_press_fired) {
         s_press_valid = false;
+        s_press_moved = false;
         s_long_press_fired = false;
         notify_activity(code);
         return;
@@ -106,23 +143,20 @@ static void on_clock_touch_event(lv_event_t *event)
     lv_point_t release_point = {};
     if (!get_touch_point(event, &release_point)) {
         s_press_valid = false;
+        s_press_moved = false;
         notify_activity(code);
         return;
     }
 
     if (!s_press_valid) {
+        s_press_moved = false;
         notify_activity(code);
         return;
     }
     s_press_valid = false;
+    s_press_moved = false;
 
     const uint32_t now_ms = lv_tick_get();
-    const uint32_t duration_ms = now_ms - s_press_tick_ms;
-    if (duration_ms > CLOCK_TOUCH_SWIPE_MAX_DURATION_MS) {
-        ESP_LOGD(TAG, "touch ignored: duration=%" PRIu32 " ms", duration_ms);
-        notify_activity(code);
-        return;
-    }
 
     const int32_t dx = release_point.x - s_press_point.x;
     const int32_t dy = release_point.y - s_press_point.y;
@@ -168,6 +202,7 @@ static void on_clock_touch_event(lv_event_t *event)
 }
 
 lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
+                                     lv_indev_t *indev,
                                      clock_touch_gesture_cb_t cb,
                                      void *user_ctx,
                                      clock_touch_long_press_cb_t long_press_cb,
@@ -175,6 +210,10 @@ lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
                                      clock_touch_activity_cb_t activity_cb,
                                      void *activity_user_ctx)
 {
+    if (indev != NULL) {
+        lv_indev_set_long_press_time(indev, CLOCK_TOUCH_LONG_PRESS_MS);
+    }
+
     s_touch_cb = cb;
     s_touch_user_ctx = user_ctx;
     s_long_press_cb = long_press_cb;
@@ -182,9 +221,9 @@ lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
     s_activity_cb = activity_cb;
     s_activity_user_ctx = activity_user_ctx;
     s_last_theme_switch_ms = 0;
-    s_press_tick_ms = 0;
     s_press_point = {};
     s_press_valid = false;
+    s_press_moved = false;
     s_long_press_fired = false;
     s_touch_enabled = true;
     s_rotation_deg = 0.0f;
@@ -196,7 +235,9 @@ lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
     lv_obj_set_size(s_touch_layer, CLOCK_TOUCH_LAYER_SIZE_PX, CLOCK_TOUCH_LAYER_SIZE_PX);
     lv_obj_center(s_touch_layer);
     lv_obj_add_event_cb(s_touch_layer, on_clock_touch_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_touch_layer, on_clock_touch_event, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_touch_layer, on_clock_touch_event, LV_EVENT_LONG_PRESSED, NULL);
+    lv_obj_add_event_cb(s_touch_layer, on_clock_touch_event, LV_EVENT_PRESS_LOST, NULL);
     lv_obj_add_event_cb(s_touch_layer, on_clock_touch_event, LV_EVENT_RELEASED, NULL);
 
     return s_touch_layer;
