@@ -2,15 +2,17 @@
 """把 preview 生成的 PPM 转成 PNG，并叠加圆屏遮罩与安全区参考。
 
 输出：
-  out/raw/*.png      原始渲染
-  out/r1.0/*.png     圆形遮罩 + 玻璃边缘（模拟真实面板）
-  out/contact.png    8 个主题对比图
+  out/round/*.png    默认查看：圆形遮罩 + 亮色玻璃边缘（模拟真实圆屏）
+  out/raw/*.png      未遮罩原图，调试构图用
+  out/ppm/*.ppm      原始 PPM
+  out/contact_*.png  圆形对比图
   out/report.txt     每个主题的非黑像素外接范围与越界告警
 """
 
 from __future__ import annotations
 
 import argparse
+import shutil
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -20,9 +22,13 @@ CENTER = SIZE // 2
 RADIUS = SIZE // 2
 SAFE_RADIUS = 205
 
+# 圆外使用中灰而不是黑色，避免和主题黑底混在一起看不出圆形。
+OUTSIDE_COLOR = (38, 38, 38)
+BEZEL_COLOR = (122, 122, 122)
+
 
 def circular_mask(image: Image.Image, bezel: bool = True) -> Image.Image:
-    """把圆形外的区域涂黑，可选画一圈玻璃边缘。"""
+    """把圆形外的区域涂成灰色，并画一圈亮色玻璃边缘。"""
     mask = Image.new("L", (SIZE, SIZE), 0)
     ImageDraw.Draw(mask).ellipse(
         (CENTER - RADIUS, CENTER - RADIUS, CENTER + RADIUS - 1, CENTER + RADIUS - 1),
@@ -30,14 +36,14 @@ def circular_mask(image: Image.Image, bezel: bool = True) -> Image.Image:
     )
     out = image.copy()
     out.putalpha(mask)
-    background = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 255))
+    background = Image.new("RGBA", (SIZE, SIZE), (*OUTSIDE_COLOR, 255))
     out = Image.alpha_composite(background, out).convert("RGB")
 
     if bezel:
         draw = ImageDraw.Draw(out)
         draw.ellipse(
             (CENTER - RADIUS + 1, CENTER - RADIUS + 1, CENTER + RADIUS - 2, CENTER + RADIUS - 2),
-            outline=(42, 42, 42),
+            outline=BEZEL_COLOR,
             width=2,
         )
     return out
@@ -95,39 +101,44 @@ def contact_sheet(images: list[tuple[str, Image.Image]], columns: int, output: P
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", default="out", help="PPM 目录")
-    parser.add_argument("--time", default="10-08-35", help="用于对比图的时刻标签")
+    parser.add_argument("--input", default="out", help="预览产物根目录")
+    parser.add_argument("--time", default="10:08:35", help="用于对比图的时刻，HH:MM:SS")
     args = parser.parse_args()
 
     input_dir = Path(args.input)
     if not input_dir.is_absolute():
         input_dir = Path(__file__).parent / input_dir
 
+    ppm_dir = input_dir / "ppm"
     raw_dir = input_dir / "raw"
-    masked_dir = input_dir / "r1.0"
+    round_dir = input_dir / "round"
     raw_dir.mkdir(parents=True, exist_ok=True)
-    masked_dir.mkdir(parents=True, exist_ok=True)
+    round_dir.mkdir(parents=True, exist_ok=True)
 
-    ppm_files = sorted(input_dir.glob("*.ppm"))
+    # 兼容旧产物路径，避免历史图混淆。
+    shutil.rmtree(input_dir / "r1.0", ignore_errors=True)
+    for stale in input_dir.glob("*.ppm"):
+        stale.unlink()
+
+    ppm_files = sorted(ppm_dir.glob("*.ppm"))
     if not ppm_files:
-        raise SystemExit(f"no PPM files under {input_dir}, run ./build/preview first")
+        raise SystemExit(f"no PPM files under {ppm_dir}, run ./build/preview first")
 
+    time_tag = args.time.replace(":", "-").replace("_", "-")
     reports: list[str] = []
     sheet_items: list[tuple[str, Image.Image]] = []
 
     for ppm in ppm_files:
         image = Image.open(ppm).convert("RGB")
         name = ppm.stem
-        raw_path = raw_dir / f"{name}.png"
-        image.save(raw_path)
+        image.save(raw_dir / f"{name}.png")
         masked = circular_mask(image)
-        masked_path = masked_dir / f"{name}.png"
-        masked.save(masked_path)
+        masked.save(round_dir / f"{name}.png")
 
         reports.append(content_report(name, image))
 
-        if name.endswith(args.time):
-            theme = name[: -(len(args.time) + 1)]
+        if name.endswith(f"_{time_tag}"):
+            theme = name[: -(len(time_tag) + 1)]
             sheet_items.append((theme, masked))
 
     sheet_items.sort(key=lambda item: item[0])
@@ -144,7 +155,8 @@ def main() -> None:
     report_path = input_dir / "report.txt"
     report_path.write_text("\n".join(reports) + "\n", encoding="utf-8")
     print("\n".join(reports))
-    print(f"\ncontact sheet: {input_dir / 'contact_native.png'}")
+    print(f"\nround previews: {round_dir}")
+    print(f"contact sheet: {input_dir / 'contact_native.png'}")
 
 
 if __name__ == "__main__":

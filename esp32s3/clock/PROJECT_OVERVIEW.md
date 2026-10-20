@@ -128,7 +128,7 @@ typedef struct {
 ./tools/preview/run.sh --time 23:59:59
 ```
 
-产物在 `tools/preview/out/`：`r1.0/` 是叠加圆屏遮罩的单主题图，`raw/` 是原图，`contact_native.png` 等是对比图，`report.txt` 记录非黑像素范围与安全区越界告警。预览只验证构图与配色，亮度、Gamma 和刷新流畅度仍需上板确认。
+产物在 `tools/preview/out/`：默认看 `round/` 圆屏图，`raw/` 是未遮罩方图，`ppm/` 是原始渲染，`contact_native.png` 等是圆屏对比图，`report.txt` 记录非黑像素范围与安全区越界告警。预览只验证构图与配色，亮度、Gamma 和刷新流畅度仍需上板确认。
 
 主题优化路线、当前进度和各主题设计稿见 `doc/theme-optimization-plan.md`。
 

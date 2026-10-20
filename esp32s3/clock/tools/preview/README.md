@@ -9,17 +9,19 @@
 ./tools/preview/run.sh --time 23:59:59
 ```
 
-产物在 `tools/preview/out/`：
+产物在 `tools/preview/out/`，默认直接看 `out/round/`：
 
 | 路径 | 说明 |
 |------|------|
-| `out/*.ppm` | 原始渲染（466 x 466 RGB565 转 RGB888） |
-| `out/raw/*.png` | PNG 原始图 |
-| `out/r1.0/*.png` | 叠加圆形遮罩与玻璃边缘，模拟真实圆屏 |
-| `out/contact_native.png` | 4 个原生主题对比图 |
-| `out/contact_m5.png` | 4 个 M5 主题对比图 |
-| `out/contact_all.png` | 全部 8 个主题对比图 |
+| `out/round/*.png` | **默认查看**：圆形遮罩 + 亮灰玻璃边缘，圆外为中灰 |
+| `out/raw/*.png` | 未遮罩方图，仅用于调试构图 |
+| `out/ppm/*.ppm` | 原始渲染（466 x 466 RGB565 转 RGB888） |
+| `out/contact_native.png` | 4 个原生主题圆屏对比图 |
+| `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
+| `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/report.txt` | 非黑像素范围与安全区越界提示 |
+
+每次运行会清空上一轮 `ppm/raw/round` 产物；额外渲染边界时刻时，可直接多次执行 `build/preview --time HH:MM:SS`，再运行一次 `render.py`。
 
 ## 原理
 

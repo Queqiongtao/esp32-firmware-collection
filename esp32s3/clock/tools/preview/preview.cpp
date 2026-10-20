@@ -169,7 +169,7 @@ int main(int argc, char **argv)
         }
     }
 
-    const std::filesystem::path out_dir = std::filesystem::path(argv[0]).parent_path() / ".." / "out";
+    const std::filesystem::path out_dir = std::filesystem::path(argv[0]).parent_path() / ".." / "out" / "ppm";
     std::filesystem::create_directories(out_dir);
 
     lv_init();
