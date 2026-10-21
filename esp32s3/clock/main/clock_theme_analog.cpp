@@ -22,6 +22,7 @@
 #define ANALOG_LABEL_COLOR lv_color_hex(0x5F5F5F)
 
 #define ANALOG_SIZE 466
+#define ANALOG_MINUTE_SCALE_SIZE 426
 #define ANALOG_HOUR_LEN 112
 #define ANALOG_MIN_LEN 150
 #define ANALOG_SUB_SEC_LEN 36
@@ -88,9 +89,9 @@ static lv_obj_t *make_dot(lv_obj_t *parent, int32_t size, lv_color_t color)
     return dot;
 }
 
-static lv_obj_t *make_hand(lv_obj_t *scale, lv_color_t color, int32_t width)
+static lv_obj_t *make_hand(lv_obj_t *parent, lv_color_t color, int32_t width)
 {
-    lv_obj_t *hand = lv_line_create(scale);
+    lv_obj_t *hand = lv_line_create(parent);
     lv_obj_set_style_line_color(hand, color, 0);
     lv_obj_set_style_line_width(hand, width, 0);
     lv_obj_set_style_line_rounded(hand, true, 0);
@@ -100,7 +101,7 @@ static lv_obj_t *make_hand(lv_obj_t *scale, lv_color_t color, int32_t width)
 static lv_obj_t *make_minute_scale(lv_obj_t *parent)
 {
     lv_obj_t *scale = lv_scale_create(parent);
-    lv_obj_set_size(scale, 426, 426);
+    lv_obj_set_size(scale, ANALOG_MINUTE_SCALE_SIZE, ANALOG_MINUTE_SCALE_SIZE);
     lv_obj_center(scale);
     lv_scale_set_mode(scale, LV_SCALE_MODE_ROUND_INNER);
     lv_scale_set_label_show(scale, false);
@@ -235,16 +236,24 @@ static lv_obj_t *analog_build(lv_obj_t *parent)
     make_date_window(container);
     make_sub_dial(container);
 
-    // 指针：黑底描边 + 米白针面；日期窗和小秒盘在指针下方。
-    s_hour_back = make_hand(s_scale, ANALOG_OUTLINE_COLOR, 17);
-    s_hour_fg = make_hand(s_scale, ANALOG_HAND_COLOR, 11);
-    s_minute_back = make_hand(s_scale, ANALOG_OUTLINE_COLOR, 14);
-    s_minute_fg = make_hand(s_scale, ANALOG_HAND_COLOR, 8);
+    // 独立指针层：最后创建，确保时针和分针覆盖日期窗、小秒盘和所有刻度。
+    lv_obj_t *hand_layer = lv_obj_create(container);
+    lv_obj_remove_style_all(hand_layer);
+    lv_obj_clear_flag(hand_layer, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(hand_layer, ANALOG_MINUTE_SCALE_SIZE, ANALOG_MINUTE_SCALE_SIZE);
+    lv_obj_set_style_bg_opa(hand_layer, LV_OPA_TRANSP, 0);
+    lv_obj_center(hand_layer);
+
+    // 指针：黑底描边 + 米白针面。
+    s_hour_back = make_hand(hand_layer, ANALOG_OUTLINE_COLOR, 17);
+    s_hour_fg = make_hand(hand_layer, ANALOG_HAND_COLOR, 11);
+    s_minute_back = make_hand(hand_layer, ANALOG_OUTLINE_COLOR, 14);
+    s_minute_fg = make_hand(hand_layer, ANALOG_HAND_COLOR, 8);
 
     // 三层中心轴：深色基座、米白轴、红色轴心。
-    make_dot(s_scale, 30, ANALOG_DATE_FRAME_COLOR);
-    make_dot(s_scale, 20, ANALOG_HAND_COLOR);
-    make_dot(s_scale, 8, ANALOG_ACCENT_COLOR);
+    make_dot(hand_layer, 30, ANALOG_DATE_FRAME_COLOR);
+    make_dot(hand_layer, 20, ANALOG_HAND_COLOR);
+    make_dot(hand_layer, 8, ANALOG_ACCENT_COLOR);
 
     return container;
 }
