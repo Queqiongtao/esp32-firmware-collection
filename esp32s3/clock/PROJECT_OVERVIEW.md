@@ -16,14 +16,14 @@
 - QMI8658 以 100 Hz 采样，计算屏幕平面内重力角度。
 - UI 旋转使用角度弹簧平滑，减少姿态变化时的抖动。
 - 当前主题支持：
-  - `minimal`
-  - `segment`
-  - `analog`
-  - `outline_analog`
-  - `m5_classic`
-  - `m5_simple`
-  - `m5_big_number`
-  - `m5_number_flow`
+  - `minimal`（黑曜石极简）
+  - `segment`（琥珀仪表 / Amber Deck）
+  - `analog`（机械计时）
+  - `outline_analog`（线框轨道）
+  - `m5_classic`（经典机械）
+  - `m5_simple`（薄荷珊瑚）
+  - `m5_big_number`（冰火大数字）
+  - `m5_number_flow`（数字流）
 
 ## 硬件平台
 
@@ -136,10 +136,10 @@ typedef struct {
 
 工程迁移了 `M5StopWatch-UserDemo` 中的四个 WatchFace：
 
-- `Classic`
-- `Simple`
-- `BigNumber`
-- `NumberFlow`
+- `Classic`（经典机械）
+- `Simple`（薄荷珊瑚）
+- `BigNumber`（冰火大数字）
+- `NumberFlow`（数字流）
 
 相关实现按主题拆分为：
 
@@ -157,10 +157,10 @@ typedef struct {
 
 迁移目标是默认进入主题后的显示效果、布局、颜色、字体和关键动画尽量与 M5 原项目一致。当前实现保留原始图片和字体资源，并在本工程 LVGL 主题接口下适配：
 
-- `Classic` 使用 canvas 绘制 466 x 466 刻度，并使用原始三根指针图片；本工程提高了星期对比度并调整日期胶囊尺寸。
-- `Simple` 使用原始字体和 10 套主题色表；默认 C1 薄荷珊瑚配色，包含珊瑚大点、薄荷小点、薄荷日期胶囊和珊瑚糖果秒点，秒点平滑运动并在整秒轻微弹跳。
-- `BigNumber` 使用原始数字图片和 4 套 palette；本工程补充日期，并用上排冰蓝、下排珊瑚的冷暖分色区分小时与分钟。
-- `NumberFlow` 在本工程内实现两位数字滚动效果，替代 M5 依赖库中的 `NumberFlow` 控件；使用 80px Commissioner 数字字体、H/M/S 标识和日期，秒位使用珊瑚色强调。
+- `Classic`（经典机械）使用 canvas 绘制 466 x 466 刻度，并使用原始三根指针图片；本工程提高了星期对比度并调整日期胶囊尺寸。
+- `Simple`（薄荷珊瑚）使用原始字体和 10 套主题色表；默认 C1 薄荷珊瑚配色，包含珊瑚大点、薄荷小点、薄荷日期胶囊和珊瑚糖果秒点，秒点平滑运动并在整秒轻微弹跳。
+- `BigNumber`（冰火大数字）使用原始数字图片和 4 套 palette；本工程补充日期，并用上排冰蓝、下排珊瑚的冷暖分色区分小时与分钟。
+- `NumberFlow`（数字流）在本工程内实现两位数字滚动效果，替代 M5 依赖库中的 `NumberFlow` 控件；使用 80px Commissioner 数字字体、H/M/S 标识和日期，秒位使用珊瑚色强调。
 
 注意：M5 原项目中 WatchFace 内部触摸点击可切换 palette、display mode 或秒点显示状态。当前工程采用 snapshot 旋转架构，主题对象常态隐藏，触摸事件没有直接接入这些内部交互。本工程目前以默认显示效果一致为目标，主题切换由 GPIO0 或触摸滑动完成。
 

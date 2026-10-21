@@ -16,7 +16,7 @@
 | PC 预览工具 | ✅ 已完成 | `tools/preview/`，可渲染 8 主题 PNG |
 | 预览工具文档同步 | ✅ 已完成 | 本文件 + AGENTS.md + PROJECT_OVERVIEW.md + README.md |
 | minimal 重设计 | ✅ 已完成（待上板确认） | 144px 主时间 + 双环 + 8 色轮换 |
-| segment 重设计 | ✅ 已完成（待上板确认） | Amber Deck：琥珀数字 + 珊瑚强调，最大半径 221.4 |
+| segment 重设计 | ✅ 已完成（待上板确认） | 琥珀仪表（Amber Deck）：琥珀数字 + 珊瑚强调，最大半径 221.4 |
 | analog 重设计 | ✅ 已完成（待上板确认） | 机械计时：多层表圈 + 3 点日期窗 + 6 点小秒盘 |
 | outline 重设计 | ✅ 已完成（待上板确认） | 线框轨道：同心细环 + 放射刻度 + 红色秒点 |
 | M5 四主题结构统一 | ✅ 已完成 | 四主题拆分为独立文件，24 张预览 PPM 与重构前逐字节一致 |
@@ -103,6 +103,19 @@ tools/preview/
 
 ## 四、逐主题设计稿
 
+### 主题名称对照
+
+| 顺序 | 程序名 | 中文名 | 一句话定位 |
+|---:|---|---|---|
+| 1 | minimal | 黑曜石极简 | 144px 大时间 + 彩色秒进度环 |
+| 2 | segment | 琥珀仪表（Amber Deck） | 七段数字 + 珊瑚秒牌与进度条 |
+| 3 | analog | 机械计时 | 多层表圈 + 3 点日期窗 + 6 点小秒盘 |
+| 4 | outline | 线框轨道 | 冷灰蓝同心环 + 放射刻度 + 红色秒点 |
+| 5 | m5_classic | 经典机械 | M5 黑灰机械表 + 3 点日期胶囊 |
+| 6 | m5_simple | 薄荷珊瑚 | 12 圆点 + 薄荷日期胶囊 + 糖果秒点 |
+| 7 | m5_big_number | 冰火大数字 | 2×2 大数字 + 冷暖分色 |
+| 8 | m5_number_flow | 数字流 | 三块面板 + 数字逐位滚动 |
+
 ### 1. minimal（✅ 已完成，待上板确认）
 
 **概念：黑曜石极简**
@@ -144,9 +157,9 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - 额外渲染 10:08–10:15 八个分钟，确认 8 个强调色都能在黑色背景上分辨
 - 144 字体源文件约 208KB；由于 minimal 不再引用 96 字体，链接后固件净增约 19KB
 
-### 2. segment（🟨 预览待确认）
+### 2. segment（✅ 已完成，待上板确认）
 
-**概念：Amber Deck**
+**概念：琥珀仪表（Amber Deck）**
 
 - 放弃青色 HUD、幽灵数字、角括号和装饰刻度，改成暖色仪表盘
 - 左上角 `● SEGMENT` 小标题：7px 珊瑚圆点 + 12px 暗琥珀 `#B87800`，字距 3，位于 (64, 90)
@@ -234,7 +247,7 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - 小时针角度加入秒数微调 `sec / 12`，分针按秒连续移动
 - `outline_analog_update()` 每秒更新两针、日期和秒点位置，无额外定时器
 
-### 5. M5 四主题（结构已统一，逐主题优化中）
+### 5. M5 四主题（✅ 已完成，待上板确认）
 
 **结构统一**
 
@@ -249,6 +262,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 
 **5.1 m5_big_number（✅ 已完成，待上板确认）**
 
+**概念：冰火大数字**
+
 - 保留 2×2 大数字网格，整体上移：数字中心位于 y=-71 / +31，日期位于 y=+130
 - 补充 `TUE 20 OCT` 日期；日期使用中性蓝灰 `#8FA6AD`，字距 1
 - 上排小时使用冰白 / 冰蓝 `#DDF7FF` / `#79E0FF`
@@ -260,6 +275,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 
 **5.2 m5_classic（✅ 已完成，待上板确认）**
 
+**概念：经典机械**
+
 - 保留黑灰机械表盘、3 点日期窗、6 点时间/星期和原有指针层次
 - 星期颜色由 `#717171` 提升到 `#A8A8A8`，位置由 y=138 下移到 y=142
 - 日期胶囊由 48×34 扩大到 56×38，背景改为 `#0D0D0D`
@@ -269,6 +286,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - 预览最大半径 225.2，仍为原有刻度环范围；`esp-clock.bin` = 0x15c560
 
 **5.3 m5_number_flow（✅ 已完成，待上板确认）**
+
+**概念：数字流**
 
 - 保留三块 120×152、圆角 51 的面板，整体位于中心上方，日期放在 y=82
 - 新增 `CommissionerMedium80` 数字字体，只包含 `0-9`，数字高约 58px，两列数字能完整放入 120px 面板
@@ -282,6 +301,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - `./dev.sh build` 通过；`esp-clock.bin` = 0x161020，6 MB 分区剩余 77%
 
 **5.4 m5_simple（✅ 已完成，待上板确认）**
+
+**概念：薄荷珊瑚**
 
 - 保留 12 个圆点，不引入 60 刻度线；主时间和日期位置不变
 - 12/3/6/9 四个大点改为 9px 珊瑚 `#FF7A59`，其余 8 个小点改为 5px 薄荷 `#63E6BE`
