@@ -31,6 +31,7 @@ set(MAIN_SRCS
     "m5_assets/images/watch_face/big_number/big_number_8.c"
     "m5_assets/images/watch_face/big_number/big_number_9.c"
     "m5_assets/fonts/CommissionerMedium64.c"
+    "m5_assets/fonts/CommissionerMedium80.c"
     "m5_assets/fonts/CommissionerMedium108.c"
     "m5_assets/fonts/lv_font_maple_mono_medium_24.c"
     "m5_assets/fonts/lv_font_maple_mono_medium_28.c")
