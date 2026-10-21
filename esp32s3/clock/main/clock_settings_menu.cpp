@@ -112,10 +112,11 @@ static void update_sleep_buttons(uint32_t sleep_timeout_sec)
 
 static void update_wifi_status(bool enabled)
 {
+    (void)enabled;
     if (s_wifi_status == nullptr) {
         return;
     }
-    lv_label_set_text(s_wifi_status, enabled ? "Not set" : "Off");
+    lv_label_set_text(s_wifi_status, "Not available");
 }
 
 static void update_page_dots(uint32_t active_index)
@@ -143,6 +144,7 @@ static void scroll_to_page(lv_obj_t *wheel, uint32_t active_index, lv_anim_enabl
 
 static void on_wheel_scroll_end(lv_event_t *event)
 {
+    notify_activity();
     lv_obj_t *wheel = static_cast<lv_obj_t *>(lv_event_get_target(event));
     int32_t active_index = (lv_obj_get_scroll_y(wheel) + MENU_PAGE_STRIDE / 2) / MENU_PAGE_STRIDE;
     if (active_index < 0) {
@@ -157,6 +159,15 @@ static void on_root_pressed(lv_event_t *event)
 {
     (void)event;
     notify_activity();
+}
+
+static void on_root_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    if (s_config.close_cb != nullptr) {
+        s_config.close_cb(s_config.user_ctx);
+    }
 }
 
 static void on_brightness_changed(lv_event_t *event)
@@ -257,6 +268,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_bg_opa(s_menu_root, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(s_menu_root, LV_RADIUS_CIRCLE, 0);
     lv_obj_add_event_cb(s_menu_root, on_root_pressed, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_menu_root, on_root_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *content = lv_obj_create(s_menu_root);
     lv_obj_remove_style_all(content);
@@ -265,6 +277,8 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    // Absorb clicks inside the panel so only taps on the outer circle close the menu.
+    lv_obj_add_flag(content, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *title = make_label(content, "Settings", lv_color_hex(0xF7F9FA));
     lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
@@ -284,22 +298,6 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_scrollbar_mode(wheel, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(wheel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(wheel, on_wheel_scroll_end, LV_EVENT_SCROLL_END, nullptr);
-
-    lv_obj_t *wifi_page = make_setting_page(wheel);
-    lv_obj_t *wifi_caption = make_value_label(wifi_page, "NETWORK");
-    lv_obj_set_style_text_font(wifi_caption, &lv_font_montserrat_14, 0);
-    make_title(wifi_page, "WiFi");
-    s_wifi_status = make_value_label(wifi_page, "");
-    lv_obj_set_style_margin_bottom(s_wifi_status, 14, 0);
-    update_wifi_status(config->settings->wifi_enabled);
-    lv_obj_t *wifi_switch = lv_switch_create(wifi_page);
-    lv_obj_set_size(wifi_switch, 112, 54);
-    lv_obj_add_flag(wifi_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
-    style_switch(wifi_switch);
-    if (config->settings->wifi_enabled) {
-        lv_obj_add_state(wifi_switch, LV_STATE_CHECKED);
-    }
-    lv_obj_add_event_cb(wifi_switch, on_wifi_changed, LV_EVENT_VALUE_CHANGED, nullptr);
 
     lv_obj_t *brightness_page = make_setting_page(wheel);
     lv_obj_t *brightness_caption = make_value_label(brightness_page, "DISPLAY");
@@ -343,6 +341,22 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
         s_sleep_buttons[i] = button;
     }
     update_sleep_buttons(config->settings->sleep_timeout_sec);
+
+    lv_obj_t *wifi_page = make_setting_page(wheel);
+    lv_obj_t *wifi_caption = make_value_label(wifi_page, "NETWORK");
+    lv_obj_set_style_text_font(wifi_caption, &lv_font_montserrat_14, 0);
+    make_title(wifi_page, "WiFi");
+    s_wifi_status = make_value_label(wifi_page, "");
+    lv_obj_set_style_margin_bottom(s_wifi_status, 14, 0);
+    update_wifi_status(config->settings->wifi_enabled);
+    lv_obj_t *wifi_switch = lv_switch_create(wifi_page);
+    lv_obj_set_size(wifi_switch, 112, 54);
+    lv_obj_add_flag(wifi_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    lv_obj_add_state(wifi_switch, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(wifi_switch, LV_OPA_50, 0);
+    style_switch(wifi_switch);
+    // Reserved for the future WiFi provisioning flow; keep it visibly disabled for now.
+    lv_obj_add_event_cb(wifi_switch, on_wifi_changed, LV_EVENT_VALUE_CHANGED, nullptr);
 
     scroll_to_page(wheel, 0, LV_ANIM_OFF);
 

@@ -9,10 +9,13 @@
 static const char *TAG = "ClockTouch";
 
 static constexpr int32_t CLOCK_TOUCH_LAYER_SIZE_PX = 466;
-static constexpr uint32_t CLOCK_TOUCH_SWITCH_COOLDOWN_MS = 350;
+static constexpr uint32_t CLOCK_TOUCH_SWITCH_COOLDOWN_MS = 150;
 static constexpr uint32_t CLOCK_TOUCH_LONG_PRESS_MS = 2000;
 static constexpr int32_t CLOCK_TOUCH_LONG_PRESS_MOVE_TOLERANCE_PX = 16;
 static constexpr int32_t CLOCK_TOUCH_SWIPE_MIN_DELTA_PX = 100;
+static constexpr int32_t CLOCK_TOUCH_FLICK_MIN_DELTA_PX = 50;
+static constexpr uint32_t CLOCK_TOUCH_FLICK_MAX_DURATION_MS = 300;
+static constexpr uint32_t CLOCK_TOUCH_FLICK_END_WINDOW_MS = 80;
 static constexpr float CLOCK_TOUCH_SWIPE_AXIS_RATIO = 2.0f;
 static constexpr float DEG_TO_RAD = 0.017453292519943295f;
 
@@ -25,9 +28,13 @@ static clock_touch_activity_cb_t s_activity_cb = NULL;
 static void *s_activity_user_ctx = NULL;
 static uint32_t s_last_theme_switch_ms = 0;
 static lv_point_t s_press_point = {};
+static lv_point_t s_last_move_point = {};
+static uint32_t s_press_ms = 0;
+static uint32_t s_last_move_ms = 0;
 static bool s_press_valid = false;
 static bool s_press_moved = false;
 static bool s_long_press_fired = false;
+static bool s_last_move_valid = false;
 static bool s_touch_enabled = true;
 static float s_rotation_deg = 0.0f;
 
@@ -85,6 +92,10 @@ static void on_clock_touch_event(lv_event_t *event)
             s_press_valid = true;
             s_press_moved = false;
             s_long_press_fired = false;
+            s_press_ms = lv_tick_get();
+            s_last_move_point = s_press_point;
+            s_last_move_ms = s_press_ms;
+            s_last_move_valid = true;
             ESP_LOGD(TAG, "touch pressed: x=%" PRId32 ", y=%" PRId32,
                      s_press_point.x, s_press_point.y);
         }
@@ -93,9 +104,15 @@ static void on_clock_touch_event(lv_event_t *event)
 
     if (code == LV_EVENT_PRESSING) {
         lv_point_t point = {};
-        if (s_press_valid && !s_press_moved && get_touch_point(event, &point) &&
-            point_moved_beyond_long_press_tolerance(&point)) {
-            s_press_moved = true;
+        if (s_press_valid && get_touch_point(event, &point)) {
+            if (point.x != s_last_move_point.x || point.y != s_last_move_point.y) {
+                s_last_move_point = point;
+                s_last_move_ms = lv_tick_get();
+                s_last_move_valid = true;
+            }
+            if (!s_press_moved && point_moved_beyond_long_press_tolerance(&point)) {
+                s_press_moved = true;
+            }
         }
         return;
     }
@@ -124,6 +141,7 @@ static void on_clock_touch_event(lv_event_t *event)
         s_press_valid = false;
         s_press_moved = false;
         s_long_press_fired = false;
+        s_last_move_valid = false;
         notify_activity(code);
         return;
     }
@@ -136,6 +154,7 @@ static void on_clock_touch_event(lv_event_t *event)
         s_press_valid = false;
         s_press_moved = false;
         s_long_press_fired = false;
+        s_last_move_valid = false;
         notify_activity(code);
         return;
     }
@@ -144,12 +163,14 @@ static void on_clock_touch_event(lv_event_t *event)
     if (!get_touch_point(event, &release_point)) {
         s_press_valid = false;
         s_press_moved = false;
+        s_last_move_valid = false;
         notify_activity(code);
         return;
     }
 
     if (!s_press_valid) {
         s_press_moved = false;
+        s_last_move_valid = false;
         notify_activity(code);
         return;
     }
@@ -166,15 +187,26 @@ static void on_clock_touch_event(lv_event_t *event)
 
     const float abs_local_dx = fabsf(local_dx);
     const float abs_local_dy = fabsf(local_dy);
-    if (abs_local_dx < CLOCK_TOUCH_SWIPE_MIN_DELTA_PX ||
-        abs_local_dx <= abs_local_dy * CLOCK_TOUCH_SWIPE_AXIS_RATIO) {
+    const bool horizontal = abs_local_dx > abs_local_dy * CLOCK_TOUCH_SWIPE_AXIS_RATIO;
+    const bool regular_swipe = abs_local_dx >= CLOCK_TOUCH_SWIPE_MIN_DELTA_PX;
+    const uint32_t press_duration_ms = (uint32_t)(now_ms - s_press_ms);
+    const bool recent_move = s_last_move_valid &&
+                             (uint32_t)(now_ms - s_last_move_ms) <= CLOCK_TOUCH_FLICK_END_WINDOW_MS;
+    const bool flick = abs_local_dx >= CLOCK_TOUCH_FLICK_MIN_DELTA_PX && recent_move &&
+                       press_duration_ms <= CLOCK_TOUCH_FLICK_MAX_DURATION_MS;
+    s_last_move_valid = false;
+
+    if (!horizontal || (!regular_swipe && !flick)) {
         ESP_LOGD(TAG,
-                 "touch ignored: raw=(%" PRId32 ",%" PRId32 "), local=(%.1f,%.1f), rot=%.1f",
+                 "touch ignored: raw=(%" PRId32 ",%" PRId32 "), local=(%.1f,%.1f), rot=%.1f"
+                 ", regular=%d, flick=%d",
                  dx,
                  dy,
                  local_dx,
                  local_dy,
-                 s_rotation_deg);
+                 s_rotation_deg,
+                 regular_swipe ? 1 : 0,
+                 flick ? 1 : 0);
         notify_activity(code);
         return;
     }
@@ -187,13 +219,16 @@ static void on_clock_touch_event(lv_event_t *event)
     s_last_theme_switch_ms = now_ms;
     const int step = local_dx < 0.0f ? 1 : -1;
     ESP_LOGI(TAG,
-             "touch swipe: step=%d, raw=(%" PRId32 ",%" PRId32 "), local=(%.1f,%.1f), rot=%.1f",
+             "touch swipe: step=%d, raw=(%" PRId32 ",%" PRId32 "), local=(%.1f,%.1f), rot=%.1f"
+             ", duration=%" PRIu32 " ms, flick=%d",
              step,
              dx,
              dy,
              local_dx,
              local_dy,
-             s_rotation_deg);
+             s_rotation_deg,
+             press_duration_ms,
+             flick ? 1 : 0);
 
     if (s_touch_cb != NULL) {
         s_touch_cb(step, s_touch_user_ctx);
@@ -222,9 +257,13 @@ lv_obj_t *clock_touch_gesture_create(lv_obj_t *parent,
     s_activity_user_ctx = activity_user_ctx;
     s_last_theme_switch_ms = 0;
     s_press_point = {};
+    s_last_move_point = {};
+    s_press_ms = 0;
+    s_last_move_ms = 0;
     s_press_valid = false;
     s_press_moved = false;
     s_long_press_fired = false;
+    s_last_move_valid = false;
     s_touch_enabled = true;
     s_rotation_deg = 0.0f;
 

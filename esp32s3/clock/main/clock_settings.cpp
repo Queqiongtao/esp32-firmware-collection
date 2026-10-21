@@ -6,6 +6,7 @@ static constexpr const char *CLOCK_SETTINGS_NAMESPACE = "clock_settings";
 static constexpr const char *CLOCK_SETTINGS_KEY_BRIGHTNESS = "brightness";
 static constexpr const char *CLOCK_SETTINGS_KEY_SLEEP = "sleep_sec";
 static constexpr const char *CLOCK_SETTINGS_KEY_WIFI = "wifi";
+static constexpr const char *CLOCK_SETTINGS_KEY_THEME = "theme_id";
 
 static int clamp_brightness(int brightness_percent)
 {
@@ -27,6 +28,7 @@ void clock_settings_defaults(clock_settings_t *settings)
     settings->brightness_percent = 70;
     settings->sleep_timeout_sec = 5 * 60;
     settings->wifi_enabled = false;
+    settings->theme_index = 0;
 }
 
 esp_err_t clock_settings_load(clock_settings_t *settings)
@@ -73,6 +75,15 @@ esp_err_t clock_settings_load(clock_settings_t *settings)
         return err;
     }
 
+    uint8_t theme_index = 0;
+    err = nvs_get_u8(handle, CLOCK_SETTINGS_KEY_THEME, &theme_index);
+    if (err == ESP_OK) {
+        settings->theme_index = theme_index;
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(handle);
+        return err;
+    }
+
     nvs_close(handle);
     return ESP_OK;
 }
@@ -97,6 +108,9 @@ esp_err_t clock_settings_save(const clock_settings_t *settings)
     }
     if (err == ESP_OK) {
         err = nvs_set_u8(handle, CLOCK_SETTINGS_KEY_WIFI, settings->wifi_enabled ? 1 : 0);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, CLOCK_SETTINGS_KEY_THEME, settings->theme_index);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);

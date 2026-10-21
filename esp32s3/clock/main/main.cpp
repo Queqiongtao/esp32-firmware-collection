@@ -60,6 +60,14 @@ static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 0;
 
 static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 16;
 static constexpr uint32_t CLOCK_THEME_ANIMATION_TIMER_MS = 33;
+static constexpr uint32_t CLOCK_THEME_TRANSITION_TIMER_MS = 16;
+static constexpr uint32_t CLOCK_THEME_TRANSITION_OUT_MS = 70;
+static constexpr uint32_t CLOCK_THEME_TRANSITION_IN_MS = 90;
+static constexpr int32_t CLOCK_THEME_TRANSITION_SCALE_MIN = 244;
+static constexpr int32_t CLOCK_THEME_TRANSITION_SCALE_MAX = 256;
+static constexpr uint32_t CLOCK_BRIGHTNESS_FADE_TIMER_MS = 16;
+static constexpr uint32_t CLOCK_BRIGHTNESS_SLEEP_FADE_MS = 220;
+static constexpr uint32_t CLOCK_BRIGHTNESS_WAKE_FADE_MS = 240;
 static constexpr uint32_t CLOCK_ROTATION_PERF_LOG_MS = 1000;
 static constexpr float CLOCK_ROTATION_MAX_DT_S = 0.05f;
 static constexpr float CLOCK_ROTATION_INVALIDATE_MOVING_EPSILON_DEG = 1.5f;
@@ -86,6 +94,8 @@ static lv_timer_t *s_clock_rotation_timer = NULL;
 static lv_timer_t *s_auto_sleep_timer = NULL;
 static lv_timer_t *s_input_timer = NULL;
 static lv_timer_t *s_settings_save_timer = NULL;
+static lv_timer_t *s_theme_transition_timer = NULL;
+static lv_timer_t *s_brightness_fade_timer = NULL;
 static spring_angle_t s_clock_rotation_spring = {};
 static uint32_t s_clock_rotation_last_tick_ms = 0;
 static uint32_t s_clock_rotation_last_perf_log_ms = 0;
@@ -120,6 +130,27 @@ static uint32_t s_pwr_button_candidate_since_ms = 0;
 static uint32_t s_pwr_button_press_start_ms = 0;
 static uint32_t s_pwr_button_last_poll_ms = 0;
 
+enum class ThemeTransitionPhase : uint8_t {
+    Idle,
+    Out,
+    In,
+};
+static ThemeTransitionPhase s_theme_transition_phase = ThemeTransitionPhase::Idle;
+static uint32_t s_theme_transition_start_ms = 0;
+static uint32_t s_theme_transition_duration_ms = 0;
+static int32_t s_theme_transition_from_scale = CLOCK_THEME_TRANSITION_SCALE_MAX;
+static int32_t s_theme_transition_to_scale = CLOCK_THEME_TRANSITION_SCALE_MAX;
+static lv_opa_t s_theme_transition_from_opa = LV_OPA_COVER;
+static lv_opa_t s_theme_transition_to_opa = LV_OPA_COVER;
+
+static bool s_brightness_fade_active = false;
+static uint32_t s_brightness_fade_start_ms = 0;
+static uint32_t s_brightness_fade_duration_ms = 0;
+static int s_brightness_fade_from = 0;
+static int s_brightness_fade_to = 0;
+static int s_brightness_current_percent = 0;
+static bool s_brightness_current_valid = false;
+
 static void keep_touch_layer_foreground(void);
 static void close_settings_menu(void);
 static void open_settings_menu(void);
@@ -130,6 +161,9 @@ static void update_clock(lv_timer_t *timer);
 static void update_theme_animation(lv_timer_t *timer);
 static void update_clock_rotation(lv_timer_t *timer);
 static void update_pwr_button(lv_timer_t *timer);
+static void update_theme_transition(lv_timer_t *timer);
+static void update_brightness_fade(lv_timer_t *timer);
+static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
 
 static bool is_clock_rotation_active(void)
@@ -397,7 +431,155 @@ static void request_theme_switch(int step)
         return;
     }
 
-    s_theme_switch_pending_step = step;
+    // Accumulate requests while a transition is running so fast swipes are not lost.
+    s_theme_switch_pending_step += step;
+}
+
+static uint32_t clock_animation_progress(uint32_t elapsed_ms, uint32_t duration_ms)
+{
+    if (duration_ms == 0 || elapsed_ms >= duration_ms) {
+        return 1000;
+    }
+    return (uint32_t)((uint64_t)elapsed_ms * 1000U / duration_ms);
+}
+
+static int32_t clock_animation_lerp_i32(int32_t from, int32_t to, uint32_t progress)
+{
+    return from + (int32_t)(((int64_t)(to - from) * (int32_t)progress) / 1000);
+}
+
+static lv_opa_t clock_animation_lerp_opa(lv_opa_t from, lv_opa_t to, uint32_t progress)
+{
+    return (lv_opa_t)clock_animation_lerp_i32((int32_t)from, (int32_t)to, progress);
+}
+
+static void set_theme_transition_visual(int32_t scale, lv_opa_t opa)
+{
+    if (s_clock_snapshot_image == NULL) {
+        return;
+    }
+
+    lv_image_set_scale(s_clock_snapshot_image, (uint32_t)scale);
+    lv_obj_set_style_opa(s_clock_snapshot_image, opa, 0);
+}
+
+static void setup_theme_transition_phase(ThemeTransitionPhase phase,
+                                         uint32_t duration_ms,
+                                         int32_t from_scale,
+                                         int32_t to_scale,
+                                         lv_opa_t from_opa,
+                                         lv_opa_t to_opa)
+{
+    s_theme_transition_phase = phase;
+    s_theme_transition_start_ms = lv_tick_get();
+    s_theme_transition_duration_ms = duration_ms;
+    s_theme_transition_from_scale = from_scale;
+    s_theme_transition_to_scale = to_scale;
+    s_theme_transition_from_opa = from_opa;
+    s_theme_transition_to_opa = to_opa;
+    set_theme_transition_visual(from_scale, from_opa);
+}
+
+static void start_theme_transition_out(void)
+{
+    if (s_theme_transition_phase != ThemeTransitionPhase::Idle) {
+        return;
+    }
+
+    if (s_clock_snapshot_image == NULL || s_theme_transition_timer == NULL) {
+        const int steps = s_theme_switch_pending_step;
+        s_theme_switch_pending_step = 0;
+        if (steps != 0) {
+            switch_theme(steps);
+            if (s_clock_snapshot_dirty) {
+                refresh_clock_snapshot();
+            }
+        }
+        return;
+    }
+
+    setup_theme_transition_phase(ThemeTransitionPhase::Out,
+                                 CLOCK_THEME_TRANSITION_OUT_MS,
+                                 CLOCK_THEME_TRANSITION_SCALE_MAX,
+                                 CLOCK_THEME_TRANSITION_SCALE_MIN,
+                                 LV_OPA_COVER,
+                                 LV_OPA_TRANSP);
+    lv_timer_reset(s_theme_transition_timer);
+    lv_timer_resume(s_theme_transition_timer);
+}
+
+static void update_theme_transition(lv_timer_t *timer)
+{
+    if (s_theme_transition_phase == ThemeTransitionPhase::Idle) {
+        lv_timer_pause(timer);
+        return;
+    }
+
+    const uint32_t now_ms = lv_tick_get();
+    const uint32_t progress = clock_animation_progress(now_ms - s_theme_transition_start_ms,
+                                                       s_theme_transition_duration_ms);
+    set_theme_transition_visual(
+        clock_animation_lerp_i32(s_theme_transition_from_scale,
+                                 s_theme_transition_to_scale,
+                                 progress),
+        clock_animation_lerp_opa(s_theme_transition_from_opa,
+                                 s_theme_transition_to_opa,
+                                 progress));
+
+    if (progress < 1000) {
+        return;
+    }
+
+    if (s_theme_transition_phase == ThemeTransitionPhase::Out) {
+        const int steps = s_theme_switch_pending_step;
+        s_theme_switch_pending_step = 0;
+        if (steps != 0) {
+            switch_theme(steps);
+            if (s_clock_snapshot_dirty) {
+                refresh_clock_snapshot();
+            }
+        }
+
+        setup_theme_transition_phase(ThemeTransitionPhase::In,
+                                     CLOCK_THEME_TRANSITION_IN_MS,
+                                     CLOCK_THEME_TRANSITION_SCALE_MIN,
+                                     CLOCK_THEME_TRANSITION_SCALE_MAX,
+                                     LV_OPA_TRANSP,
+                                     LV_OPA_COVER);
+        return;
+    }
+
+    set_theme_transition_visual(CLOCK_THEME_TRANSITION_SCALE_MAX, LV_OPA_COVER);
+    s_theme_transition_phase = ThemeTransitionPhase::Idle;
+
+    if (s_clock_snapshot_dirty) {
+        refresh_clock_snapshot();
+    }
+
+    if (s_theme_switch_pending_step != 0) {
+        start_theme_transition_out();
+    } else {
+        lv_timer_pause(timer);
+    }
+}
+
+static void cancel_theme_transition(void)
+{
+    const int steps = s_theme_switch_pending_step;
+    s_theme_switch_pending_step = 0;
+    s_theme_transition_phase = ThemeTransitionPhase::Idle;
+    if (s_theme_transition_timer != NULL) {
+        lv_timer_pause(s_theme_transition_timer);
+    }
+
+    if (steps != 0) {
+        switch_theme(steps);
+        if (s_clock_snapshot_dirty) {
+            refresh_clock_snapshot();
+        }
+    }
+
+    set_theme_transition_visual(CLOCK_THEME_TRANSITION_SCALE_MAX, LV_OPA_COVER);
 }
 
 static void reset_current_theme(void)
@@ -455,6 +637,93 @@ static void flush_settings_save(void)
     save_settings_now();
 }
 
+static void apply_brightness(int brightness_percent)
+{
+    if (brightness_percent < 0) {
+        brightness_percent = 0;
+    } else if (brightness_percent > 100) {
+        brightness_percent = 100;
+    }
+
+    if (s_brightness_current_valid && s_brightness_current_percent == brightness_percent) {
+        return;
+    }
+
+    esp_err_t err = bsp_display_brightness_set(brightness_percent);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Set brightness %d%% failed: %s",
+                 brightness_percent,
+                 esp_err_to_name(err));
+        return;
+    }
+
+    s_brightness_current_percent = brightness_percent;
+    s_brightness_current_valid = true;
+}
+
+static void cancel_brightness_fade(void)
+{
+    s_brightness_fade_active = false;
+    if (s_brightness_fade_timer != NULL) {
+        lv_timer_pause(s_brightness_fade_timer);
+    }
+}
+
+static void start_brightness_fade(int brightness_percent, uint32_t duration_ms)
+{
+    if (brightness_percent < 0) {
+        brightness_percent = 0;
+    } else if (brightness_percent > 100) {
+        brightness_percent = 100;
+    }
+
+    if (s_brightness_fade_timer == NULL) {
+        apply_brightness(brightness_percent);
+        return;
+    }
+
+    const int from_percent =
+        s_brightness_current_valid ? s_brightness_current_percent : brightness_percent;
+    if (from_percent == brightness_percent || duration_ms == 0) {
+        s_brightness_fade_active = false;
+        lv_timer_pause(s_brightness_fade_timer);
+        apply_brightness(brightness_percent);
+        return;
+    }
+
+    s_brightness_fade_active = true;
+    s_brightness_fade_from = from_percent;
+    s_brightness_fade_to = brightness_percent;
+    s_brightness_fade_start_ms = lv_tick_get();
+    s_brightness_fade_duration_ms = duration_ms;
+    lv_timer_reset(s_brightness_fade_timer);
+    lv_timer_resume(s_brightness_fade_timer);
+}
+
+static void update_brightness_fade(lv_timer_t *timer)
+{
+    if (!s_brightness_fade_active) {
+        lv_timer_pause(timer);
+        return;
+    }
+
+    const uint32_t now_ms = lv_tick_get();
+    const uint32_t progress = clock_animation_progress(now_ms - s_brightness_fade_start_ms,
+                                                       s_brightness_fade_duration_ms);
+    const int brightness_percent =
+        clock_animation_lerp_i32(s_brightness_fade_from, s_brightness_fade_to, progress);
+    apply_brightness(brightness_percent);
+
+    if (progress < 1000) {
+        return;
+    }
+
+    apply_brightness(s_brightness_fade_to);
+    s_brightness_fade_active = false;
+    lv_timer_pause(timer);
+}
+
 static bool is_touch_action_blocked(void)
 {
     return s_touch_action_blocked_until_release;
@@ -466,15 +735,10 @@ static bool wake_screen_if_sleeping(void)
         return false;
     }
 
-    esp_err_t err = bsp_display_brightness_set(s_settings.brightness_percent);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Wake brightness failed: %s", esp_err_to_name(err));
-        return false;
-    }
-
     s_screen_sleeping = false;
     s_last_activity_ms = lv_tick_get();
     update_clock_rendering_state();
+    start_brightness_fade(s_settings.brightness_percent, CLOCK_BRIGHTNESS_WAKE_FADE_MS);
     return true;
 }
 
@@ -484,15 +748,14 @@ static bool sleep_screen(const char *reason)
         return false;
     }
 
-    esp_err_t err = bsp_display_brightness_set(0);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "%s sleep brightness failed: %s", reason, esp_err_to_name(err));
-        return false;
-    }
-
     s_screen_sleeping = true;
-    ESP_LOGI(TAG, "screen %s sleep", reason);
+    cancel_theme_transition();
+    if (s_settings_menu != NULL) {
+        close_settings_menu();
+    }
     update_clock_rendering_state();
+    start_brightness_fade(0, CLOCK_BRIGHTNESS_SLEEP_FADE_MS);
+    ESP_LOGI(TAG, "screen %s sleep", reason);
     return true;
 }
 
@@ -526,10 +789,8 @@ static void on_menu_brightness(int brightness_percent, void *user_ctx)
     (void)user_ctx;
     s_settings.brightness_percent = brightness_percent;
     if (!s_screen_sleeping) {
-        esp_err_t err = bsp_display_brightness_set(s_settings.brightness_percent);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Set brightness failed: %s", esp_err_to_name(err));
-        }
+        cancel_brightness_fade();
+        apply_brightness(brightness_percent);
     }
     schedule_settings_save();
 }
@@ -560,6 +821,12 @@ static void open_settings_menu(void)
     if (s_settings_menu != NULL) {
         keep_touch_layer_foreground();
         return;
+    }
+
+    cancel_theme_transition();
+    cancel_brightness_fade();
+    if (!s_screen_sleeping) {
+        apply_brightness(s_settings.brightness_percent);
     }
 
     lv_obj_t *screen = lv_screen_active();
@@ -677,7 +944,7 @@ static void update_clock_rotation(lv_timer_t *timer)
         portEXIT_CRITICAL(&s_clock_rotation_lock);
 
         ++s_clock_rotation_perf_skip_settled;
-        if (s_clock_snapshot_dirty) {
+        if (s_clock_snapshot_dirty && s_theme_transition_phase == ThemeTransitionPhase::Idle) {
             refresh_clock_snapshot();
         } else {
             apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
@@ -692,7 +959,7 @@ static void update_clock_rotation(lv_timer_t *timer)
         s_clock_rotation_started = false;
         portEXIT_CRITICAL(&s_clock_rotation_lock);
 
-        if (s_clock_snapshot_dirty) {
+        if (s_clock_snapshot_dirty && s_theme_transition_phase == ThemeTransitionPhase::Idle) {
             refresh_clock_snapshot();
         } else {
             apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
@@ -770,10 +1037,9 @@ static void update_inputs(lv_timer_t *timer)
 
     process_pending_input_actions();
 
-    const int theme_switch_step = s_theme_switch_pending_step;
-    if (theme_switch_step != 0) {
-        s_theme_switch_pending_step = 0;
-        switch_theme(theme_switch_step);
+    if (s_theme_switch_pending_step != 0 &&
+        s_theme_transition_phase == ThemeTransitionPhase::Idle) {
+        start_theme_transition_out();
     }
 
     const uint32_t now_ms = lv_tick_get();
@@ -848,7 +1114,9 @@ static void update_clock(lv_timer_t *timer)
         s_clock_snapshot_dirty = true;
     }
 
-    if (s_clock_snapshot_dirty && !is_clock_rotation_active()) {
+    if (s_theme_transition_phase == ThemeTransitionPhase::Idle &&
+        s_clock_snapshot_dirty &&
+        !is_clock_rotation_active()) {
         refresh_clock_snapshot();
     }
 }
@@ -872,7 +1140,8 @@ static void update_theme_animation(lv_timer_t *timer)
     if (theme->tick(lv_tick_get())) {
         if (theme->tick_updates_overlay_only == NULL || !theme->tick_updates_overlay_only()) {
             s_clock_snapshot_dirty = true;
-            if (!is_clock_rotation_active()) {
+            if (s_theme_transition_phase == ThemeTransitionPhase::Idle &&
+                !is_clock_rotation_active()) {
                 refresh_clock_snapshot();
             }
         }
@@ -894,6 +1163,8 @@ static void switch_theme(int step)
     s_current_theme_index =
         (s_current_theme_index + s_theme_count + normalized_step) % s_theme_count;
     s_current_theme_root = s_themes[s_current_theme_index]->build(screen);
+    s_settings.theme_index = (uint8_t)s_current_theme_index;
+    schedule_settings_save();
     ESP_LOGI(TAG, "switch theme -> %s", s_themes[s_current_theme_index]->name);
 
     s_clock_rotation_applied_valid = false;
@@ -1000,6 +1271,22 @@ static void create_clock_ui(void)
     s_auto_sleep_timer = lv_timer_create(update_auto_sleep, 1000, NULL);
     s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
 
+    s_theme_transition_timer =
+        lv_timer_create(update_theme_transition, CLOCK_THEME_TRANSITION_TIMER_MS, NULL);
+    if (s_theme_transition_timer != NULL) {
+        lv_timer_set_auto_delete(s_theme_transition_timer, false);
+        lv_timer_set_repeat_count(s_theme_transition_timer, -1);
+        lv_timer_pause(s_theme_transition_timer);
+    }
+
+    s_brightness_fade_timer =
+        lv_timer_create(update_brightness_fade, CLOCK_BRIGHTNESS_FADE_TIMER_MS, NULL);
+    if (s_brightness_fade_timer != NULL) {
+        lv_timer_set_auto_delete(s_brightness_fade_timer, false);
+        lv_timer_set_repeat_count(s_brightness_fade_timer, -1);
+        lv_timer_pause(s_brightness_fade_timer);
+    }
+
     s_settings_save_timer =
         lv_timer_create(on_settings_save_timer, CLOCK_SETTINGS_SAVE_DELAY_MS, NULL);
     if (s_settings_save_timer != NULL) {
@@ -1104,11 +1391,23 @@ extern "C" void app_main(void)
         clock_settings_defaults(&s_settings);
     }
 
+    s_current_theme_index = (size_t)s_settings.theme_index;
+    if (s_current_theme_index >= s_theme_count) {
+        s_current_theme_index = 0;
+        s_settings.theme_index = 0;
+    }
+    ESP_LOGI(TAG,
+             "restore theme -> %s (index=%u)",
+             s_themes[s_current_theme_index]->name,
+             (unsigned)s_current_theme_index);
+
     rtc_time_sync_from_external_rtc();
 
     s_display = bsp_display_start();
     ESP_ERROR_CHECK(s_display ? ESP_OK : ESP_FAIL);
     ESP_ERROR_CHECK(bsp_display_brightness_set(s_settings.brightness_percent));
+    s_brightness_current_percent = s_settings.brightness_percent;
+    s_brightness_current_valid = true;
     ESP_LOGI(TAG, "touch indev: %p", bsp_display_get_input_dev());
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS

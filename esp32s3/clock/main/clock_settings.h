@@ -8,6 +8,7 @@ typedef struct {
     int brightness_percent;
     uint32_t sleep_timeout_sec;
     bool wifi_enabled;
+    uint8_t theme_index;
 } clock_settings_t;
 
 void clock_settings_defaults(clock_settings_t *settings);
