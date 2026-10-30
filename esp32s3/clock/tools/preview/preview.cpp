@@ -172,13 +172,15 @@ void render_menu(const std::filesystem::path &out_dir)
         const char *name;
         uint32_t index;
         bool auto_rotate;
+        bool wifi_setup;
     };
     static constexpr MenuPage kMenuPages[] = {
-        {"brightness", 0, false},
-        {"sleep", 1, false},
-        {"motion_off", 2, false},
-        {"motion_on", 2, true},
-        {"wifi", 3, false},
+        {"brightness", 0, false, false},
+        {"sleep", 1, false, false},
+        {"motion_off", 2, false, false},
+        {"motion_on", 2, true, false},
+        {"wifi", 3, false, false},
+        {"wifi_setup", 3, false, true},
     };
 
     for (const MenuPage &page : kMenuPages) {
@@ -191,6 +193,7 @@ void render_menu(const std::filesystem::path &out_dir)
         settings.sleep_timeout_sec = 5 * 60;
         settings.auto_rotate = page.auto_rotate;
         settings.wifi_enabled = false;
+        settings.ntp_enabled = true;
         settings.theme_index = 0;
 
         clock_settings_menu_config_t config = {};
@@ -204,6 +207,9 @@ void render_menu(const std::filesystem::path &out_dir)
         // Let the menu entrance animation settle before snapshotting.
         run_lvgl_for(400);
         clock_settings_menu_set_page(page.index);
+        if (page.wifi_setup) {
+            clock_settings_menu_open_wifi_setup();
+        }
         run_lvgl_for(40);
         lv_obj_update_layout(screen);
 

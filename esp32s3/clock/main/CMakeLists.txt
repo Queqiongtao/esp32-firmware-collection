@@ -5,6 +5,8 @@ set(MAIN_SRCS
     "clock_touch_gesture.cpp"
     "rtc_time_sync.cpp"
     "imu_demo.cpp"
+    "wifi_manager.cpp"
+    "ntp_time_sync.cpp"
     "lv_font_clock_96.c"
     "lv_font_clock_144.c"
     "clock_theme_minimal.cpp"
@@ -41,7 +43,7 @@ set(MAIN_INCLUDE_DIRS ".")
 idf_component_register(
     SRCS ${MAIN_SRCS}
     INCLUDE_DIRS ${MAIN_INCLUDE_DIRS}
-    REQUIRES pcf85063 qmi8658 ui_physics button nvs_flash esp_io_expander)
+    REQUIRES pcf85063 qmi8658 ui_physics button nvs_flash esp_io_expander esp_wifi esp_netif esp_event esp_timer)
 
 target_compile_options(${COMPONENT_LIB} PUBLIC -Wno-missing-field-initializers)
 

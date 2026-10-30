@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <string.h>
 
 static constexpr uint32_t SLEEP_OPTIONS_SEC[] = {
     60,
@@ -56,6 +57,18 @@ static lv_obj_t *s_menu_wheel = nullptr;
 static lv_obj_t *s_brightness_value = nullptr;
 static lv_obj_t *s_auto_rotate_status = nullptr;
 static lv_obj_t *s_wifi_status = nullptr;
+static lv_obj_t *s_wifi_switch = nullptr;
+static lv_obj_t *s_ntp_switch = nullptr;
+static lv_obj_t *s_ntp_sync_button = nullptr;
+static lv_obj_t *s_wifi_last_sync = nullptr;
+static lv_obj_t *s_wifi_setup_overlay = nullptr;
+static lv_obj_t *s_wifi_ssid_input = nullptr;
+static lv_obj_t *s_wifi_password_input = nullptr;
+static lv_obj_t *s_wifi_keyboard = nullptr;
+static lv_obj_t *s_wifi_setup_status = nullptr;
+static bool s_updating_wifi_ui = false;
+static bool s_wifi_has_credentials = false;
+static bool s_wifi_connected = false;
 static lv_obj_t *s_page_tabs[MENU_PAGE_COUNT] = {};
 static lv_obj_t *s_page_tab_icons[MENU_PAGE_COUNT] = {};
 static lv_obj_t *s_page_tab_labels[MENU_PAGE_COUNT] = {};
@@ -67,6 +80,35 @@ static clock_settings_menu_close_done_cb_t s_close_done_cb = nullptr;
 static void *s_close_done_ctx = nullptr;
 
 static void set_wheel_scroll_enabled(bool enabled);
+
+static void reset_menu_widget_pointers(void)
+{
+    s_menu_content = nullptr;
+    s_menu_wheel = nullptr;
+    s_brightness_value = nullptr;
+    s_auto_rotate_status = nullptr;
+    s_wifi_status = nullptr;
+    s_wifi_switch = nullptr;
+    s_ntp_switch = nullptr;
+    s_ntp_sync_button = nullptr;
+    s_wifi_last_sync = nullptr;
+    s_wifi_setup_overlay = nullptr;
+    s_wifi_ssid_input = nullptr;
+    s_wifi_password_input = nullptr;
+    s_wifi_keyboard = nullptr;
+    s_wifi_setup_status = nullptr;
+    s_updating_wifi_ui = false;
+    s_wifi_connected = false;
+    for (size_t i = 0; i < MENU_PAGE_COUNT; ++i) {
+        s_page_tabs[i] = nullptr;
+        s_page_tab_icons[i] = nullptr;
+        s_page_tab_labels[i] = nullptr;
+    }
+    for (size_t i = 0; i < SLEEP_OPTION_COUNT; ++i) {
+        s_sleep_buttons[i] = nullptr;
+        s_sleep_labels[i] = nullptr;
+    }
+}
 
 static void menu_set_opa_cb(void *obj, int32_t value)
 {
@@ -109,9 +151,8 @@ static void on_menu_close_animation_done(lv_anim_t *animation)
     if (s_menu_root != nullptr) {
         lv_obj_delete(s_menu_root);
         s_menu_root = nullptr;
-        s_menu_content = nullptr;
-        s_menu_wheel = nullptr;
     }
+    reset_menu_widget_pointers();
 
     s_menu_closing = false;
     clock_settings_menu_close_done_cb_t done_cb = s_close_done_cb;
@@ -190,6 +231,17 @@ static void notify_activity(void)
     }
 }
 
+static void set_label_text_if_changed(lv_obj_t *label, const char *text)
+{
+    if (label == nullptr || text == nullptr) {
+        return;
+    }
+    const char *current = lv_label_get_text(label);
+    if (current == nullptr || strcmp(current, text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
 static void update_brightness_value(int brightness_percent)
 {
     if (s_brightness_value == nullptr) {
@@ -240,15 +292,6 @@ static void update_sleep_buttons(uint32_t sleep_timeout_sec)
                                         0);
         }
     }
-}
-
-static void update_wifi_status(bool enabled)
-{
-    (void)enabled;
-    if (s_wifi_status == nullptr) {
-        return;
-    }
-    lv_label_set_text(s_wifi_status, "Not available");
 }
 
 static void update_page_tabs(uint32_t active_index)
@@ -360,17 +403,6 @@ static void on_brightness_changed(lv_event_t *event)
     }
 }
 
-static void on_wifi_changed(lv_event_t *event)
-{
-    notify_activity();
-    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
-    const bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    update_wifi_status(enabled);
-    if (s_config.wifi_cb != nullptr) {
-        s_config.wifi_cb(enabled, s_config.user_ctx);
-    }
-}
-
 static void on_auto_rotate_changed(lv_event_t *event)
 {
     notify_activity();
@@ -469,6 +501,258 @@ static lv_obj_t *make_value_label(lv_obj_t *parent, const char *text)
     return label;
 }
 
+static void style_small_button(lv_obj_t *button)
+{
+    lv_obj_set_style_radius(button, 18, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(MENU_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(MENU_COLOR_ACCENT), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(button, 40, LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(MENU_COLOR_ACCENT), 0);
+    lv_obj_set_style_border_opa(button, 70, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+}
+
+static lv_obj_t *make_small_button(lv_obj_t *parent, const char *text)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_set_size(button, 100, 34);
+    style_small_button(button);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(MENU_COLOR_ACCENT), 0);
+    lv_obj_center(label);
+    return button;
+}
+
+static void style_keyboard(lv_obj_t *keyboard)
+{
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_BG), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(keyboard, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 2, LV_PART_MAIN);
+
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_SURFACE), LV_PART_ITEMS);
+    lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, LV_PART_ITEMS);
+    lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_TEXT), LV_PART_ITEMS);
+    lv_obj_set_style_border_width(keyboard, 0, LV_PART_ITEMS);
+    lv_obj_set_style_radius(keyboard, 8, LV_PART_ITEMS);
+    lv_obj_set_style_shadow_width(keyboard, 0, LV_PART_ITEMS);
+
+    const lv_style_selector_t pressed =
+        (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_PRESSED;
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_ACCENT), pressed);
+    lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_ACCENT_TEXT), pressed);
+
+    const lv_style_selector_t checked =
+        (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_CHECKED;
+    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_SURFACE_PRESSED), checked);
+    lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_WARM), checked);
+}
+
+static void close_wifi_setup(void)
+{
+    if (s_wifi_setup_overlay != nullptr) {
+        lv_obj_delete(s_wifi_setup_overlay);
+    }
+    s_wifi_setup_overlay = nullptr;
+    s_wifi_ssid_input = nullptr;
+    s_wifi_password_input = nullptr;
+    s_wifi_keyboard = nullptr;
+    s_wifi_setup_status = nullptr;
+}
+
+static void on_wifi_input_focus(lv_event_t *event)
+{
+    if (s_wifi_keyboard == nullptr) {
+        return;
+    }
+    lv_keyboard_set_textarea(s_wifi_keyboard,
+                             static_cast<lv_obj_t *>(lv_event_get_target(event)));
+    notify_activity();
+}
+
+static void on_wifi_setup_activity(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+}
+
+static void on_wifi_setup_cancel(lv_event_t *event)
+{
+    (void)event;
+    close_wifi_setup();
+}
+
+static void on_wifi_setup_connect(lv_event_t *event)
+{
+    (void)event;
+
+    const char *ssid = s_wifi_ssid_input != nullptr
+                           ? lv_textarea_get_text(s_wifi_ssid_input)
+                           : "";
+    const char *password = s_wifi_password_input != nullptr
+                               ? lv_textarea_get_text(s_wifi_password_input)
+                               : "";
+
+    if (ssid[0] == '\0') {
+        if (s_wifi_setup_status != nullptr) {
+            lv_label_set_text(s_wifi_setup_status, "Enter WiFi name");
+        }
+        return;
+    }
+
+    if (s_config.wifi_setup_cb != nullptr) {
+        s_config.wifi_setup_cb(ssid, password, s_config.user_ctx);
+    }
+    s_wifi_has_credentials = true;
+    s_wifi_connected = false;
+    if (s_wifi_status != nullptr) {
+        lv_label_set_text(s_wifi_status, "Connecting...");
+    }
+    close_wifi_setup();
+}
+
+static void open_wifi_setup(void)
+{
+    if (s_wifi_setup_overlay != nullptr || s_menu_root == nullptr) {
+        return;
+    }
+
+    s_wifi_setup_overlay = lv_obj_create(s_menu_root);
+    lv_obj_remove_style_all(s_wifi_setup_overlay);
+    lv_obj_set_size(s_wifi_setup_overlay, 466, 466);
+    lv_obj_center(s_wifi_setup_overlay);
+    lv_obj_add_flag(s_wifi_setup_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_wifi_setup_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(s_wifi_setup_overlay, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_wifi_setup_overlay, lv_color_hex(MENU_COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(s_wifi_setup_overlay, LV_OPA_COVER, 0);
+
+    lv_obj_t *title = make_label(s_wifi_setup_overlay,
+                                 "WiFi Setup",
+                                 lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
+
+    s_wifi_ssid_input = lv_textarea_create(s_wifi_setup_overlay);
+    lv_obj_set_size(s_wifi_ssid_input, 260, 36);
+    lv_obj_align(s_wifi_ssid_input, LV_ALIGN_TOP_MID, 0, 62);
+    lv_textarea_set_one_line(s_wifi_ssid_input, true);
+    lv_textarea_set_max_length(s_wifi_ssid_input, 32);
+    lv_textarea_set_placeholder_text(s_wifi_ssid_input, "WiFi name");
+    lv_obj_set_style_text_font(s_wifi_ssid_input, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_bg_color(s_wifi_ssid_input, lv_color_hex(MENU_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_opa(s_wifi_ssid_input, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_wifi_ssid_input, 18, 0);
+    lv_obj_set_style_border_width(s_wifi_ssid_input, 1, 0);
+    lv_obj_set_style_border_color(s_wifi_ssid_input, lv_color_hex(MENU_COLOR_BORDER), 0);
+    lv_obj_set_style_text_color(s_wifi_ssid_input, lv_color_hex(MENU_COLOR_TEXT), 0);
+    lv_obj_add_event_cb(s_wifi_ssid_input, on_wifi_input_focus, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_wifi_ssid_input, on_wifi_setup_activity, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_wifi_password_input = lv_textarea_create(s_wifi_setup_overlay);
+    lv_obj_set_size(s_wifi_password_input, 260, 36);
+    lv_obj_align(s_wifi_password_input, LV_ALIGN_TOP_MID, 0, 108);
+    lv_textarea_set_one_line(s_wifi_password_input, true);
+    lv_textarea_set_password_mode(s_wifi_password_input, true);
+    lv_textarea_set_max_length(s_wifi_password_input, 64);
+    lv_textarea_set_placeholder_text(s_wifi_password_input, "Password");
+    lv_obj_set_style_text_font(s_wifi_password_input, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_bg_color(s_wifi_password_input, lv_color_hex(MENU_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_opa(s_wifi_password_input, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(s_wifi_password_input, 18, 0);
+    lv_obj_set_style_border_width(s_wifi_password_input, 1, 0);
+    lv_obj_set_style_border_color(s_wifi_password_input, lv_color_hex(MENU_COLOR_BORDER), 0);
+    lv_obj_set_style_text_color(s_wifi_password_input, lv_color_hex(MENU_COLOR_TEXT), 0);
+    lv_obj_add_event_cb(s_wifi_password_input, on_wifi_input_focus, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_wifi_password_input, on_wifi_setup_activity, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t *connect_button = make_small_button(s_wifi_setup_overlay, "Connect");
+    lv_obj_set_size(connect_button, 104, 34);
+    lv_obj_align(connect_button, LV_ALIGN_TOP_MID, -56, 154);
+    lv_obj_add_event_cb(connect_button, on_wifi_setup_connect, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *cancel_button = make_small_button(s_wifi_setup_overlay, "Cancel");
+    lv_obj_set_size(cancel_button, 104, 34);
+    lv_obj_align(cancel_button, LV_ALIGN_TOP_MID, 56, 154);
+    lv_obj_add_event_cb(cancel_button, on_wifi_setup_cancel, LV_EVENT_CLICKED, nullptr);
+
+    s_wifi_setup_status = make_value_label(s_wifi_setup_overlay, "");
+    lv_obj_set_style_text_font(s_wifi_setup_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(s_wifi_setup_status, lv_color_hex(MENU_COLOR_MUTED), 0);
+    lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 198);
+
+    s_wifi_keyboard = lv_keyboard_create(s_wifi_setup_overlay);
+    lv_obj_set_size(s_wifi_keyboard, 280, 170);
+    lv_obj_align(s_wifi_keyboard, LV_ALIGN_BOTTOM_MID, 0, -50);
+    style_keyboard(s_wifi_keyboard);
+    lv_keyboard_set_mode(s_wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+    lv_keyboard_set_textarea(s_wifi_keyboard, s_wifi_ssid_input);
+    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_setup_activity, LV_EVENT_PRESSED, nullptr);
+    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_setup_activity, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_move_foreground(s_wifi_setup_overlay);
+    notify_activity();
+}
+
+static void on_wifi_changed(lv_event_t *event)
+{
+    if (s_updating_wifi_ui) {
+        return;
+    }
+
+    notify_activity();
+    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (enabled && !s_wifi_has_credentials) {
+        s_updating_wifi_ui = true;
+        lv_obj_clear_state(sw, LV_STATE_CHECKED);
+        s_updating_wifi_ui = false;
+        open_wifi_setup();
+        return;
+    }
+
+    if (s_config.wifi_cb != nullptr) {
+        s_config.wifi_cb(enabled, s_config.user_ctx);
+    }
+}
+
+static void on_ntp_changed(lv_event_t *event)
+{
+    if (s_updating_wifi_ui) {
+        return;
+    }
+
+    notify_activity();
+    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    if (s_config.ntp_cb != nullptr) {
+        s_config.ntp_cb(enabled, s_config.user_ctx);
+    }
+}
+
+static void on_ntp_sync_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    if (!s_wifi_connected) {
+        return;
+    }
+    if (s_config.ntp_sync_cb != nullptr) {
+        s_config.ntp_sync_cb(s_config.user_ctx);
+    }
+}
+
+static void on_wifi_setup_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    open_wifi_setup();
+}
+
 lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu_config_t *config)
 {
     if (parent == nullptr || config == nullptr || config->settings == nullptr) {
@@ -481,6 +765,18 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     s_brightness_value = nullptr;
     s_auto_rotate_status = nullptr;
     s_wifi_status = nullptr;
+    s_wifi_switch = nullptr;
+    s_ntp_switch = nullptr;
+    s_ntp_sync_button = nullptr;
+    s_wifi_last_sync = nullptr;
+    s_wifi_setup_overlay = nullptr;
+    s_wifi_ssid_input = nullptr;
+    s_wifi_password_input = nullptr;
+    s_wifi_keyboard = nullptr;
+    s_wifi_setup_status = nullptr;
+    s_updating_wifi_ui = false;
+    s_wifi_has_credentials = false;
+    s_wifi_connected = false;
     s_menu_closing = false;
     s_close_done_cb = nullptr;
     s_close_done_ctx = nullptr;
@@ -661,21 +957,68 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_t *wifi_page = make_setting_page(wheel);
     make_page_caption(wifi_page, "NETWORK");
     make_page_header(wifi_page, LV_SYMBOL_WIFI, "WiFi");
-    s_wifi_status = make_value_label(wifi_page, "");
-    lv_obj_set_style_margin_bottom(s_wifi_status, 10, 0);
-    update_wifi_status(config->settings->wifi_enabled);
-    lv_obj_t *wifi_switch = lv_switch_create(wifi_page);
-    lv_obj_set_size(wifi_switch, 120, 60);
-    lv_obj_add_flag(wifi_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
-    lv_obj_add_state(wifi_switch, LV_STATE_DISABLED);
-    lv_obj_set_style_opa(wifi_switch, LV_OPA_50, 0);
-    style_switch(wifi_switch);
-    // Reserved for the future WiFi provisioning flow; keep it visibly disabled for now.
-    lv_obj_add_event_cb(wifi_switch, on_wifi_changed, LV_EVENT_VALUE_CHANGED, nullptr);
-    lv_obj_t *wifi_hint = make_value_label(wifi_page, "Configuration coming soon");
-    lv_obj_set_style_text_font(wifi_hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(wifi_hint, lv_color_hex(MENU_COLOR_MUTED), 0);
-    lv_obj_set_style_margin_top(wifi_hint, 10, 0);
+
+    s_wifi_status = make_label(wifi_page,
+                               config->settings->wifi_enabled ? "Starting..." : "WiFi off",
+                               lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(s_wifi_status, &lv_font_montserrat_16, 0);
+    lv_obj_set_width(s_wifi_status, 280);
+    lv_obj_set_style_text_align(s_wifi_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(s_wifi_status, LV_LABEL_LONG_DOT);
+
+    lv_obj_t *wifi_row = lv_obj_create(wifi_page);
+    lv_obj_remove_style_all(wifi_row);
+    lv_obj_set_size(wifi_row, 280, 46);
+    lv_obj_set_style_margin_top(wifi_row, 4, 0);
+    lv_obj_set_flex_flow(wifi_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(wifi_row,
+                          LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(wifi_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_wifi_switch = lv_switch_create(wifi_row);
+    lv_obj_set_size(s_wifi_switch, 96, 44);
+    lv_obj_add_flag(s_wifi_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    style_switch(s_wifi_switch);
+    if (config->settings->wifi_enabled) {
+        lv_obj_add_state(s_wifi_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_wifi_switch, on_wifi_changed, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    lv_obj_t *wifi_setup_button = make_small_button(wifi_row, "Setup");
+    lv_obj_add_event_cb(wifi_setup_button, on_wifi_setup_clicked, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *ntp_row = lv_obj_create(wifi_page);
+    lv_obj_remove_style_all(ntp_row);
+    lv_obj_set_size(ntp_row, 280, 32);
+    lv_obj_set_style_margin_top(ntp_row, 4, 0);
+    lv_obj_set_flex_flow(ntp_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ntp_row,
+                          LV_FLEX_ALIGN_SPACE_BETWEEN,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_clear_flag(ntp_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t *ntp_label = make_label(ntp_row, "Auto NTP", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(ntp_label, &lv_font_montserrat_14, 0);
+    s_ntp_switch = lv_switch_create(ntp_row);
+    lv_obj_set_size(s_ntp_switch, 64, 32);
+    lv_obj_add_flag(s_ntp_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    style_switch(s_ntp_switch);
+    if (config->settings->ntp_enabled) {
+        lv_obj_add_state(s_ntp_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(s_ntp_switch, on_ntp_changed, LV_EVENT_VALUE_CHANGED, nullptr);
+
+    s_ntp_sync_button = make_small_button(wifi_page, "Sync now");
+    lv_obj_set_style_margin_top(s_ntp_sync_button, 4, 0);
+    lv_obj_add_state(s_ntp_sync_button, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(s_ntp_sync_button, LV_OPA_50, 0);
+    lv_obj_add_event_cb(s_ntp_sync_button, on_ntp_sync_clicked, LV_EVENT_CLICKED, nullptr);
+
+    s_wifi_last_sync = make_label(wifi_page, "Not synced", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(s_wifi_last_sync, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_margin_top(s_wifi_last_sync, 2, 0);
 
     lv_obj_t *tabs = lv_obj_create(content);
     lv_obj_remove_style_all(tabs);
@@ -734,6 +1077,86 @@ void clock_settings_menu_set_page(uint32_t page_index)
     }
     scroll_to_page(s_menu_wheel, page_index, LV_ANIM_OFF);
     lv_obj_update_layout(s_menu_wheel);
+}
+
+void clock_settings_menu_open_wifi_setup(void)
+{
+    // Host preview helper: open the provisioning overlay without touch input.
+    open_wifi_setup();
+}
+
+void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_status_t *status)
+{
+    if (status == nullptr) {
+        return;
+    }
+
+    s_updating_wifi_ui = true;
+    s_wifi_has_credentials = status->has_credentials;
+    s_wifi_connected = status->connected;
+
+    if (s_wifi_status != nullptr && status->state != nullptr) {
+        set_label_text_if_changed(s_wifi_status, status->state);
+    }
+
+    if (s_wifi_switch != nullptr) {
+        const bool checked = lv_obj_has_state(s_wifi_switch, LV_STATE_CHECKED);
+        if (status->enabled != checked) {
+            if (status->enabled) {
+                lv_obj_add_state(s_wifi_switch, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(s_wifi_switch, LV_STATE_CHECKED);
+            }
+        }
+    }
+
+    if (s_ntp_switch != nullptr) {
+        const bool checked = lv_obj_has_state(s_ntp_switch, LV_STATE_CHECKED);
+        if (status->ntp_enabled != checked) {
+            if (status->ntp_enabled) {
+                lv_obj_add_state(s_ntp_switch, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(s_ntp_switch, LV_STATE_CHECKED);
+            }
+        }
+    }
+
+    if (s_ntp_sync_button != nullptr) {
+        const bool disabled = lv_obj_has_state(s_ntp_sync_button, LV_STATE_DISABLED);
+        const bool should_disable = !status->connected;
+        if (should_disable != disabled) {
+            if (status->connected) {
+                lv_obj_clear_state(s_ntp_sync_button, LV_STATE_DISABLED);
+                lv_obj_set_style_opa(s_ntp_sync_button, LV_OPA_COVER, 0);
+            } else {
+                lv_obj_add_state(s_ntp_sync_button, LV_STATE_DISABLED);
+                lv_obj_set_style_opa(s_ntp_sync_button, LV_OPA_50, 0);
+            }
+        }
+    }
+
+    if (s_wifi_last_sync != nullptr) {
+        if (status->last_sync_time > 0) {
+            struct tm timeinfo = {};
+            localtime_r(&status->last_sync_time, &timeinfo);
+            char text[32] = {};
+            snprintf(text,
+                     sizeof(text),
+                     "Last sync %02d:%02d",
+                     timeinfo.tm_hour,
+                     timeinfo.tm_min);
+            set_label_text_if_changed(s_wifi_last_sync, text);
+        } else {
+            set_label_text_if_changed(s_wifi_last_sync, "Not synced");
+        }
+    }
+
+    s_updating_wifi_ui = false;
+}
+
+bool clock_settings_menu_is_setup_open(void)
+{
+    return s_wifi_setup_overlay != nullptr;
 }
 
 void clock_settings_menu_close_async(clock_settings_menu_close_done_cb_t done_cb, void *user_ctx)
@@ -798,7 +1221,7 @@ void clock_settings_menu_delete_immediately(void)
         }
         lv_obj_delete(s_menu_root);
         s_menu_root = nullptr;
-        s_menu_content = nullptr;
-        s_menu_wheel = nullptr;
     }
+
+    reset_menu_widget_pointers();
 }

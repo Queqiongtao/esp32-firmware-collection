@@ -12,11 +12,11 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - Switchable themes: minimal, segment, analog, outline analog, and four M5 WatchFace themes
 - Current theme index is persisted in NVS and restored on boot
 - Theme changes use a short scale/fade transition; rapid swipes are queued instead of dropped
-- Settings menu opens on the brightness page, closes via the top-center Done button or after 1 minute without menu activity, and keeps WiFi visibly disabled (`Not available`)
+- Settings menu opens on the brightness page and closes via the top-center Done button or after 1 minute without menu activity; the WiFi page supports on-screen SSID/password entry and NTP time sync
 - Motion settings page provides an Auto Rotate switch; it is off by default and pauses IMU sampling when disabled
 - Sleep and wake use a short brightness fade
 - Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image when auto-rotate is enabled
-- PCF85063 external RTC syncs system time, with build time as fallback
+- PCF85063 external RTC syncs system time, with build time as fallback; NTP updates the system time and writes it back to the RTC after WiFi connects
 - QMI8658 IMU computes in-plane gravity angle for optional clock rotation
 - GPIO0 and touch swipes switch themes
 - Theme switch order and implementation details are documented in `PROJECT_OVERVIEW.md`
@@ -31,6 +31,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - RTC: PCF85063
 - IMU: QMI8658
 - Touch: CST9217
+- WiFi: 2.4 GHz (ESP32-S3)
 
 ## Commands
 
@@ -62,18 +63,23 @@ Build output:
 - GPIO0 is also a boot-related pin; holding it during power-on or reset can affect boot mode.
 - A normal horizontal swipe needs at least 100 px. A quick flick needs at least 50 px, must finish within 300 ms, and must have movement within the last 80 ms before release. The horizontal/vertical axis ratio is 2.0, and theme switches have a 150 ms cooldown.
 - A roughly 2-second stationary long press opens settings; moving more than 16 px cancels long press and leaves the gesture available for swipe handling.
-- The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Use the four icon-and-label tabs arranged on a shallow arc at the bottom to switch pages; Done is centered at the top. Tapping outside the menu no longer closes it; use Done, wait 1 minute without menu activity, or let the screen sleep. Auto Rotate on the Motion page is off by default. The WiFi entry is disabled and shows `Not available`; WiFi connection is not implemented yet.
+- The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Use the four icon-and-label tabs arranged on a shallow arc at the bottom to switch pages; Done is centered at the top. Tapping outside the menu no longer closes it; use Done, wait 1 minute without menu activity, or let the screen sleep. Auto Rotate on the Motion page is off by default.
+- The WiFi page has an enable switch, a Setup button, an Auto NTP switch, a Sync now button and connection/sync status. Setup opens a keyboard overlay for SSID and password entry; credentials are stored in the NVS `wifi_credentials` namespace in plaintext. The menu timeout is paused while the setup overlay is open.
+- After WiFi connects, SNTP starts automatically against `ntp.aliyun.com` and the synchronized time is written back to the PCF85063. Auto NTP can be disabled; Sync now remains available while WiFi is connected. A manual sync keeps SNTP alive for up to 30 seconds when Auto NTP is off.
 - Sleep and wake use a roughly 200 ms brightness fade. The first touch that wakes the screen only turns it on; it does not switch themes or activate menu items.
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
 - The theme index is stored as `theme_id` in the NVS `clock_settings` namespace. It maps to the `s_themes` array order, so adding or reordering themes remaps saved values.
 - Auto-rotate is stored as `auto_rotate` in the same NVS namespace. It defaults to off, and existing devices without the key stay off after upgrading.
+- The WiFi enable flag is stored as `wifi` and NTP auto-sync as `ntp` in the `clock_settings` namespace; `ntp` defaults to on for devices upgrading without the key. If WiFi is enabled on boot and credentials exist, the device connects automatically and retries every 5 seconds after a disconnect.
 
 ## Key Files
 
 - `main/main.cpp`: app entry, theme switching and transition, LVGL snapshot, rotation spring, brightness fade, GPIO0/touch/power-key wiring
 - `main/imu_demo.cpp`: accelerometer sampling and clock angle update
-- `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback
-- `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, auto-rotate, WiFi flag, theme index)
+- `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback, plus system-time write-back after NTP sync
+- `main/wifi_manager.cpp` / `main/wifi_manager.h`: WiFi station connection, NVS credentials and reconnect handling
+- `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`: SNTP start/stop, sync status and manual sync
+- `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, auto-rotate, WiFi flag, NTP flag, theme index)
 - `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`: settings menu UI
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`: touch swipe/flick and long-press gesture layer
 - `main/clock_theme.h`: theme interface

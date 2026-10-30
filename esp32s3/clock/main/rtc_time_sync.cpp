@@ -113,6 +113,9 @@ static esp_err_t set_system_time_from_tm(const struct tm *timeinfo)
     return settimeofday(&tv, NULL) == 0 ? ESP_OK : ESP_FAIL;
 }
 
+static pcf85063_t s_rtc = {};
+static bool s_rtc_ready = false;
+
 static esp_err_t init_pcf85063(pcf85063_t *rtc)
 {
     i2c_master_bus_handle_t bus_handle = bsp_i2c_get_handle();
@@ -130,17 +133,36 @@ static esp_err_t init_pcf85063(pcf85063_t *rtc)
     return pcf85063_init(rtc, &config);
 }
 
+// Keep one I2C device handle for the lifetime of the application. Adding a new
+// device on every NTP sync would leak handles for the same RTC address.
+static esp_err_t get_pcf85063(pcf85063_t **rtc)
+{
+    if (rtc == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *rtc = &s_rtc;
+    if (s_rtc_ready) {
+        return ESP_OK;
+    }
+
+    const esp_err_t err = init_pcf85063(&s_rtc);
+    if (err == ESP_OK) {
+        s_rtc_ready = true;
+    }
+    return err;
+}
+
 esp_err_t rtc_time_sync_from_external_rtc(void)
 {
-    pcf85063_t rtc = {};
-    esp_err_t err = init_pcf85063(&rtc);
+    pcf85063_t *rtc = nullptr;
+    esp_err_t err = get_pcf85063(&rtc);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to init PCF85063: %s", esp_err_to_name(err));
         return err;
     }
 
     struct tm timeinfo = {};
-    err = pcf85063_get_time(&rtc, &timeinfo);
+    err = pcf85063_get_time(rtc, &timeinfo);
     if (err == ESP_OK && is_app_time_sane(&timeinfo)) {
         err = set_system_time_from_tm(&timeinfo);
         if (err == ESP_OK) {
@@ -162,7 +184,7 @@ esp_err_t rtc_time_sync_from_external_rtc(void)
         return ESP_FAIL;
     }
 
-    err = pcf85063_set_time(&rtc, &timeinfo);
+    err = pcf85063_set_time(rtc, &timeinfo);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to initialize PCF85063 from build time: %s", esp_err_to_name(err));
     }
@@ -174,5 +196,31 @@ esp_err_t rtc_time_sync_from_external_rtc(void)
         ESP_LOGW(TAG, "Failed to set system time from build time: %s", esp_err_to_name(err));
     }
 
+    return err;
+}
+
+esp_err_t rtc_time_sync_write_from_system(void)
+{
+    pcf85063_t *rtc = nullptr;
+    esp_err_t err = get_pcf85063(&rtc);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to init PCF85063 for write: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    const time_t now = time(nullptr);
+    struct tm timeinfo = {};
+    localtime_r(&now, &timeinfo);
+    if (!is_app_time_sane(&timeinfo)) {
+        ESP_LOGW(TAG, "System time is invalid, skip RTC write");
+        return ESP_FAIL;
+    }
+
+    err = pcf85063_set_time(rtc, &timeinfo);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "PCF85063 updated from system time");
+    } else {
+        ESP_LOGW(TAG, "Failed to write PCF85063: %s", esp_err_to_name(err));
+    }
     return err;
 }

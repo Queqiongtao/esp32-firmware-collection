@@ -13,7 +13,8 @@
 - 触摸屏左右滑动切换主题，长按打开设置菜单。
 - 当前主题索引通过 NVS 恢复，重启后保持上次主题。
 - 主题切换使用约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进。
-- 设置菜单默认亮度页，支持亮度、息屏和自动旋转设置；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭；WiFi 暂不可用。
+- 设置菜单默认亮度页，支持亮度、息屏、自动旋转、WiFi 配网和 NTP 自动对时；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭。
+- WiFi 凭据通过设置菜单的屏幕键盘输入并保存到 NVS；连接成功后自动启动 SNTP，对时结果写回 PCF85063。
 - 手动/自动息屏和亮屏使用约 200 ms 亮度渐变；用于唤醒的触摸/按键不会同时执行切换或菜单操作。
 - PCF85063 外部 RTC 同步系统时间。
 - RTC 时间无效或不可用时，用固件编译时间兜底，并尝试写回 RTC。
@@ -40,6 +41,7 @@
 - RTC：PCF85063
 - IMU：QMI8658
 - 触摸：CST9217
+- WiFi：ESP32-S3 内置 2.4 GHz
 - 主题切换按键：GPIO0，低电平有效
 
 PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle()` 会隐式初始化 I2C，因此 RTC 可以在显示启动前同步系统时间。
@@ -48,13 +50,14 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 启动入口在 `main/main.cpp`。主要流程如下：
 
-1. `app_main()` 设置时区为 `CST-8`，初始化 NVS 并读取 `clock_settings`（亮度、息屏超时、自动旋转、WiFi 开关、主题索引）。
+1. `app_main()` 设置时区为 `CST-8`，初始化 NVS 并读取 `clock_settings`（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
 2. 校验主题索引；非法值回退到 `minimal`。
 3. 调用 `rtc_time_sync_from_external_rtc()` 从 PCF85063 同步系统时间。
-4. 调用 `bsp_display_start()` 启动显示和 LVGL，并按保存的亮度初始化面板。
-5. 在 LVGL 显示锁保护下调用 `create_clock_ui()` 创建当前主题和 snapshot 图片对象。
-6. 注册 GPIO0 单击回调，用于切换主题。
-7. 启动 IMU 任务，并根据 NVS 中的自动旋转设置决定是否采样；采样时接收加速度计姿态角回调。
+4. 初始化 WiFi 管理器和 SNTP；如果上次 WiFi 开关为开启且已有凭据，启动时自动连接。没有凭据时会把 `wifi_enabled` 回退为关闭。
+5. 调用 `bsp_display_start()` 启动显示和 LVGL，并按保存的亮度初始化面板。
+6. 在 LVGL 显示锁保护下调用 `create_clock_ui()` 创建当前主题和 snapshot 图片对象。
+7. 注册 GPIO0 单击回调，用于切换主题。
+8. 启动 IMU 任务，并根据 NVS 中的自动旋转设置决定是否采样；采样时接收加速度计姿态角回调。
 
 主 UI 使用以下 LVGL timer：
 
@@ -64,6 +67,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 - `update_inputs()`：每 15 ms 处理按键、菜单切换和旋转定时器唤醒，并按 30 ms 周期轮询电源键。
 - `update_theme_transition()`：16 ms 周期，仅在主题过渡期间运行；淡出 70 ms，中点切换主题并强制刷新 snapshot，再淡入 90 ms。
 - `update_brightness_fade()`：16 ms 周期，仅在亮度渐变期间运行；息屏 220 ms、亮屏 240 ms。
+- `update_network_status()`：每 500 ms 读取 WiFi 状态，按需启停 SNTP、把 NTP 同步结果写回 RTC，并刷新设置菜单中的网络状态。
 
 菜单打开、屏幕息屏或自动旋转关闭时，时钟旋转和 IMU 采样会暂停；息屏还会关闭菜单、取消主题过渡并暂停渲染。恢复后立即同步当前时间与姿态。亮度渐变使用 LVGL timer 执行，避免与面板 QSPI IO 竞争。IMU 任务不会直接操作 LVGL，只设置共享目标角，并通知 LVGL timer 唤醒旋转处理。设置菜单固定在屏幕坐标系，不随设备姿态旋转。
 
@@ -104,9 +108,9 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 1. Brightness：胶囊进度条，范围 1%–100%，拖动时立即应用到面板并写入设置。
 2. Sleep：息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
-4. WiFi：开关置灰并显示 `Not available`，当前不建立连接。
+4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮、连接状态和上次同步时间。点击 Setup 会打开全屏配网弹层，用 LVGL 键盘输入 SSID 和密码；Connect 保存凭据并开始连接，Cancel 关闭弹层。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
 
-菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
+菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
 息屏入口包括：
 
@@ -202,13 +206,16 @@ typedef struct {
 
 ## 时间同步
 
-时间同步实现在 `main/rtc_time_sync.cpp`。
+时间同步有两条路径：开机时从 PCF85063 恢复时间，联网后通过 SNTP 校正并写回 RTC。
 
 - 优先初始化 PCF85063，并读取 RTC 时间。
 - 时间范围、日期、时分秒会做基本合法性检查。
 - RTC 时间合法时写入系统时间。
 - RTC 不可用或时间非法时解析 `__DATE__` 和 `__TIME__`，用固件编译时间初始化系统时间。
 - 如果使用编译时间兜底，会尝试把编译时间写回 PCF85063。
+- WiFi 连接成功后，`main/ntp_time_sync.cpp` 启动 SNTP，服务器为 `ntp.aliyun.com`；默认每小时自动更新时间。
+- NTP 同步回调只记录同步时间和待写标志，真正的 PCF85063 写入由 `update_network_status()` 在 LVGL timer 中执行，避免阻塞 lwIP 任务。
+- WiFi 页的 Sync now 可手动触发同步；即使 Auto NTP 关闭，手动同步也会保持 SNTP 运行最多 30 秒以完成本次对时。
 
 系统时区在 `app_main()` 中设置为 `CST-8`。
 
@@ -230,15 +237,17 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 ## 关键目录
 
 - `main/main.cpp`：应用入口、主题注册与过渡、LVGL snapshot、旋转弹簧、亮度渐变、按钮和 IMU 回调接入。
-- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、主题索引）。
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi）。
+- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi、WiFi 配网弹层和 NTP 控制）。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源。
-- `main/rtc_time_sync.cpp`：PCF85063 RTC 同步。
+- `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，以及从系统时间写回 RTC。
+- `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接、NVS 凭据和断线重连。
+- `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`：SNTP 启停、同步状态和手动对时。
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟平面角计算。
 - `components/qmi8658/`：QMI8658 I2C 驱动。
 - `components/pcf85063/`：PCF85063 I2C 驱动。
@@ -277,7 +286,10 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 主题索引保存的是 `s_themes` 数组下标；增删或重排主题时需考虑 NVS 中 `theme_id` 的兼容性。
 - 自动旋转保存于 NVS `clock_settings` 命名空间的 `auto_rotate` 键，缺省为关闭；旧固件升级后没有该键时首次启动保持关闭。
 - 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
-- WiFi 目前只有设置字段和菜单入口，未实现连接；菜单中固定显示 `Not available`。
+- WiFi 凭据保存在 NVS `wifi_credentials` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据。
+- WiFi 开关存于 `clock_settings` 命名空间的 `wifi` 键，NTP 自动对时存于 `ntp` 键且缺省开启；旧固件升级后没有 `ntp` 键时首次启动为开启。
+- SNTP 使用 `ntp.aliyun.com`，当前 `sdkconfig` 只配置 1 个 SNTP 服务器，自动更新间隔为 1 小时。
+- WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。
 - `PROJECT_CONTEXT.md` 已弃用，不应作为当前工程事实来源。
@@ -298,7 +310,8 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 触摸左右滑动是否能切换主题；静止约 2 秒是否能打开设置菜单，移动超过 16 px 后是否不再触发长按。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
 - 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
-- 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正；WiFi 页是否显示 `Not available` 且不可操作。
+- 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正。
+- WiFi 页能否打开 Setup 弹层、用屏幕键盘输入并连接；连接状态、Auto NTP 开关和 Sync now 是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
 - Brightness 胶囊进度条拖动是否跟手，拖动时页面是否不会误滚动。
 - 菜单打开/关闭的淡入缩放动画是否流畅，关闭后是否没有残留遮罩或菜单对象。
 - 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。

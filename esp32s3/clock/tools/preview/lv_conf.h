@@ -33,6 +33,8 @@
 #define LV_USE_SCALE 1
 #define LV_USE_SLIDER 1
 #define LV_USE_SWITCH 1
+#define LV_USE_KEYBOARD 1
+#define LV_USE_TEXTAREA 1
 
 /* 设备端启用的 Montserrat 字号 */
 #define LV_FONT_MONTSERRAT_12 1

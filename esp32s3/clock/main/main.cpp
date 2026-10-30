@@ -22,10 +22,12 @@
 #include "imu_demo.h"
 #include "iot_button.h"
 #include "lvgl.h"
+#include "ntp_time_sync.h"
 #include "nvs_flash.h"
 #include "rtc_time_sync.h"
 #include "sdkconfig.h"
 #include "spring_angle.h"
+#include "wifi_manager.h"
 
 #if CONFIG_ESP_LVGL_ADAPTER_ENABLE_FPS_STATS
 #include "esp_lv_adapter.h"
@@ -93,6 +95,8 @@ static lv_timer_t *s_clock_update_timer = NULL;
 static lv_timer_t *s_theme_animation_timer = NULL;
 static lv_timer_t *s_clock_rotation_timer = NULL;
 static lv_timer_t *s_auto_sleep_timer = NULL;
+static lv_timer_t *s_wifi_status_timer = NULL;
+static uint32_t s_ntp_manual_sync_until_ms = 0;
 static lv_timer_t *s_input_timer = NULL;
 static lv_timer_t *s_settings_save_timer = NULL;
 static lv_timer_t *s_theme_transition_timer = NULL;
@@ -169,6 +173,7 @@ static void update_pwr_button(lv_timer_t *timer);
 static void update_theme_transition(lv_timer_t *timer);
 static void update_brightness_fade(lv_timer_t *timer);
 static void update_settings_menu_timeout(lv_timer_t *timer);
+static void update_network_status(lv_timer_t *timer);
 static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
 static void apply_auto_rotate_setting(bool enabled);
@@ -849,9 +854,75 @@ static void on_menu_auto_rotate(bool enabled, void *user_ctx)
 static void on_menu_wifi(bool enabled, void *user_ctx)
 {
     (void)user_ctx;
+
+    if (enabled && !wifi_manager_has_credentials()) {
+        s_settings.wifi_enabled = false;
+        schedule_settings_save();
+        return;
+    }
+
     s_settings.wifi_enabled = enabled;
+    if (!enabled) {
+        s_ntp_manual_sync_until_ms = 0;
+    }
+    const esp_err_t err = wifi_manager_set_enabled(enabled);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Set WiFi enabled=%d failed: %s", enabled, esp_err_to_name(err));
+    }
     schedule_settings_save();
-    ESP_LOGI(TAG, "WiFi setting is %s (connection is not configured yet)", enabled ? "on" : "off");
+    ESP_LOGI(TAG, "WiFi setting is %s", enabled ? "on" : "off");
+}
+
+static void on_menu_wifi_setup(const char *ssid, const char *password, void *user_ctx)
+{
+    (void)user_ctx;
+
+    const esp_err_t err = wifi_manager_connect(ssid, password);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi connect request failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    s_settings.wifi_enabled = true;
+    schedule_settings_save();
+    ESP_LOGI(TAG, "WiFi credentials saved for SSID=%s", ssid);
+}
+
+static void on_menu_ntp(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.ntp_enabled = enabled;
+    if (enabled) {
+        wifi_manager_status_t status = {};
+        wifi_manager_get_status(&status);
+        if (status.state == WIFI_MANAGER_CONNECTED) {
+            ntp_time_sync_start();
+        }
+    } else {
+        s_ntp_manual_sync_until_ms = 0;
+        ntp_time_sync_stop();
+    }
+    schedule_settings_save();
+    ESP_LOGI(TAG, "NTP auto sync is %s", enabled ? "on" : "off");
+}
+
+static void on_menu_ntp_sync(void *user_ctx)
+{
+    (void)user_ctx;
+    wifi_manager_status_t status = {};
+    wifi_manager_get_status(&status);
+    if (status.state != WIFI_MANAGER_CONNECTED) {
+        return;
+    }
+    const esp_err_t err = ntp_time_sync_sync_now();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Manual NTP sync failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    // Keep SNTP alive long enough to finish a one-shot sync even when Auto NTP
+    // is disabled; update_network_status() stops it after this window.
+    s_ntp_manual_sync_until_ms = lv_tick_get() + 30000;
 }
 
 static void on_menu_close(void *user_ctx)
@@ -880,6 +951,9 @@ static void open_settings_menu(void)
         .sleep_cb = on_menu_sleep,
         .auto_rotate_cb = on_menu_auto_rotate,
         .wifi_cb = on_menu_wifi,
+        .wifi_setup_cb = on_menu_wifi_setup,
+        .ntp_cb = on_menu_ntp,
+        .ntp_sync_cb = on_menu_ntp_sync,
         .close_cb = on_menu_close,
         .activity_cb = on_menu_activity,
         .user_ctx = NULL,
@@ -892,6 +966,7 @@ static void open_settings_menu(void)
 
     s_settings_menu_closing = false;
     s_settings_menu_last_activity_ms = lv_tick_get();
+    update_network_status(NULL);
     clock_touch_gesture_set_enabled(false);
     keep_touch_layer_foreground();
     update_clock_rendering_state();
@@ -941,6 +1016,11 @@ static void update_settings_menu_timeout(lv_timer_t *timer)
         return;
     }
 
+    if (clock_settings_menu_is_setup_open()) {
+        s_settings_menu_last_activity_ms = lv_tick_get();
+        return;
+    }
+
     const uint32_t now_ms = lv_tick_get();
     if ((uint32_t)(now_ms - s_settings_menu_last_activity_ms) < CLOCK_MENU_TIMEOUT_MS) {
         return;
@@ -948,6 +1028,76 @@ static void update_settings_menu_timeout(lv_timer_t *timer)
 
     ESP_LOGI(TAG, "settings menu auto close after %" PRIu32 " ms", CLOCK_MENU_TIMEOUT_MS);
     close_settings_menu();
+}
+
+static void update_network_status(lv_timer_t *timer)
+{
+    (void)timer;
+
+    wifi_manager_status_t wifi = {};
+    wifi_manager_get_status(&wifi);
+    const bool connected = wifi.state == WIFI_MANAGER_CONNECTED;
+
+    const uint32_t now_ms = lv_tick_get();
+    const bool manual_ntp_active =
+        s_ntp_manual_sync_until_ms != 0 &&
+        (int32_t)(s_ntp_manual_sync_until_ms - now_ms) > 0;
+
+    if (connected && (s_settings.ntp_enabled || manual_ntp_active)) {
+        if (!ntp_time_sync_is_running()) {
+            ntp_time_sync_start();
+        }
+    } else {
+        ntp_time_sync_stop();
+    }
+
+    if (ntp_time_sync_take_rtc_write_pending()) {
+        const esp_err_t err = rtc_time_sync_write_from_system();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to update PCF85063 after NTP sync: %s", esp_err_to_name(err));
+        }
+    }
+
+    if (s_settings_menu == NULL) {
+        return;
+    }
+
+    char state[64] = {};
+    switch (wifi.state) {
+    case WIFI_MANAGER_OFF:
+        snprintf(state, sizeof(state), "WiFi off");
+        break;
+    case WIFI_MANAGER_IDLE:
+        snprintf(state,
+                 sizeof(state),
+                 "%s",
+                 wifi.has_credentials ? "WiFi ready" : "Not configured");
+        break;
+    case WIFI_MANAGER_CONNECTING:
+        snprintf(state, sizeof(state), "Connecting...");
+        break;
+    case WIFI_MANAGER_CONNECTED:
+        snprintf(state, sizeof(state), "Connected: %s", wifi.ssid);
+        break;
+    case WIFI_MANAGER_FAILED:
+        snprintf(state, sizeof(state), "Connection failed");
+        break;
+    default:
+        snprintf(state, sizeof(state), "WiFi unknown");
+        break;
+    }
+
+    clock_settings_menu_wifi_status_t status = {};
+    status.state = state;
+    status.ssid = wifi.ssid;
+    status.ip = wifi.ip;
+    status.enabled = wifi.enabled;
+    status.has_credentials = wifi.has_credentials;
+    status.connected = connected;
+    status.ntp_enabled = s_settings.ntp_enabled;
+    status.ntp_synced = ntp_time_sync_is_synced();
+    status.last_sync_time = ntp_time_sync_last_sync_time();
+    clock_settings_menu_update_wifi_status(&status);
 }
 
 static void toggle_settings_menu(void)
@@ -1363,6 +1513,7 @@ static void create_clock_ui(void)
     }
     s_auto_sleep_timer = lv_timer_create(update_auto_sleep, 1000, NULL);
     lv_timer_create(update_settings_menu_timeout, 1000, NULL);
+    s_wifi_status_timer = lv_timer_create(update_network_status, 500, NULL);
     s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
 
     s_theme_transition_timer =
@@ -1498,6 +1649,21 @@ extern "C" void app_main(void)
              (unsigned)s_current_theme_index);
 
     rtc_time_sync_from_external_rtc();
+
+    esp_err_t wifi_err = wifi_manager_init();
+    if (wifi_err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi init failed: %s", esp_err_to_name(wifi_err));
+    } else {
+        ntp_time_sync_init();
+        if (s_settings.wifi_enabled) {
+            if (wifi_manager_has_credentials()) {
+                wifi_manager_set_enabled(true);
+            } else {
+                s_settings.wifi_enabled = false;
+                clock_settings_save(&s_settings);
+            }
+        }
+    }
 
     s_display = bsp_display_start();
     ESP_ERROR_CHECK(s_display ? ESP_OK : ESP_FAIL);
