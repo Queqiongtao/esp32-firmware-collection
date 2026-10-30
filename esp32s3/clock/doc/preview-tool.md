@@ -1,8 +1,8 @@
-# 主题预览工具设计与边界
+# 主题与菜单预览工具设计与边界
 
 ## 1. 定位
 
-`tools/preview/` 是 `esp-clock` 的主机端离屏预览工具。它使用 LVGL 桌面构建，把 `main/` 下的时钟主题渲染成图片，用于在电脑上快速检查构图、对齐、字体、图片资源、圆屏裁切和配色。
+`tools/preview/` 是 `esp-clock` 的主机端离屏预览工具。它使用 LVGL 桌面构建，把 `main/` 下的时钟主题和设置菜单渲染成图片，用于在电脑上快速检查构图、对齐、字体、图片资源、圆屏裁切和配色。
 
 它**不参与 ESP-IDF 构建**，也不会烧录到设备。预览通过不代表固件在真实 AMOLED 上的显示效果已经通过，亮度、Gamma、色偏、旋转跟手性、主题过渡和刷新性能仍需上板确认。
 
@@ -25,7 +25,7 @@
 | 方面 | preview | ESP32 固件 |
 |------|---------|-----------|
 | 程序入口 | `preview.cpp` 的 `main()` | `main.cpp` 的 `app_main()` |
-| 参与编译的代码 | 8 个主题、字体/图片资源和 LVGL | 还包括设置、触摸手势、RTC、IMU、菜单、主题过渡等 |
+| 参与编译的代码 | 8 个主题、设置菜单、字体/图片资源和 LVGL | 还包括设置、触摸手势、RTC、IMU、菜单、主题过渡等 |
 | 时间来源 | 固定日期 2026-10-20 UTC；默认 10:08:35 和 23:59:35 | PCF85063 RTC + 系统本地时间（`CST-8`），持续走时 |
 | 主题调用方式 | 每个主题执行一次 `build → reset → update → tick(+5s) → tick(+6s)` 后截图 | `update()` 每 1000 ms 调用一次；`tick()` 每 33 ms 调用；仅在内容变化且旋转停稳时刷新截图 |
 | LVGL 配置 | 独立的 `tools/preview/lv_conf.h`；`LV_OS_NONE`、单线程、CLIB、Montserrat 12~40 子集、未启用压缩字体 | `sdkconfig`；FreeRTOS、CLIB、Montserrat 8~44、压缩字体、`LV_FONT_FMT_TXT_LARGE`、对象样式缓存、2 个软件绘制单元等 |
@@ -45,6 +45,7 @@ preview 可以可靠验证：
 - 字体和图片资源是否正确加载。
 - 圆屏裁切和安全区是否越界。
 - 配色和大致明暗关系。
+- 设置菜单四个页面的布局、图标、Tab、Done 和配色。
 - 主题代码是否能正常构建、返回有效的 root 对象。
 
 preview 不能验证：
@@ -53,7 +54,7 @@ preview 不能验证：
 - UI 旋转的跟手性、主题切换过渡和刷新性能。
 - 自动旋转开关、关闭后的归正行为和触摸坐标映射。
 - RTC 时间、时区、跨天/跨月和星期显示。
-- 设置菜单、触摸手势、息屏逻辑。
+- 设置菜单的触摸交互、开合动画流畅度和息屏逻辑；菜单布局和配色可以通过预览图检查。
 - 长时间运行和逐帧 `tick` 下的动画中间状态。
 - 固件侧的 snapshot 复用、buffer 分配和显示锁行为。
 
@@ -70,9 +71,10 @@ preview 不能验证：
 
 1. 从 `../../managed_components/lvgl__lvgl` 引入 LVGL，如果目录不存在会直接报错，提示先运行一次 `./dev.sh build` 拉取组件。
 2. 使用 `tools/preview/lv_conf.h` 作为主机端 LVGL 配置。
-3. 显式编译 8 个主题源码和顶层字体。
+3. 显式编译 8 个主题源码、`main/clock_settings_menu.cpp` 和顶层字体。
 4. 用 `file(GLOB ...)` 自动收集 `main/m5_assets/fonts/*.c` 和 `main/m5_assets/images/watch_face/*/*.c`。
-5. 生成 `tools/preview/build/preview` 可执行文件。
+5. 通过 `tools/preview/stubs/esp_err.h` 提供主机端 `esp_err_t` 占位定义。
+6. 生成 `tools/preview/build/preview` 可执行文件。
 
 ### 3.2 渲染
 
@@ -86,6 +88,8 @@ preview 不能验证：
 6. 调用 `lv_obj_update_layout()`，再对 `lv_screen_active()` 执行 `lv_snapshot_take(..., LV_COLOR_FORMAT_RGB565)`。
 7. 把 RGB565 逐像素移位成 RGB888，写出 PPM 到 `out/ppm/`。
 8. 调用 `destroy_overlay()` 并清理 screen，继续下一个主题。
+9. 主题渲染完成后，用默认设置创建一次菜单，渲染 `brightness`、`sleep`、`motion_off`、`motion_on`、`wifi` 五个页面到 `out/menu_ppm/`。
+10. 菜单页面切换通过 `clock_settings_menu_set_page()`，截图前等待打开动画结束。
 
 ### 3.3 后处理
 
@@ -97,6 +101,7 @@ preview 不能验证：
   - 圆外填中灰 `(38, 38, 38)`，避免和黑色主题背景混在一起。
   - 圆边画 2 px 亮灰 `(122, 122, 122)`，模拟玻璃边缘。
 - 生成对比图：原生主题 2 列、M5 主题 2 列、全部主题 4 列。
+- 把 `out/menu_ppm/*.ppm` 转成 `out/menu/*.png`（圆屏遮罩）和 `out/menu/raw/*.png`（方图），并生成 `out/menu/contact_menu.png` 2 列对比图和 `out/menu/report.txt` 半径报告。
 - 统计非黑像素的包围盒和最大半径，写入 `out/report.txt`：
   - 非黑判定为 `r + g + b > 24`。
   - 最大半径超过 233：`⚠ 超出圆屏`。
@@ -115,9 +120,15 @@ preview 不能验证：
 | `out/contact_native.png` | 4 个原生主题圆屏对比图 |
 | `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
+| `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
+| `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
+| `out/menu/contact_menu.png` | 5 个菜单页面对比图 |
+| `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围、最大半径和越界提示 |
 
-`run.sh` 每次运行前会清空上一轮的 `out/ppm`、`out/raw`、`out/round`、`out/r1.0`、`out/*.ppm`、对比图和 `report.txt`，避免不同时刻的旧图混入对比图。
+`run.sh` 每次运行前会清空上一轮的 `out/ppm`、`out/raw`、`out/round`、`out/menu`、`out/menu_ppm`、`out/r1.0`、`out/*.ppm`、对比图和 `report.txt`，避免不同时刻的旧图混入对比图。
+
+`out/menu/*.png` 的圆外灰色只表示真实圆屏之外的区域，不是菜单背景；纯黑方图在 `out/menu/raw/`。菜单半径报告在 `out/menu/report.txt`。
 
 ## 5. 维护约定
 
@@ -149,6 +160,7 @@ preview 不能验证：
 - `run.sh` 适合一次生成一个时刻的完整产物；要比较多个时刻，可以手动多次执行 `build/preview --time HH:MM:SS`，再运行一次 `render.py`。
 - 预览固定日期，不会覆盖跨天、星期变化、月份边界或 12/24 小时制差异。
 - 预览只验证构图和配色；亮度、Gamma、刷新流畅度、旋转和过渡必须上板确认。
+- 设置菜单页面的布局、Tab、Done、配色和圆屏裁切可以预览，但触摸、开合动画流畅度和息屏逻辑仍要上板确认。
 - `report.txt` 的“超出安全区”是提示，不是失败；当前多数主题会贴近边缘绘制外圈或边框。
 
 ## 6. 代码索引
@@ -156,8 +168,9 @@ preview 不能验证：
 | 文件 | 职责 |
 |------|------|
 | `tools/preview/run.sh` | 一键构建、清理产物、运行 preview、调用 render.py |
-| `tools/preview/CMakeLists.txt` | 主机端 LVGL 和主题源码构建配置 |
-| `tools/preview/preview.cpp` | 虚拟 display、主题遍历、固定时间、截图和 PPM 输出 |
+| `tools/preview/CMakeLists.txt` | 主机端 LVGL、主题和设置菜单构建配置 |
+| `tools/preview/preview.cpp` | 虚拟 display、主题/菜单遍历、固定时间、截图和 PPM 输出 |
 | `tools/preview/lv_conf.h` | 预览专用 LVGL 配置，尽量对齐设备端关键项 |
-| `tools/preview/render.py` | PPM 转 PNG、圆形遮罩、对比图和越界报告 |
+| `tools/preview/render.py` | PPM 转 PNG、主题和菜单圆屏遮罩、菜单方图/报告、对比图和越界报告 |
+| `tools/preview/stubs/esp_err.h` | 主机端 `esp_err_t` 占位定义，仅供菜单源码编译 |
 | `tools/preview/README.md` | 使用说明、产物说明和快速排错 |

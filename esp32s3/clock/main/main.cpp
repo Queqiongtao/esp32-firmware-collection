@@ -55,6 +55,7 @@ static constexpr uint32_t PWR_BUTTON_DEBOUNCE_MS = 50;
 static constexpr uint32_t PWR_BUTTON_SINGLE_CLICK_MAX_MS = 800;
 static constexpr uint32_t CLOCK_INPUT_TIMER_MS = 15;
 static constexpr uint32_t CLOCK_SETTINGS_SAVE_DELAY_MS = 500;
+static constexpr uint32_t CLOCK_MENU_TIMEOUT_MS = 60 * 1000;
 static constexpr uint32_t PWR_BUTTON_PIN_MASK = IO_EXPANDER_PIN_NUM_4;
 static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 0;
 
@@ -121,6 +122,8 @@ static volatile bool s_button_single_click_pending = false;
 static volatile bool s_pwr_single_click_pending = false;
 static volatile bool s_menu_toggle_pending = false;
 static uint32_t s_last_activity_ms = 0;
+static uint32_t s_settings_menu_last_activity_ms = 0;
+static bool s_settings_menu_closing = false;
 static bool s_touch_action_blocked_until_release = false;
 static bool s_screen_sleeping = false;
 static esp_io_expander_handle_t s_pwr_io_expander = NULL;
@@ -154,6 +157,7 @@ static bool s_brightness_current_valid = false;
 
 static void keep_touch_layer_foreground(void);
 static void close_settings_menu(void);
+static void close_settings_menu_immediately(void);
 static void open_settings_menu(void);
 static bool note_user_activity(void);
 static bool sleep_screen(const char *reason);
@@ -164,6 +168,7 @@ static void update_clock_rotation(lv_timer_t *timer);
 static void update_pwr_button(lv_timer_t *timer);
 static void update_theme_transition(lv_timer_t *timer);
 static void update_brightness_fade(lv_timer_t *timer);
+static void update_settings_menu_timeout(lv_timer_t *timer);
 static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
 static void apply_auto_rotate_setting(bool enabled);
@@ -780,7 +785,7 @@ static bool sleep_screen(const char *reason)
     s_screen_sleeping = true;
     cancel_theme_transition();
     if (s_settings_menu != NULL) {
-        close_settings_menu();
+        close_settings_menu_immediately();
     }
     update_clock_rendering_state();
     start_brightness_fade(0, CLOCK_BRIGHTNESS_SLEEP_FADE_MS);
@@ -810,6 +815,7 @@ static void toggle_screen_sleep_from_pwr(void)
 static void on_menu_activity(void *user_ctx)
 {
     (void)user_ctx;
+    s_settings_menu_last_activity_ms = lv_tick_get();
     note_user_activity();
 }
 
@@ -884,23 +890,64 @@ static void open_settings_menu(void)
         return;
     }
 
+    s_settings_menu_closing = false;
+    s_settings_menu_last_activity_ms = lv_tick_get();
     clock_touch_gesture_set_enabled(false);
+    keep_touch_layer_foreground();
+    update_clock_rendering_state();
+}
+
+static void on_settings_menu_closed(void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings_menu = NULL;
+    s_settings_menu_closing = false;
+    clock_touch_gesture_set_enabled(true);
     keep_touch_layer_foreground();
     update_clock_rendering_state();
 }
 
 static void close_settings_menu(void)
 {
+    if (s_settings_menu == NULL || s_settings_menu_closing) {
+        return;
+    }
+
+    s_settings_menu_closing = true;
+    flush_settings_save();
+    clock_settings_menu_close_async(on_settings_menu_closed, NULL);
+}
+
+static void close_settings_menu_immediately(void)
+{
     if (s_settings_menu == NULL) {
         return;
     }
 
     flush_settings_save();
-    lv_obj_del(s_settings_menu);
+    clock_settings_menu_delete_immediately();
     s_settings_menu = NULL;
+    s_settings_menu_closing = false;
     clock_touch_gesture_set_enabled(true);
     keep_touch_layer_foreground();
     update_clock_rendering_state();
+}
+
+static void update_settings_menu_timeout(lv_timer_t *timer)
+{
+    (void)timer;
+
+    if (s_settings_menu == NULL || s_settings_menu_closing || s_screen_sleeping) {
+        return;
+    }
+
+    const uint32_t now_ms = lv_tick_get();
+    if ((uint32_t)(now_ms - s_settings_menu_last_activity_ms) < CLOCK_MENU_TIMEOUT_MS) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "settings menu auto close after %" PRIu32 " ms", CLOCK_MENU_TIMEOUT_MS);
+    close_settings_menu();
 }
 
 static void toggle_settings_menu(void)
@@ -1315,6 +1362,7 @@ static void create_clock_ui(void)
         lv_timer_pause(s_clock_rotation_timer);
     }
     s_auto_sleep_timer = lv_timer_create(update_auto_sleep, 1000, NULL);
+    lv_timer_create(update_settings_menu_timeout, 1000, NULL);
     s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
 
     s_theme_transition_timer =

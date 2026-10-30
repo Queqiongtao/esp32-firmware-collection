@@ -12,7 +12,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - Switchable themes: minimal, segment, analog, outline analog, and four M5 WatchFace themes
 - Current theme index is persisted in NVS and restored on boot
 - Theme changes use a short scale/fade transition; rapid swipes are queued instead of dropped
-- Settings menu opens on the brightness page, closes on a tap outside its content or on sleep, and keeps WiFi visibly disabled (`Not available`)
+- Settings menu opens on the brightness page, closes via the top-center Done button or after 1 minute without menu activity, and keeps WiFi visibly disabled (`Not available`)
 - Motion settings page provides an Auto Rotate switch; it is off by default and pauses IMU sampling when disabled
 - Sleep and wake use a short brightness fade
 - Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image when auto-rotate is enabled
@@ -49,7 +49,7 @@ Theme preview runs on the host without flashing:
 ./tools/preview/run.sh
 ```
 
-It compiles the same `clock_theme_*.cpp` sources with a desktop LVGL build and renders every theme to `tools/preview/out/` as PNG. It is an approximation of the firmware renderer, not the firmware itself: the entry point, LVGL configuration, time source, display backend and snapshot target differ. See `tools/preview/README.md` for usage and `doc/preview-tool.md` for the design boundaries.
+It compiles the same `clock_theme_*.cpp` sources and settings menu with a desktop LVGL build and renders themes to `tools/preview/out/` plus menu pages to `tools/preview/out/menu/` as PNG. It is an approximation of the firmware renderer, not the firmware itself: the entry point, LVGL configuration, time source, display backend and snapshot target differ. See `tools/preview/README.md` for usage and `doc/preview-tool.md` for the design boundaries.
 
 Build output:
 
@@ -62,7 +62,7 @@ Build output:
 - GPIO0 is also a boot-related pin; holding it during power-on or reset can affect boot mode.
 - A normal horizontal swipe needs at least 100 px. A quick flick needs at least 50 px, must finish within 300 ms, and must have movement within the last 80 ms before release. The horizontal/vertical axis ratio is 2.0, and theme switches have a 150 ms cooldown.
 - A roughly 2-second stationary long press opens settings; moving more than 16 px cancels long press and leaves the gesture available for swipe handling.
-- The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Auto Rotate on the Motion page is off by default. Tapping outside its content or putting the screen to sleep closes the menu. The WiFi entry is disabled and shows `Not available`; WiFi connection is not implemented yet.
+- The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Use the four icon-and-label tabs arranged on a shallow arc at the bottom to switch pages; Done is centered at the top. Tapping outside the menu no longer closes it; use Done, wait 1 minute without menu activity, or let the screen sleep. Auto Rotate on the Motion page is off by default. The WiFi entry is disabled and shows `Not available`; WiFi connection is not implemented yet.
 - Sleep and wake use a roughly 200 ms brightness fade. The first touch that wakes the screen only turns it on; it does not switch themes or activate menu items.
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
 - The theme index is stored as `theme_id` in the NVS `clock_settings` namespace. It maps to the `s_themes` array order, so adding or reordering themes remaps saved values.

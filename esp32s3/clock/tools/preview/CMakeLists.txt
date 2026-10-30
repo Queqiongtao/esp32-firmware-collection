@@ -34,6 +34,7 @@ add_executable(preview
     ${MAIN_DIR}/clock_theme_m5_simple.cpp
     ${MAIN_DIR}/clock_theme_m5_big_number.cpp
     ${MAIN_DIR}/clock_theme_m5_number_flow.cpp
+    ${MAIN_DIR}/clock_settings_menu.cpp
     ${MAIN_DIR}/lv_font_clock_96.c
     ${MAIN_DIR}/lv_font_clock_144.c
     ${MAIN_DIR}/lv_font_seg_96.c
@@ -41,7 +42,7 @@ add_executable(preview
     ${M5_FONTS}
     ${M5_IMAGES})
 
-target_include_directories(preview PRIVATE ${MAIN_DIR})
+target_include_directories(preview PRIVATE ${MAIN_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/stubs)
 target_link_libraries(preview PRIVATE lvgl m)
 
 target_compile_options(preview PRIVATE -Wno-missing-field-initializers)

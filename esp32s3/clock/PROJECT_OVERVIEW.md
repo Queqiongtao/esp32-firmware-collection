@@ -13,7 +13,7 @@
 - 触摸屏左右滑动切换主题，长按打开设置菜单。
 - 当前主题索引通过 NVS 恢复，重启后保持上次主题。
 - 主题切换使用约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进。
-- 设置菜单默认亮度页，支持亮度、息屏和自动旋转设置；点内容外区域或按 Done 关闭，息屏时自动关闭；WiFi 暂不可用。
+- 设置菜单默认亮度页，支持亮度、息屏和自动旋转设置；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭；WiFi 暂不可用。
 - 手动/自动息屏和亮屏使用约 200 ms 亮度渐变；用于唤醒的触摸/按键不会同时执行切换或菜单操作。
 - PCF85063 外部 RTC 同步系统时间。
 - RTC 时间无效或不可用时，用固件编译时间兜底，并尝试写回 RTC。
@@ -101,12 +101,12 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 设置菜单由 `main/clock_settings_menu.cpp` 创建，分页顺序为：
 
-1. Brightness：亮度滑条，范围 1%–100%，拖动时立即应用到面板并写入设置。
+1. Brightness：胶囊进度条，范围 1%–100%，拖动时立即应用到面板并写入设置。
 2. Sleep：息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
 4. WiFi：开关置灰并显示 `Not available`，当前不建立连接。
 
-菜单默认停在 Brightness 页；点击菜单内容外的黑色区域或按 Done 关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。菜单固定在屏幕坐标系，不跟随设备姿态旋转。
+菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
 息屏入口包括：
 
@@ -149,20 +149,20 @@ typedef struct {
 3. 在 `main/main.cpp` 的 `s_themes` 数组中注册。
 4. 如有新资源，在 `main/CMakeLists.txt` 中加入源文件。
 
-### 主题预览工具
+### 主题与菜单预览工具
 
-`tools/preview/` 是主机端离屏预览工具，使用 LVGL 官方桌面构建把主题渲染成 PNG，不参与 ESP-IDF 构建。适合快速检查构图、对齐、圆屏裁切和配色，避免每改一次主题都刷机：
+`tools/preview/` 是主机端离屏预览工具，使用 LVGL 官方桌面构建把主题和设置菜单渲染成 PNG，不参与 ESP-IDF 构建。适合快速检查构图、对齐、圆屏裁切和配色，避免每改一次主题或菜单都刷机：
 
 ```bash
 ./tools/preview/run.sh
 ./tools/preview/run.sh --time 23:59:59
 ```
 
-预览和固件编译的是同一批 `main/clock_theme_*.cpp`、`clock_theme.h` 以及字体/图片资源，但它们不是同一个程序：preview 使用 `preview.cpp` 入口、固定日期 2026-10-20 UTC、虚拟 466 × 466 display 和独立的 `tools/preview/lv_conf.h`；固件使用 `main.cpp` 入口、PCF85063 RTC 时间、BSP AMOLED 和 `sdkconfig`，并包含旋转、主题过渡、设置菜单、触摸和 IMU 等运行时逻辑。
+预览和固件编译的是同一批 `main/clock_theme_*.cpp`、`clock_theme.h`、`main/clock_settings_menu.cpp` 以及字体/图片资源，但它们不是同一个程序：preview 使用 `preview.cpp` 入口、固定日期 2026-10-20 UTC、虚拟 466 × 466 display 和独立的 `tools/preview/lv_conf.h`；固件使用 `main.cpp` 入口、PCF85063 RTC 时间、BSP AMOLED 和 `sdkconfig`，并包含旋转、主题过渡、设置菜单、触摸和 IMU 等运行时逻辑。
 
-因此 preview 可以验证构图、对齐、资源加载、圆屏裁切和配色，但不能验证真实面板的亮度/Gamma/色偏、旋转跟手性、主题过渡、RTC、菜单、触摸和长时间运行表现。预览通过不等于上板通过。
+因此 preview 可以验证主题和菜单的构图、对齐、资源加载、圆屏裁切和配色，但不能验证真实面板的亮度/Gamma/色偏、旋转跟手性、主题过渡、菜单触摸交互、RTC 和长时间运行表现。预览通过不等于上板通过。
 
-产物在 `tools/preview/out/`：默认看 `round/` 圆屏图，`raw/` 是未遮罩方图，`ppm/` 是原始渲染，`contact_native.png` 等是圆屏对比图，`report.txt` 记录非黑像素范围与安全区越界告警。`report.txt` 中的“超出安全区”只是提示，不是渲染失败。
+产物在 `tools/preview/out/`：默认看 `round/` 圆屏图，`raw/` 是未遮罩方图，`ppm/` 是主题原始渲染，`contact_native.png` 等是主题对比图，`menu/` 是圆屏遮罩后的设置菜单页面，`menu/raw/` 是方图，`menu/report.txt` 记录菜单内容的半径越界提示，`report.txt` 记录非黑像素范围与安全区越界告警。`report.txt` 中的“超出安全区”只是提示，不是渲染失败。
 
 使用说明和产物详情见 `tools/preview/README.md`；与固件的完整差异、能力边界和维护约定见 `doc/preview-tool.md`。
 
@@ -244,7 +244,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `components/pcf85063/`：PCF85063 I2C 驱动。
 - `components/ui_physics/`：角度弹簧。
 - `components/esp32_s3_touch_amoled_1_75/`：本地 Waveshare BSP。
-- `tools/preview/`：主机端主题预览工具，用 LVGL 桌面构建渲染主题 PNG。
+- `tools/preview/`：主机端主题与设置菜单预览工具，用 LVGL 桌面构建渲染 PNG。
 - `doc/preview-tool.md`：预览工具的定位、与固件的差异、能力边界和维护约定。
 - `doc/theme-optimization-plan.md`：主题优化路线、进度与设计稿。
 
@@ -298,7 +298,10 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 触摸左右滑动是否能切换主题；静止约 2 秒是否能打开设置菜单，移动超过 16 px 后是否不再触发长按。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
 - 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
-- 菜单是否默认亮度页、点内容外关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正；WiFi 页是否显示 `Not available` 且不可操作。
+- 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正；WiFi 页是否显示 `Not available` 且不可操作。
+- Brightness 胶囊进度条拖动是否跟手，拖动时页面是否不会误滚动。
+- 菜单打开/关闭的淡入缩放动画是否流畅，关闭后是否没有残留遮罩或菜单对象。
+- 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。
 - 手动/自动息屏和亮屏渐变是否正常；用于唤醒的触摸/按键是否不会同时触发切换或菜单。
 - 屏幕姿态变化时，自动旋转开启后时钟 snapshot 是否平滑旋转；关闭后是否保持正向。
 - 自动旋转开关重启后是否保持；旧 NVS 首次启动是否默认关闭。

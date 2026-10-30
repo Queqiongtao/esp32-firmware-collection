@@ -10,16 +10,20 @@
  */
 
 #include <cinttypes>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include "lvgl.h"
+#include "clock_settings.h"
+#include "clock_settings_menu.h"
 #include "clock_theme.h"
 
 namespace {
@@ -44,6 +48,24 @@ void display_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map
     LV_UNUSED(area);
     LV_UNUSED(px_map);
     lv_display_flush_ready(disp);
+}
+
+uint32_t preview_tick_cb()
+{
+    static const auto start = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - start).count());
+}
+
+void run_lvgl_for(uint32_t duration_ms)
+{
+    const auto end =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
+    while (std::chrono::steady_clock::now() < end) {
+        lv_timer_handler();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
 }
 
 void write_ppm(const std::filesystem::path &path, const lv_draw_buf_t *buf)
@@ -144,6 +166,61 @@ void render_theme(const clock_theme_t *theme,
     lv_obj_clean(screen);
 }
 
+void render_menu(const std::filesystem::path &out_dir)
+{
+    struct MenuPage {
+        const char *name;
+        uint32_t index;
+        bool auto_rotate;
+    };
+    static constexpr MenuPage kMenuPages[] = {
+        {"brightness", 0, false},
+        {"sleep", 1, false},
+        {"motion_off", 2, false},
+        {"motion_on", 2, true},
+        {"wifi", 3, false},
+    };
+
+    for (const MenuPage &page : kMenuPages) {
+        lv_obj_t *screen = lv_screen_active();
+        lv_obj_clean(screen);
+        prepare_screen();
+
+        clock_settings_t settings = {};
+        settings.brightness_percent = 70;
+        settings.sleep_timeout_sec = 5 * 60;
+        settings.auto_rotate = page.auto_rotate;
+        settings.wifi_enabled = false;
+        settings.theme_index = 0;
+
+        clock_settings_menu_config_t config = {};
+        config.settings = &settings;
+
+        if (clock_settings_menu_create(screen, &config) == nullptr) {
+            std::fprintf(stderr, "menu %s create failed\n", page.name);
+            continue;
+        }
+
+        // Let the menu entrance animation settle before snapshotting.
+        run_lvgl_for(400);
+        clock_settings_menu_set_page(page.index);
+        run_lvgl_for(40);
+        lv_obj_update_layout(screen);
+
+        lv_draw_buf_t *snapshot = lv_snapshot_take(screen, LV_COLOR_FORMAT_RGB565);
+        if (snapshot == nullptr) {
+            std::fprintf(stderr, "menu %s snapshot failed\n", page.name);
+        } else {
+            const std::string name = std::string(page.name) + ".ppm";
+            write_ppm(out_dir / name, snapshot);
+            lv_draw_buf_destroy(snapshot);
+            std::printf("rendered menu %s\n", name.c_str());
+        }
+
+        clock_settings_menu_delete_immediately();
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -169,10 +246,15 @@ int main(int argc, char **argv)
         }
     }
 
-    const std::filesystem::path out_dir = std::filesystem::path(argv[0]).parent_path() / ".." / "out" / "ppm";
+    const std::filesystem::path out_root =
+        std::filesystem::path(argv[0]).parent_path() / ".." / "out";
+    const std::filesystem::path out_dir = out_root / "ppm";
+    const std::filesystem::path menu_dir = out_root / "menu_ppm";
     std::filesystem::create_directories(out_dir);
+    std::filesystem::create_directories(menu_dir);
 
     lv_init();
+    lv_tick_set_cb(preview_tick_cb);
 
     lv_display_t *display = lv_display_create(DISPLAY_SIZE, DISPLAY_SIZE);
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
@@ -192,6 +274,8 @@ int main(int argc, char **argv)
         }
     }
 
-    std::printf("preview finished, output dir: %s\n", out_dir.c_str());
+    render_menu(menu_dir);
+
+    std::printf("preview finished, output dir: %s\n", out_root.c_str());
     return 0;
 }

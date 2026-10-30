@@ -31,6 +31,8 @@
 #define LV_USE_LABEL 1
 #define LV_USE_LINE 1
 #define LV_USE_SCALE 1
+#define LV_USE_SLIDER 1
+#define LV_USE_SWITCH 1
 
 /* 设备端启用的 Montserrat 字号 */
 #define LV_FONT_MONTSERRAT_12 1
@@ -40,10 +42,12 @@
 #define LV_FONT_MONTSERRAT_20 1
 #define LV_FONT_MONTSERRAT_22 1
 #define LV_FONT_MONTSERRAT_24 1
+#define LV_FONT_MONTSERRAT_26 1
 #define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_MONTSERRAT_32 1
 #define LV_FONT_MONTSERRAT_36 1
 #define LV_FONT_MONTSERRAT_40 1
+#define LV_FONT_MONTSERRAT_44 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
 /* 软件渲染 */

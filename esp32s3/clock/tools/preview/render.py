@@ -4,8 +4,12 @@
 输出：
   out/round/*.png    默认查看：圆形遮罩 + 亮色玻璃边缘（模拟真实圆屏）
   out/raw/*.png      未遮罩原图，调试构图用
-  out/ppm/*.ppm      原始 PPM
-  out/contact_*.png  圆形对比图
+  out/ppm/*.ppm      主题原始 PPM
+  out/contact_*.png  主题圆形对比图
+  out/menu/*.png     设置菜单页面 PNG（圆屏遮罩）
+  out/menu/raw/*.png 设置菜单未遮罩方图
+  out/menu/contact_menu.png  菜单页面对比图
+  out/menu/report.txt        菜单内容最大半径与越界告警
   out/report.txt     每个主题的非黑像素外接范围与越界告警
 """
 
@@ -83,10 +87,15 @@ def content_report(name: str, image: Image.Image) -> str:
     )
 
 
-def contact_sheet(images: list[tuple[str, Image.Image]], columns: int, output: Path) -> None:
+def contact_sheet(
+    images: list[tuple[str, Image.Image]],
+    columns: int,
+    output: Path,
+    background: tuple[int, int, int] = (18, 18, 18),
+) -> None:
     label_height = 26
     rows = (len(images) + columns - 1) // columns
-    sheet = Image.new("RGB", (columns * SIZE, rows * (SIZE + label_height)), (18, 18, 18))
+    sheet = Image.new("RGB", (columns * SIZE, rows * (SIZE + label_height)), background)
     draw = ImageDraw.Draw(sheet)
     font = ImageFont.load_default()
 
@@ -112,8 +121,13 @@ def main() -> None:
     ppm_dir = input_dir / "ppm"
     raw_dir = input_dir / "raw"
     round_dir = input_dir / "round"
+    menu_ppm_dir = input_dir / "menu_ppm"
+    menu_dir = input_dir / "menu"
+    menu_raw_dir = menu_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     round_dir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(menu_dir, ignore_errors=True)
+    menu_raw_dir.mkdir(parents=True, exist_ok=True)
 
     # 兼容旧产物路径，避免历史图混淆。
     shutil.rmtree(input_dir / "r1.0", ignore_errors=True)
@@ -152,11 +166,26 @@ def main() -> None:
     if sheet_items:
         contact_sheet(sheet_items, 4, input_dir / "contact_all.png")
 
+    menu_items: list[tuple[str, Image.Image]] = []
+    menu_reports: list[str] = []
+    for ppm in sorted(menu_ppm_dir.glob("*.ppm")):
+        image = Image.open(ppm).convert("RGB")
+        name = ppm.stem
+        image.save(menu_raw_dir / f"{name}.png")
+        masked = circular_mask(image)
+        masked.save(menu_dir / f"{name}.png")
+        menu_items.append((name, masked))
+        menu_reports.append(content_report(f"menu_{name}", image))
+    if menu_items:
+        contact_sheet(menu_items, 2, menu_dir / "contact_menu.png", (0, 0, 0))
+        (menu_dir / "report.txt").write_text("\n".join(menu_reports) + "\n", encoding="utf-8")
+
     report_path = input_dir / "report.txt"
     report_path.write_text("\n".join(reports) + "\n", encoding="utf-8")
     print("\n".join(reports))
     print(f"\nround previews: {round_dir}")
     print(f"contact sheet: {input_dir / 'contact_native.png'}")
+    print(f"menu previews: {menu_dir}")
 
 
 if __name__ == "__main__":

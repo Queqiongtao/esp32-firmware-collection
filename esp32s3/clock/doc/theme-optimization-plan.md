@@ -35,9 +35,10 @@
 tools/preview/
 ├── CMakeLists.txt   # 通过 LVGL 自带 os_desktop.cmake 构建主机库
 ├── lv_conf.h        # RGB565 / Montserrat 12~40 子集 / SNAPSHOT·SCALE·CANVAS·ARC
-├── preview.cpp      # 虚拟 466x466 display → 逐主题 build/update/tick → 快照
-├── render.py        # PPM→PNG、圆屏遮罩、对比图、越界报告
+├── preview.cpp      # 虚拟 466x466 display → 主题/菜单快照
+├── render.py        # PPM→PNG、圆屏遮罩、对比图、菜单图、越界报告
 ├── run.sh           # 一键构建 + 渲染
+├── stubs/esp_err.h  # 主机端 esp_err_t 占位定义
 ├── README.md
 └── out/             # 产物，已 gitignore
 ```
@@ -59,6 +60,10 @@ tools/preview/
 | `out/contact_native.png` | 4 个原生主题圆屏对比图 |
 | `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
 | `out/contact_all.png` | 8 主题圆屏总览 |
+| `out/menu/*.png` | 设置菜单页面圆屏图 |
+| `out/menu/raw/*.png` | 设置菜单方图 |
+| `out/menu/contact_menu.png` | 菜单页面对比图 |
+| `out/menu/report.txt` | 菜单内容半径越界提示 |
 | `out/report.txt` | 非黑像素范围与安全区越界告警 |
 
 ### 关键实现点
@@ -68,6 +73,7 @@ tools/preview/
 3. 固定时间渲染，`--time` 可指定；默认渲染 `10:08:35` 与 `23:59:35` 两个时刻。
 4. 主题 `tick()` 被推进到结束状态，保证截图稳定。
 5. 圆屏预览是默认产物：圆外填中灰 `#262626`，边缘画 2px 亮灰 `#7A7A7A`，避免和主题黑底混在一起；方图只作为调试用。
+6. 菜单页面输出到 `out/menu/`，包括 brightness、sleep、motion_off、motion_on、wifi 和 `contact_menu.png`。
 
 ### 已知局限
 
