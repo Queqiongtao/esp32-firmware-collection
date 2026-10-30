@@ -7,6 +7,7 @@
 typedef struct {
     int brightness_percent;
     uint32_t sleep_timeout_sec;
+    bool auto_rotate;
     bool wifi_enabled;
     uint8_t theme_index;
 } clock_settings_t;

@@ -2,7 +2,7 @@
 
 ESP32-S3 clock firmware for the Waveshare ESP32-S3-Touch-AMOLED-1.75 board.
 
-This project is a clock application, not the Brookesia phone demo. The UI is built with LVGL v9 and rendered as a theme snapshot that is rotated by IMU-derived orientation.
+This project is a clock application, not the Brookesia phone demo. The UI is built with LVGL v9 and rendered as a theme snapshot that can optionally be rotated by IMU-derived orientation; auto-rotate is off by default.
 
 See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project guide.
 
@@ -13,10 +13,11 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - Current theme index is persisted in NVS and restored on boot
 - Theme changes use a short scale/fade transition; rapid swipes are queued instead of dropped
 - Settings menu opens on the brightness page, closes on a tap outside its content or on sleep, and keeps WiFi visibly disabled (`Not available`)
+- Motion settings page provides an Auto Rotate switch; it is off by default and pauses IMU sampling when disabled
 - Sleep and wake use a short brightness fade
-- Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image
+- Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image when auto-rotate is enabled
 - PCF85063 external RTC syncs system time, with build time as fallback
-- QMI8658 IMU computes in-plane gravity angle for clock rotation
+- QMI8658 IMU computes in-plane gravity angle for optional clock rotation
 - GPIO0 and touch swipes switch themes
 - Theme switch order and implementation details are documented in `PROJECT_OVERVIEW.md`
 
@@ -57,21 +58,22 @@ Build output:
 
 ## Runtime Notes
 
-- The IMU task samples QMI8658 acceleration at 100 Hz and keeps sampling paused while the menu is open or the screen is asleep.
+- The IMU task samples QMI8658 acceleration at 100 Hz and keeps sampling paused while the menu is open, the screen is asleep, or auto-rotate is disabled.
 - GPIO0 is also a boot-related pin; holding it during power-on or reset can affect boot mode.
 - A normal horizontal swipe needs at least 100 px. A quick flick needs at least 50 px, must finish within 300 ms, and must have movement within the last 80 ms before release. The horizontal/vertical axis ratio is 2.0, and theme switches have a 150 ms cooldown.
 - A roughly 2-second stationary long press opens settings; moving more than 16 px cancels long press and leaves the gesture available for swipe handling.
-- The settings menu opens on the brightness page. Tapping outside its content or putting the screen to sleep closes it. The WiFi entry is disabled and shows `Not available`; WiFi connection is not implemented yet.
+- The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Auto Rotate on the Motion page is off by default. Tapping outside its content or putting the screen to sleep closes the menu. The WiFi entry is disabled and shows `Not available`; WiFi connection is not implemented yet.
 - Sleep and wake use a roughly 200 ms brightness fade. The first touch that wakes the screen only turns it on; it does not switch themes or activate menu items.
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
 - The theme index is stored as `theme_id` in the NVS `clock_settings` namespace. It maps to the `s_themes` array order, so adding or reordering themes remaps saved values.
+- Auto-rotate is stored as `auto_rotate` in the same NVS namespace. It defaults to off, and existing devices without the key stay off after upgrading.
 
 ## Key Files
 
 - `main/main.cpp`: app entry, theme switching and transition, LVGL snapshot, rotation spring, brightness fade, GPIO0/touch/power-key wiring
 - `main/imu_demo.cpp`: accelerometer sampling and clock angle update
 - `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback
-- `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, WiFi flag, theme index)
+- `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, auto-rotate, WiFi flag, theme index)
 - `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`: settings menu UI
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`: touch swipe/flick and long-press gesture layer
 - `main/clock_theme.h`: theme interface

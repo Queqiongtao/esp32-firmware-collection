@@ -340,7 +340,7 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
   - [x] 5.2.2 `m5_classic`：星期对比度与日期胶囊
   - [x] 5.2.3 `m5_number_flow`：80px 字体、H/M/S 标识、逐位滚动、珊瑚秒位
   - [x] 5.2.4 `m5_simple`：12 圆点糖果化、日期胶囊、秒点弹跳
-- [ ] 6. 整体上板验证（GPIO0、滑动、旋转、菜单）
+- [ ] 6. 整体上板验证（GPIO0、滑动、自动旋转开关、菜单）
 
 每轮流程：改代码 → `./dev.sh build` → `./tools/preview/run.sh` → 出图确认 → 下一个。
 
@@ -350,7 +350,7 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 
 - `./dev.sh build` 通过。
 - 预览图构图合理，`report.txt` 无非预期越界。
-- 真机确认：亮度、颜色、旋转、主题切换均正常。
+- 真机确认：亮度、颜色、自动旋转开关、主题切换均正常。
 - 未提交改动不自动提交，等用户明确要求。
 
 ---

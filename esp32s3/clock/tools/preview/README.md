@@ -69,7 +69,7 @@
 - preview 只编译主题、字体/图片资源和 LVGL；不编译 `main.cpp`、设置菜单、触摸手势、RTC、IMU 和主题过渡。
 - preview 使用固定日期 2026-10-20 UTC，默认渲染 10:08:35 和 23:59:35；固件使用 PCF85063 RTC 和本地时间。
 - preview 把 `tick()` 一次性推进到未来 5 秒和 6 秒；固件按 33 ms 周期逐帧调用。
-- preview 截 `lv_screen_active()`；固件截主题 root 到复用 draw buffer，再按 IMU 姿态旋转。
+- preview 截 `lv_screen_active()`；固件截主题 root 到复用 draw buffer，自动旋转开启时再按 IMU 姿态旋转。
 - preview 使用独立的 `lv_conf.h`；固件使用 `sdkconfig`，额外启用压缩字体、更多字号和双绘制单元等。
 - preview 不调用 `set_rotation()` / `set_overlay_visible()`，不覆盖旋转、overlay 显隐和切换过渡。
 

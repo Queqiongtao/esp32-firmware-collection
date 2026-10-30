@@ -32,7 +32,7 @@
 | 显示设备 | 466 × 466 虚拟 display，flush 回调为空实现 | CO5300 AMOLED，经本地 BSP 和 `esp_lvgl_adapter` 输出到真实面板 |
 | 截图对象 | `lv_screen_active()` 整屏 | 当前主题 root，优先用 `lv_snapshot_take_to_draw_buf()` 写入可复用 RGB565 draw buffer |
 | 截图方式 | `lv_snapshot_take()`，每次临时分配 | 复用一张 466 × 466 RGB565 buffer；失败时才回退到 `lv_snapshot_take()` |
-| 旋转和覆盖层 | 不调用 `set_rotation()` 和 `set_overlay_visible()`；只在结束时调用 `destroy_overlay()` | 由 IMU 姿态驱动 snapshot 旋转，并单独管理 overlay 显隐 |
+| 旋转和覆盖层 | 不调用 `set_rotation()` 和 `set_overlay_visible()`；只在结束时调用 `destroy_overlay()` | 自动旋转开启时由 IMU 姿态驱动 snapshot 旋转，并单独管理 overlay 显隐 |
 | 主题切换 | 不执行固件的缩放淡出/淡入过渡 | 70 ms 淡出、中点切换主题并刷新截图、90 ms 淡入 |
 | 构建环境 | 主机 CMake、Release、标准库内存 | ESP-IDF、Xtensa GCC、PSRAM/内部堆 |
 | 运行环境 | 单线程，无 FreeRTOS | FreeRTOS，LVGL 在 LVGL 线程或显示锁保护下运行 |
@@ -51,6 +51,7 @@ preview 不能验证：
 
 - 真实 AMOLED 的亮度、Gamma、色偏和像素排列。
 - UI 旋转的跟手性、主题切换过渡和刷新性能。
+- 自动旋转开关、关闭后的归正行为和触摸坐标映射。
 - RTC 时间、时区、跨天/跨月和星期显示。
 - 设置菜单、触摸手势、息屏逻辑。
 - 长时间运行和逐帧 `tick` 下的动画中间状态。

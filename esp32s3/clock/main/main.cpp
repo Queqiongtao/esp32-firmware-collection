@@ -115,6 +115,7 @@ static bool s_clock_rotation_target_dirty = false;
 static bool s_clock_snapshot_dirty = false;
 static bool s_settings_save_pending = false;
 static volatile bool s_clock_rendering_enabled = true;
+static volatile bool s_auto_rotate_enabled = false;
 static volatile int s_theme_switch_pending_step = 0;
 static volatile bool s_button_single_click_pending = false;
 static volatile bool s_pwr_single_click_pending = false;
@@ -165,6 +166,7 @@ static void update_theme_transition(lv_timer_t *timer);
 static void update_brightness_fade(lv_timer_t *timer);
 static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
+static void apply_auto_rotate_setting(bool enabled);
 
 static bool is_clock_rotation_active(void)
 {
@@ -201,7 +203,7 @@ static void update_clock_rendering_state(void)
 {
     const bool enabled = !s_screen_sleeping && s_settings_menu == NULL;
     s_clock_rendering_enabled = enabled;
-    imu_demo_set_active(enabled);
+    imu_demo_set_active(enabled && s_auto_rotate_enabled);
 
     if (!enabled) {
         if (s_clock_update_timer != NULL) {
@@ -230,7 +232,8 @@ static void update_clock_rendering_state(void)
     }
 
     if (s_clock_rotation_timer != NULL) {
-        if (has_pending_rotation_target() || !spring_angle_is_settled(&s_clock_rotation_spring)) {
+        if (s_auto_rotate_enabled &&
+            (has_pending_rotation_target() || !spring_angle_is_settled(&s_clock_rotation_spring))) {
             start_rotation_timer_locked();
         } else {
             lv_timer_pause(s_clock_rotation_timer);
@@ -238,8 +241,12 @@ static void update_clock_rendering_state(void)
     }
 
     update_clock(NULL);
-    if (is_clock_rotation_active() || s_clock_snapshot_dirty) {
-        apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+    if (s_auto_rotate_enabled) {
+        if (is_clock_rotation_active() || s_clock_snapshot_dirty) {
+            apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+        }
+    } else if (s_clock_snapshot_dirty) {
+        apply_clock_rotation(0.0f);
     }
 }
 
@@ -299,6 +306,28 @@ static void apply_clock_rotation(float angle_deg)
     s_clock_rotation_applied_deg = spring_angle_normalize(angle_deg);
     s_clock_rotation_applied_valid = true;
     ++s_clock_rotation_perf_applies;
+}
+
+static void apply_auto_rotate_setting(bool enabled)
+{
+    s_auto_rotate_enabled = enabled;
+
+    portENTER_CRITICAL(&s_clock_rotation_lock);
+    s_clock_rotation_target_dirty = false;
+    s_clock_rotation_started = false;
+    s_clock_rotation_submitted_target_valid = false;
+    portEXIT_CRITICAL(&s_clock_rotation_lock);
+
+    if (!enabled) {
+        spring_angle_init(&s_clock_rotation_spring, &CLOCK_ROTATION_SPRING_CONFIG, 0.0f);
+        s_clock_rotation_applied_valid = false;
+        apply_clock_rotation(0.0f);
+        if (s_clock_rotation_timer != NULL) {
+            lv_timer_pause(s_clock_rotation_timer);
+        }
+    }
+
+    update_clock_rendering_state();
 }
 
 static void refresh_clock_snapshot(void)
@@ -802,6 +831,15 @@ static void on_menu_sleep(uint32_t sleep_timeout_sec, void *user_ctx)
     schedule_settings_save();
 }
 
+static void on_menu_auto_rotate(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.auto_rotate = enabled;
+    apply_auto_rotate_setting(enabled);
+    schedule_settings_save();
+    ESP_LOGI(TAG, "Auto rotate is %s", enabled ? "on" : "off");
+}
+
 static void on_menu_wifi(bool enabled, void *user_ctx)
 {
     (void)user_ctx;
@@ -834,6 +872,7 @@ static void open_settings_menu(void)
         .settings = &s_settings,
         .brightness_cb = on_menu_brightness,
         .sleep_cb = on_menu_sleep,
+        .auto_rotate_cb = on_menu_auto_rotate,
         .wifi_cb = on_menu_wifi,
         .close_cb = on_menu_close,
         .activity_cb = on_menu_activity,
@@ -908,7 +947,7 @@ static void process_pending_input_actions(void)
 
 static void update_clock_rotation(lv_timer_t *timer)
 {
-    if (!s_clock_rendering_enabled) {
+    if (!s_clock_rendering_enabled || !s_auto_rotate_enabled) {
         lv_timer_pause(timer);
         return;
     }
@@ -1049,6 +1088,7 @@ static void update_inputs(lv_timer_t *timer)
     }
 
     if (s_clock_rendering_enabled &&
+        s_auto_rotate_enabled &&
         has_pending_rotation_target() &&
         s_clock_rotation_timer != NULL) {
         start_rotation_timer_locked();
@@ -1059,12 +1099,18 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
 {
     (void)user_ctx;
 
+    if (!s_auto_rotate_enabled) {
+        return;
+    }
+
     const float normalized_angle_deg = spring_angle_normalize(angle_deg);
 
     portENTER_CRITICAL(&s_clock_rotation_lock);
     if (!s_clock_rotation_submitted_target_valid) {
         s_clock_rotation_submitted_target_deg = normalized_angle_deg;
         s_clock_rotation_submitted_target_valid = true;
+        s_clock_rotation_target_deg = normalized_angle_deg;
+        s_clock_rotation_target_dirty = true;
         portEXIT_CRITICAL(&s_clock_rotation_lock);
         return;
     }
@@ -1390,6 +1436,8 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "Load settings failed: %s", esp_err_to_name(settings_err));
         clock_settings_defaults(&s_settings);
     }
+    s_auto_rotate_enabled = s_settings.auto_rotate;
+    ESP_LOGI(TAG, "auto rotate -> %s", s_auto_rotate_enabled ? "on" : "off");
 
     s_current_theme_index = (size_t)s_settings.theme_index;
     if (s_current_theme_index >= s_theme_count) {
@@ -1421,4 +1469,5 @@ extern "C" void app_main(void)
     clock_button_init();
     pwr_button_init();
     imu_demo_start(on_imu_clock_angle, NULL);
+    imu_demo_set_active(s_auto_rotate_enabled);
 }

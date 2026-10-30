@@ -16,13 +16,14 @@ static constexpr const char *SLEEP_OPTION_LABELS[] = {
     "Off",
 };
 static constexpr size_t SLEEP_OPTION_COUNT = sizeof(SLEEP_OPTIONS_SEC) / sizeof(SLEEP_OPTIONS_SEC[0]);
-static constexpr uint32_t MENU_PAGE_COUNT = 3;
+static constexpr uint32_t MENU_PAGE_COUNT = 4;
 static constexpr int32_t MENU_PAGE_HEIGHT = 270;
 static constexpr int32_t MENU_PAGE_GAP = 14;
 static constexpr int32_t MENU_PAGE_STRIDE = MENU_PAGE_HEIGHT + MENU_PAGE_GAP;
 
 static lv_obj_t *s_menu_root = nullptr;
 static lv_obj_t *s_brightness_value = nullptr;
+static lv_obj_t *s_auto_rotate_status = nullptr;
 static lv_obj_t *s_wifi_status = nullptr;
 static lv_obj_t *s_page_dots[MENU_PAGE_COUNT] = {};
 static lv_obj_t *s_sleep_buttons[SLEEP_OPTION_COUNT] = {};
@@ -87,6 +88,18 @@ static void update_brightness_value(int brightness_percent)
     char text[12] = {};
     snprintf(text, sizeof(text), "%d%%", brightness_percent);
     lv_label_set_text(s_brightness_value, text);
+}
+
+static void update_auto_rotate_status(bool enabled)
+{
+    if (s_auto_rotate_status == nullptr) {
+        return;
+    }
+
+    lv_label_set_text(s_auto_rotate_status, enabled ? "On" : "Off");
+    lv_obj_set_style_text_color(s_auto_rotate_status,
+                                enabled ? lv_color_hex(0x7EE7EA) : lv_color_hex(0xA6A6A6),
+                                0);
 }
 
 static size_t sleep_index_from_value(uint32_t sleep_timeout_sec)
@@ -192,6 +205,17 @@ static void on_wifi_changed(lv_event_t *event)
     }
 }
 
+static void on_auto_rotate_changed(lv_event_t *event)
+{
+    notify_activity();
+    lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+    update_auto_rotate_status(enabled);
+    if (s_config.auto_rotate_cb != nullptr) {
+        s_config.auto_rotate_cb(enabled, s_config.user_ctx);
+    }
+}
+
 static void on_sleep_clicked(lv_event_t *event)
 {
     notify_activity();
@@ -250,6 +274,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
 
     s_config = *config;
     s_brightness_value = nullptr;
+    s_auto_rotate_status = nullptr;
     s_wifi_status = nullptr;
     for (size_t i = 0; i < MENU_PAGE_COUNT; ++i) {
         s_page_dots[i] = nullptr;
@@ -342,6 +367,22 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     }
     update_sleep_buttons(config->settings->sleep_timeout_sec);
 
+    lv_obj_t *motion_page = make_setting_page(wheel);
+    lv_obj_t *motion_caption = make_value_label(motion_page, "MOTION");
+    lv_obj_set_style_text_font(motion_caption, &lv_font_montserrat_14, 0);
+    make_title(motion_page, "Auto Rotate");
+    s_auto_rotate_status = make_value_label(motion_page, "");
+    lv_obj_set_style_margin_bottom(s_auto_rotate_status, 14, 0);
+    update_auto_rotate_status(config->settings->auto_rotate);
+    lv_obj_t *auto_rotate_switch = lv_switch_create(motion_page);
+    lv_obj_set_size(auto_rotate_switch, 112, 54);
+    lv_obj_add_flag(auto_rotate_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    style_switch(auto_rotate_switch);
+    if (config->settings->auto_rotate) {
+        lv_obj_add_state(auto_rotate_switch, LV_STATE_CHECKED);
+    }
+    lv_obj_add_event_cb(auto_rotate_switch, on_auto_rotate_changed, LV_EVENT_VALUE_CHANGED, nullptr);
+
     lv_obj_t *wifi_page = make_setting_page(wheel);
     lv_obj_t *wifi_caption = make_value_label(wifi_page, "NETWORK");
     lv_obj_set_style_text_font(wifi_caption, &lv_font_montserrat_14, 0);
@@ -362,7 +403,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
 
     lv_obj_t *dots = lv_obj_create(content);
     lv_obj_remove_style_all(dots);
-    lv_obj_set_size(dots, 54, 10);
+    lv_obj_set_size(dots, 72, 10);
     lv_obj_set_style_margin_top(dots, 8, 0);
     lv_obj_set_flex_flow(dots, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(dots, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);

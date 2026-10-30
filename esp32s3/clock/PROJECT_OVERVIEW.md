@@ -2,9 +2,9 @@
 
 ## 项目定位
 
-`esp-clock` 是运行在 Waveshare ESP32-S3-Touch-AMOLED-1.75 上的圆屏时钟固件。它不是 Brookesia Phone Demo，也不是手机桌面或应用启动器项目；当前工程的核心目标是在 466 x 466 AMOLED 圆屏上显示可切换时钟主题，并让整张时钟画面随设备姿态平滑旋转。
+`esp-clock` 是运行在 Waveshare ESP32-S3-Touch-AMOLED-1.75 上的圆屏时钟固件。它不是 Brookesia Phone Demo，也不是手机桌面或应用启动器项目；当前工程的核心目标是在 466 x 466 AMOLED 圆屏上显示可切换时钟主题，并可选地让整张时钟画面随设备姿态平滑旋转（默认关闭）。
 
-工程使用 ESP-IDF 和 LVGL v9。UI 主题先按普通 LVGL 对象树构建，再通过 `lv_snapshot_take_to_draw_buf()` 复用 RGB565 draw buffer 完成截图，最终由 IMU 姿态角驱动图片旋转。这样主题本身可以保持固定坐标系，旋转逻辑集中在主框架里处理。
+工程使用 ESP-IDF 和 LVGL v9。UI 主题先按普通 LVGL 对象树构建，再通过 `lv_snapshot_take_to_draw_buf()` 复用 RGB565 draw buffer 完成截图；自动旋转开启时，最终由 IMU 姿态角驱动图片旋转。这样主题本身可以保持固定坐标系，旋转逻辑集中在主框架里处理。
 
 ## 当前功能
 
@@ -13,12 +13,13 @@
 - 触摸屏左右滑动切换主题，长按打开设置菜单。
 - 当前主题索引通过 NVS 恢复，重启后保持上次主题。
 - 主题切换使用约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进。
-- 设置菜单默认亮度页；点内容外区域或按 Done 关闭，息屏时自动关闭；WiFi 暂不可用。
+- 设置菜单默认亮度页，支持亮度、息屏和自动旋转设置；点内容外区域或按 Done 关闭，息屏时自动关闭；WiFi 暂不可用。
 - 手动/自动息屏和亮屏使用约 200 ms 亮度渐变；用于唤醒的触摸/按键不会同时执行切换或菜单操作。
 - PCF85063 外部 RTC 同步系统时间。
 - RTC 时间无效或不可用时，用固件编译时间兜底，并尝试写回 RTC。
 - QMI8658 以 100 Hz 采样，计算屏幕平面内重力角度。
-- UI 旋转使用角度弹簧平滑，减少姿态变化时的抖动。
+- 自动旋转默认关闭，可在设置菜单 Motion 页开启；关闭时时钟固定正向并暂停 IMU 采样。
+- 自动旋转开启时，UI 旋转使用角度弹簧平滑，减少姿态变化时的抖动。
 - 当前主题支持：
   - `minimal`（黑曜石极简）
   - `segment`（琥珀仪表 / Amber Deck）
@@ -47,24 +48,24 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 启动入口在 `main/main.cpp`。主要流程如下：
 
-1. `app_main()` 设置时区为 `CST-8`，初始化 NVS 并读取 `clock_settings`（亮度、息屏超时、WiFi 开关、主题索引）。
+1. `app_main()` 设置时区为 `CST-8`，初始化 NVS 并读取 `clock_settings`（亮度、息屏超时、自动旋转、WiFi 开关、主题索引）。
 2. 校验主题索引；非法值回退到 `minimal`。
 3. 调用 `rtc_time_sync_from_external_rtc()` 从 PCF85063 同步系统时间。
 4. 调用 `bsp_display_start()` 启动显示和 LVGL，并按保存的亮度初始化面板。
 5. 在 LVGL 显示锁保护下调用 `create_clock_ui()` 创建当前主题和 snapshot 图片对象。
 6. 注册 GPIO0 单击回调，用于切换主题。
-7. 启动 IMU 任务，接收加速度计姿态角回调。
+7. 启动 IMU 任务，并根据 NVS 中的自动旋转设置决定是否采样；采样时接收加速度计姿态角回调。
 
 主 UI 使用以下 LVGL timer：
 
 - `update_clock()`：每 1000 ms 更新主题时间；仅在根主题内容变化且旋转已停稳时刷新 snapshot。
 - `update_theme_animation()`：每 33 ms 调用当前主题的 `tick()`；覆盖层动画不触发 snapshot，根主题动画才按需刷新。
-- `update_clock_rotation()`：仅在旋转弹簧运动时以 16 ms 周期运行，停稳后自动暂停。
+- `update_clock_rotation()`：自动旋转开启时，仅在旋转弹簧运动时以 16 ms 周期运行，停稳后自动暂停。
 - `update_inputs()`：每 15 ms 处理按键、菜单切换和旋转定时器唤醒，并按 30 ms 周期轮询电源键。
 - `update_theme_transition()`：16 ms 周期，仅在主题过渡期间运行；淡出 70 ms，中点切换主题并强制刷新 snapshot，再淡入 90 ms。
 - `update_brightness_fade()`：16 ms 周期，仅在亮度渐变期间运行；息屏 220 ms、亮屏 240 ms。
 
-菜单打开或屏幕息屏时，时钟、主题动画、旋转和 IMU 采样会暂停；息屏还会关闭菜单、取消主题过渡并暂停渲染。恢复后立即同步当前时间与姿态。亮度渐变使用 LVGL timer 执行，避免与面板 QSPI IO 竞争。IMU 任务不会直接操作 LVGL，只设置共享目标角，并通知 LVGL timer 唤醒旋转处理。设置菜单固定在屏幕坐标系，不随设备姿态旋转。
+菜单打开、屏幕息屏或自动旋转关闭时，时钟旋转和 IMU 采样会暂停；息屏还会关闭菜单、取消主题过渡并暂停渲染。恢复后立即同步当前时间与姿态。亮度渐变使用 LVGL timer 执行，避免与面板 QSPI IO 竞争。IMU 任务不会直接操作 LVGL，只设置共享目标角，并通知 LVGL timer 唤醒旋转处理。设置菜单固定在屏幕坐标系，不随设备姿态旋转。
 
 ## 主题切换方式
 
@@ -102,7 +103,8 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 1. Brightness：亮度滑条，范围 1%–100%，拖动时立即应用到面板并写入设置。
 2. Sleep：息屏超时选项。
-3. WiFi：开关置灰并显示 `Not available`，当前不建立连接。
+3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
+4. WiFi：开关置灰并显示 `Not available`，当前不建立连接。
 
 菜单默认停在 Brightness 页；点击菜单内容外的黑色区域或按 Done 关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。菜单固定在屏幕坐标系，不跟随设备姿态旋转。
 
@@ -214,21 +216,22 @@ typedef struct {
 
 IMU 逻辑位于 `main/imu_demo.cpp`。
 
-- QMI8658 以 100 Hz 采样。
+- QMI8658 以 100 Hz 采样；自动旋转关闭、菜单打开或屏幕息屏时暂停采样，恢复后重新获取有效角度。
 - 驱动只启用加速度计，并仅读取 6 字节加速度数据，不再执行启动陀螺校准或姿态积分。
 - 使用加速度计的屏幕平面分量计算重力角度。
 - 当水平重力分量过小时，说明设备接近平放，平面角度不可靠，会冻结最后有效角度。
 - 对原始角度做一阶低通滤波。
-- 菜单打开或屏幕息屏时暂停 IMU 采样，恢复后重新获取有效角度。
+- 自动旋转默认关闭，可在设置菜单 Motion 页开启；关闭时立即把时钟归正到 0°，并同步触摸坐标映射。
+- 开启后第一帧有效角度直接作为目标，不需要先晃动设备。
 - 旋转只应用到 snapshot 图片；设置菜单固定在屏幕坐标系。
 
-旋转平滑逻辑在 `components/ui_physics/`。主框架使用 `spring_angle_t` 将 IMU 目标角平滑成当前显示角，并把该角度应用到 snapshot 图片。
+旋转平滑逻辑在 `components/ui_physics/`。自动旋转开启时，主框架使用 `spring_angle_t` 将 IMU 目标角平滑成当前显示角，并把该角度应用到 snapshot 图片。
 
 ## 关键目录
 
 - `main/main.cpp`：应用入口、主题注册与过渡、LVGL snapshot、旋转弹簧、亮度渐变、按钮和 IMU 回调接入。
-- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、WiFi 开关、主题索引）。
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI。
+- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、主题索引）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi）。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
@@ -272,6 +275,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - M5 Classic canvas 刻度也会占用一张 466 x 466 RGB565 draw buffer。
 - 主题根容器应保持 466 x 466，并避免在主题内部再做整屏旋转。
 - 主题索引保存的是 `s_themes` 数组下标；增删或重排主题时需考虑 NVS 中 `theme_id` 的兼容性。
+- 自动旋转保存于 NVS `clock_settings` 命名空间的 `auto_rotate` 键，缺省为关闭；旧固件升级后没有该键时首次启动保持关闭。
 - 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
 - WiFi 目前只有设置字段和菜单入口，未实现连接；菜单中固定显示 `Not available`。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
@@ -294,9 +298,11 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 触摸左右滑动是否能切换主题；静止约 2 秒是否能打开设置菜单，移动超过 16 px 后是否不再触发长按。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
 - 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
-- 菜单是否默认亮度页、点内容外关闭、息屏时自动关闭；WiFi 页是否显示 `Not available` 且不可操作。
+- 菜单是否默认亮度页、点内容外关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正；WiFi 页是否显示 `Not available` 且不可操作。
 - 手动/自动息屏和亮屏渐变是否正常；用于唤醒的触摸/按键是否不会同时触发切换或菜单。
-- 屏幕姿态变化时，时钟 snapshot 是否平滑旋转。
+- 屏幕姿态变化时，自动旋转开启后时钟 snapshot 是否平滑旋转；关闭后是否保持正向。
+- 自动旋转开关重启后是否保持；旧 NVS 首次启动是否默认关闭。
+- 自动旋转关闭时，触摸滑动切换主题的坐标映射是否正常。
 - 所有主题是否能正常显示，没有文本重叠、黑屏或异常闪烁。
 - 只调整主题视觉时，先运行 `./tools/preview/run.sh` 检查构图和圆屏裁切；预览通过不代表上板通过，亮度、Gamma、旋转和过渡仍需上板确认。
 - M5 四个主题的默认布局、颜色、字体、图片和动画是否与原项目预期一致。
