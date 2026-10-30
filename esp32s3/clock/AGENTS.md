@@ -37,7 +37,8 @@
 - `components/attitude/`：保留的姿态估计算法，当前时钟应用不依赖、不启动。
 - `components/ui_physics/`：角度弹簧平滑逻辑。
 - `components/esp32_s3_touch_amoled_1_75/`：本地 Waveshare BSP。
-- `tools/preview/`：主机端主题预览工具，用 LVGL 桌面构建渲染主题 PNG，不参与 ESP-IDF 构建。
+- `tools/preview/`：主机端主题预览工具，用同一批主题源码和 LVGL 桌面构建渲染 PNG，不参与 ESP-IDF 构建；运行环境与固件不同，详见 `doc/preview-tool.md`。
+- `doc/preview-tool.md`：预览工具的定位、与固件的差异、能力边界和维护约定。
 - `doc/theme-optimization-plan.md`：主题优化路线、进度和逐主题设计稿。
 
 ## 常用命令
@@ -71,7 +72,7 @@
 - 默认使用中文与用户沟通，包括进度说明、最终总结、验证结果和 Git 提交信息；除非用户明确要求使用其他语言。
 - Git 提交信息使用中文，除非用户明确要求使用其他语言。本工程提交信息前缀固定使用 `S3-clock: `，格式示例：`S3-clock: 优化表盘旋转跟手性`。
 - 未经用户明确要求，不要执行 `git commit` 或 `git push`；只完成代码修改、构建验证和结果汇报，等用户确认后再提交。
-- 新增主题时实现 `clock_theme_t` 接口，并在 `main/main.cpp` 的主题数组中注册。
+- 新增主题时实现 `clock_theme_t` 接口，并在 `main/main.cpp` 的主题数组和 `tools/preview/preview.cpp` 的 `kThemes` 中同步注册；两处列表不会自动同步。新增顶层字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`，M5 字体/图片在预览侧由 GLOB 自动纳入，但设备端仍需显式添加。
 - 涉及 LVGL API 的代码必须在 LVGL 线程或显示锁保护下执行。
 - IMU 任务不要直接调用 LVGL；通过共享目标角度或回调把数据交给 LVGL 定时器处理。
 
@@ -97,7 +98,7 @@
 ```
 
 - 涉及串口、刷机或硬件交互时，先用 `./dev.sh ports` 确认端口。
-- 只调整主题视觉时，先跑 `./tools/preview/run.sh` 检查构图、圆屏裁切和越界报告，再上板确认观感。
+- 只调整主题视觉时，先跑 `./tools/preview/run.sh` 检查构图、圆屏裁切和越界报告，再上板确认观感；`report.txt` 中的“超出安全区”是提示而非失败，预览通过也不等于上板通过（亮度、Gamma、旋转、过渡仍需上板确认）。
 - 交互改动建议上板检查：
   - 断电重启后是否恢复上次主题。
   - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。

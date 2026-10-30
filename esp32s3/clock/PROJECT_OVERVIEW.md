@@ -156,7 +156,13 @@ typedef struct {
 ./tools/preview/run.sh --time 23:59:59
 ```
 
-产物在 `tools/preview/out/`：默认看 `round/` 圆屏图，`raw/` 是未遮罩方图，`ppm/` 是原始渲染，`contact_native.png` 等是圆屏对比图，`report.txt` 记录非黑像素范围与安全区越界告警。预览只验证构图与配色，亮度、Gamma 和刷新流畅度仍需上板确认。
+预览和固件编译的是同一批 `main/clock_theme_*.cpp`、`clock_theme.h` 以及字体/图片资源，但它们不是同一个程序：preview 使用 `preview.cpp` 入口、固定日期 2026-10-20 UTC、虚拟 466 × 466 display 和独立的 `tools/preview/lv_conf.h`；固件使用 `main.cpp` 入口、PCF85063 RTC 时间、BSP AMOLED 和 `sdkconfig`，并包含旋转、主题过渡、设置菜单、触摸和 IMU 等运行时逻辑。
+
+因此 preview 可以验证构图、对齐、资源加载、圆屏裁切和配色，但不能验证真实面板的亮度/Gamma/色偏、旋转跟手性、主题过渡、RTC、菜单、触摸和长时间运行表现。预览通过不等于上板通过。
+
+产物在 `tools/preview/out/`：默认看 `round/` 圆屏图，`raw/` 是未遮罩方图，`ppm/` 是原始渲染，`contact_native.png` 等是圆屏对比图，`report.txt` 记录非黑像素范围与安全区越界告警。`report.txt` 中的“超出安全区”只是提示，不是渲染失败。
+
+使用说明和产物详情见 `tools/preview/README.md`；与固件的完整差异、能力边界和维护约定见 `doc/preview-tool.md`。
 
 主题优化路线、当前进度和各主题设计稿见 `doc/theme-optimization-plan.md`。
 
@@ -236,6 +242,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `components/ui_physics/`：角度弹簧。
 - `components/esp32_s3_touch_amoled_1_75/`：本地 Waveshare BSP。
 - `tools/preview/`：主机端主题预览工具，用 LVGL 桌面构建渲染主题 PNG。
+- `doc/preview-tool.md`：预览工具的定位、与固件的差异、能力边界和维护约定。
 - `doc/theme-optimization-plan.md`：主题优化路线、进度与设计稿。
 
 ## 构建和烧录
@@ -265,6 +272,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - M5 Classic canvas 刻度也会占用一张 466 x 466 RGB565 draw buffer。
 - 主题根容器应保持 466 x 466，并避免在主题内部再做整屏旋转。
 - 主题索引保存的是 `s_themes` 数组下标；增删或重排主题时需考虑 NVS 中 `theme_id` 的兼容性。
+- 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
 - WiFi 目前只有设置字段和菜单入口，未实现连接；菜单中固定显示 `Not available`。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。
@@ -290,6 +298,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 手动/自动息屏和亮屏渐变是否正常；用于唤醒的触摸/按键是否不会同时触发切换或菜单。
 - 屏幕姿态变化时，时钟 snapshot 是否平滑旋转。
 - 所有主题是否能正常显示，没有文本重叠、黑屏或异常闪烁。
+- 只调整主题视觉时，先运行 `./tools/preview/run.sh` 检查构图和圆屏裁切；预览通过不代表上板通过，亮度、Gamma、旋转和过渡仍需上板确认。
 - M5 四个主题的默认布局、颜色、字体、图片和动画是否与原项目预期一致。
 - Simple 秒点是否平滑运动并在整秒轻微弹跳，且弹跳过程不会触发整屏 snapshot。
 - NumberFlow 秒位是否滚动变化，而不是静态跳变。

@@ -27,12 +27,14 @@
 
 ## 二、主题预览工具
 
+完整设计、与固件的差异和维护约定见 [`preview-tool.md`](preview-tool.md)，使用说明见 [`../tools/preview/README.md`](../tools/preview/README.md)。
+
 ### 目录结构
 
 ```
 tools/preview/
 ├── CMakeLists.txt   # 通过 LVGL 自带 os_desktop.cmake 构建主机库
-├── lv_conf.h        # RGB565 / Montserrat 12~40 / SNAPSHOT·SCALE·CANVAS·ARC
+├── lv_conf.h        # RGB565 / Montserrat 12~40 子集 / SNAPSHOT·SCALE·CANVAS·ARC
 ├── preview.cpp      # 虚拟 466x466 display → 逐主题 build/update/tick → 快照
 ├── render.py        # PPM→PNG、圆屏遮罩、对比图、越界报告
 ├── run.sh           # 一键构建 + 渲染
@@ -61,7 +63,7 @@ tools/preview/
 
 ### 关键实现点
 
-1. LVGL 9.4.0 使用官方 `env_support/cmake/os_desktop.cmake` 编译。
+1. LVGL 9.5.0 使用官方 `env_support/cmake/os_desktop.cmake` 编译。
 2. 快照对象是 `lv_screen_active()`，不是主题根，确保 M5 Simple 的秒点覆盖层被渲染。
 3. 固定时间渲染，`--time` 可指定；默认渲染 `10:08:35` 与 `23:59:35` 两个时刻。
 4. 主题 `tick()` 被推进到结束状态，保证截图稳定。

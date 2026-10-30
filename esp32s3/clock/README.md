@@ -48,7 +48,7 @@ Theme preview runs on the host without flashing:
 ./tools/preview/run.sh
 ```
 
-It renders every theme to `tools/preview/out/` as PNG; see `tools/preview/README.md` for details.
+It compiles the same `clock_theme_*.cpp` sources with a desktop LVGL build and renders every theme to `tools/preview/out/` as PNG. It is an approximation of the firmware renderer, not the firmware itself: the entry point, LVGL configuration, time source, display backend and snapshot target differ. See `tools/preview/README.md` for usage and `doc/preview-tool.md` for the design boundaries.
 
 Build output:
 
@@ -83,5 +83,6 @@ Build output:
 - `components/qmi8658/`: QMI8658 I2C driver
 - `components/pcf85063/`: PCF85063 I2C driver
 - `components/ui_physics/`: angle spring smoothing
-- `tools/preview/`: host-side theme renderer using the LVGL desktop build
+- `tools/preview/`: host-side theme renderer using the same theme sources and the LVGL desktop build (an approximation, not the firmware)
+- `doc/preview-tool.md`: preview design, firmware differences and maintenance rules
 - `doc/theme-optimization-plan.md`: theme roadmap, progress, and design notes
