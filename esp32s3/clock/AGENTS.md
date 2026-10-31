@@ -32,7 +32,7 @@
 - `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接状态机、NVS 凭据读写和断线重连。
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`：SNTP 启停、手动触发同步和同步状态。
 - `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：LVGL 设置菜单 UI（亮度/息屏/自动旋转/WiFi 分页、WiFi 键盘配网弹层、NTP 控制和 Done/超时关闭）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：LVGL 设置菜单 UI（亮度/息屏/自动旋转/WiFi 分页、WiFi 配网摘要/单字段编辑弹层、NTP 控制和 Done/超时关闭）。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸屏手势层（普通滑动/快速轻扫切换主题、长按打开菜单、旋转坐标映射）。
 - `components/qmi8658/`：QMI8658 I2C 驱动。
 - `components/pcf85063/`：PCF85063 I2C 驱动。
@@ -85,12 +85,13 @@
 - 基本静止长按约 2 秒打开设置菜单；触摸累计移动超过 16 px 后会取消本次长按资格，避免慢滑误开设置菜单。
 - 设置菜单默认亮度页，分页顺序为亮度、息屏、自动旋转、WiFi；触摸操作仅顶部中央 Done 可关闭，1 分钟无操作会自动关闭，点内容外黑色区域不再关闭；GPIO0 物理键和息屏仍可关闭。息屏时菜单自动关闭，用于唤醒的触摸/按键不会同时切换主题或触发菜单项。
 - 自动旋转默认关闭；关闭时时钟固定正向、IMU 采样暂停，触摸手势使用未旋转的坐标映射。开启后按当前姿态立即旋转，不需要先晃动设备。
-- WiFi 页提供开关、Setup 配网、Auto NTP 开关、Sync now 和同步状态。Setup 弹层使用 LVGL 键盘输入 SSID/密码，密码以明文保存在 NVS `wifi_credentials` 命名空间；连接成功后 SNTP 自动启动，服务器为 `ntp.aliyun.com`。
+- WiFi 页提供开关、Setup 配网、Auto NTP 开关、Sync now 和两行状态显示；连接后显示 SSID、IP、RSSI 和 NTP 同步状态，失败时显示错误原因。保存凭据或启动连接失败时，配网弹层保持打开并显示错误，不再静默关闭。
+- Setup 弹层采用“摘要页 + 单字段编辑页”：摘要页显示 WiFi Name/Password 两个大条目；点条目进入独立编辑页，仅显示一个输入框，使用约 380 × 212 的放大键盘，当前输入框用薄荷绿边框高亮，密码支持显示/隐藏。密码以明文保存在 NVS `wifi_creds` 命名空间；连接成功后 SNTP 自动启动，依次使用 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org` 三台服务器。
 - PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。
 - `bsp_i2c_get_handle()` 会隐式初始化 I2C，RTC 可以在显示启动前使用。
 - QMI8658 仅启用加速度计并读取 6 字节加速度数据；菜单打开、屏幕息屏或自动旋转关闭时会暂停采样。
 - 当前 UI 旋转方案复用一张 RGB565 snapshot，并且仅在主题内容实际变化时刷新；主题切换过渡只改图片 scale/opacity，不额外分配 PSRAM。
-- 设置存在 NVS `clock_settings` 命名空间下，首次上电或 NVS 异常时会回退到默认值；主题索引存于 `theme_id`，值是 `s_themes` 数组下标，增删或重排主题会改变映射。自动旋转存于 `auto_rotate`，缺省为关闭；NTP 自动对时存于 `ntp`，缺省为开启。WiFi 凭据单独存于 `wifi_credentials` 命名空间，SSID 和密码均为明文。
+- 设置存在 NVS `clock_settings` 命名空间下，首次上电或 NVS 异常时会回退到默认值；主题索引存于 `theme_id`，值是 `s_themes` 数组下标，增删或重排主题会改变映射。自动旋转存于 `auto_rotate`，缺省为关闭；NTP 自动对时存于 `ntp`，缺省为开启。WiFi 凭据单独存于 `wifi_creds` 命名空间，SSID 和密码均为明文。ESP-IDF NVS 的命名空间和键名最长 15 个字符，新增 NVS 名称时必须检查长度。
 
 ## 验证要求
 
@@ -106,7 +107,8 @@
   - 断电重启后是否恢复上次主题。
   - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
   - 8 个主题的切换过渡是否正常；旋转过程中切换是否不残留旧主题。
-  - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页开关是否默认关闭，关闭后时钟是否立即回正；WiFi 页能否打开 Setup 键盘、保存凭据并连接，Auto NTP 和 Sync now 是否可用。
+  - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页开关是否默认关闭，关闭后时钟是否立即回正；WiFi 页状态是否与开关一致，能否显示 IP/RSSI/失败原因。
+  - WiFi 配网摘要页是否显示当前 SSID/密码状态，SSID/密码编辑页是否一次只编辑一个字段、键盘是否足够大、焦点是否明显，密码显示/隐藏是否正常；保存凭据并连接、Auto NTP 和 Sync now 是否可用；串口不应再出现 `ESP_ERR_NVS_KEY_TOO_LONG`。
   - WiFi 连接成功后 NTP 是否自动同步，Sync now 是否能立即触发同步，同步后 PCF85063 时间是否更新；断电重启后 WiFi 是否按保存的开关和凭据自动连接。
   - Brightness 胶囊进度条拖动是否跟手且不会误触发页面滚动；菜单打开/关闭动画是否流畅、无残留菜单对象。
   - 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换页面，当前 Tab 高亮是否正确；顶部中央 Done 是否可点击关闭，且所有控件都在圆屏内。

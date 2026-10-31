@@ -108,7 +108,9 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 1. Brightness：胶囊进度条，范围 1%–100%，拖动时立即应用到面板并写入设置。
 2. Sleep：息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
-4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮、连接状态和上次同步时间。点击 Setup 会打开全屏配网弹层，用 LVGL 键盘输入 SSID 和密码；Connect 保存凭据并开始连接，Cancel 关闭弹层。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
+4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮和两行状态信息。连接后状态行显示 SSID，详情行显示 IP、RSSI 和 NTP 状态；失败时详情行显示 Network not found、Wrong password 等原因。
+   - 点击 Setup 打开配网摘要页，显示 WiFi Name 和 Password 两个大条目；点击条目进入单字段编辑页，键盘约 380 × 212，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
+   - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back/键盘返回都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
 
 菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
@@ -213,7 +215,7 @@ typedef struct {
 - RTC 时间合法时写入系统时间。
 - RTC 不可用或时间非法时解析 `__DATE__` 和 `__TIME__`，用固件编译时间初始化系统时间。
 - 如果使用编译时间兜底，会尝试把编译时间写回 PCF85063。
-- WiFi 连接成功后，`main/ntp_time_sync.cpp` 启动 SNTP，服务器为 `ntp.aliyun.com`；默认每小时自动更新时间。
+- WiFi 连接成功后，`main/ntp_time_sync.cpp` 启动 SNTP，服务器依次为 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`；默认每小时自动更新时间。
 - NTP 同步回调只记录同步时间和待写标志，真正的 PCF85063 写入由 `update_network_status()` 在 LVGL timer 中执行，避免阻塞 lwIP 任务。
 - WiFi 页的 Sync now 可手动触发同步；即使 Auto NTP 关闭，手动同步也会保持 SNTP 运行最多 30 秒以完成本次对时。
 
@@ -286,10 +288,11 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 主题索引保存的是 `s_themes` 数组下标；增删或重排主题时需考虑 NVS 中 `theme_id` 的兼容性。
 - 自动旋转保存于 NVS `clock_settings` 命名空间的 `auto_rotate` 键，缺省为关闭；旧固件升级后没有该键时首次启动保持关闭。
 - 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
-- WiFi 凭据保存在 NVS `wifi_credentials` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据。
+- WiFi 凭据保存在 NVS `wifi_creds` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据，只修改 SSID 时会沿用已保存密码。ESP-IDF NVS 的命名空间和键名最长 15 个字符，`wifi_creds` 已按该限制命名。
 - WiFi 开关存于 `clock_settings` 命名空间的 `wifi` 键，NTP 自动对时存于 `ntp` 键且缺省开启；旧固件升级后没有 `ntp` 键时首次启动为开启。
-- SNTP 使用 `ntp.aliyun.com`，当前 `sdkconfig` 只配置 1 个 SNTP 服务器，自动更新间隔为 1 小时。
+- SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
 - WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
+- WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络）。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。
 - `PROJECT_CONTEXT.md` 已弃用，不应作为当前工程事实来源。
@@ -311,7 +314,8 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
 - 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
 - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正。
-- WiFi 页能否打开 Setup 弹层、用屏幕键盘输入并连接；连接状态、Auto NTP 开关和 Sync now 是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
+- WiFi 页状态是否与开关一致，连接后是否显示 IP/RSSI，失败时是否显示原因；Auto NTP 和 Sync now 是否正常。
+- WiFi 配网摘要页是否显示当前 SSID/密码状态；SSID/密码编辑页是否一次只编辑一个字段、键盘是否便于触摸、焦点高亮和密码显示/隐藏是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
 - Brightness 胶囊进度条拖动是否跟手，拖动时页面是否不会误滚动。
 - 菜单打开/关闭的淡入缩放动画是否流畅，关闭后是否没有残留遮罩或菜单对象。
 - 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。

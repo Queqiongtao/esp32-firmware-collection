@@ -14,7 +14,9 @@
 
 static const char *TAG = "WifiManager";
 
-static constexpr const char *WIFI_NVS_NAMESPACE = "wifi_credentials";
+static constexpr char WIFI_NVS_NAMESPACE[] = "wifi_creds";
+static_assert(sizeof(WIFI_NVS_NAMESPACE) <= NVS_NS_NAME_MAX_SIZE,
+              "WiFi NVS namespace is too long");
 static constexpr const char *WIFI_NVS_KEY_SSID = "ssid";
 static constexpr const char *WIFI_NVS_KEY_PASSWORD = "pass";
 static constexpr size_t WIFI_SSID_MAX_LEN = 32;
@@ -30,6 +32,7 @@ static bool s_started = false;
 static char s_ssid[WIFI_SSID_MAX_LEN + 1] = {};
 static char s_password[WIFI_PASSWORD_MAX_LEN + 1] = {};
 static char s_ip[16] = {};
+static uint8_t s_disconnect_reason = 0;
 static esp_netif_t *s_netif = nullptr;
 static esp_timer_handle_t s_retry_timer = nullptr;
 
@@ -79,6 +82,13 @@ static void set_ip(const char *ip)
     } else {
         copy_string(s_ip, sizeof(s_ip), ip);
     }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void set_disconnect_reason(uint8_t reason)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_disconnect_reason = reason;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -143,6 +153,7 @@ static esp_err_t start_and_connect(void)
     }
 
     stop_retry_timer();
+    set_disconnect_reason(0);
 
     if (!s_started) {
         esp_err_t err = esp_wifi_start();
@@ -157,7 +168,7 @@ static esp_err_t start_and_connect(void)
     char ssid[WIFI_SSID_MAX_LEN + 1] = {};
     char password[WIFI_PASSWORD_MAX_LEN + 1] = {};
     if (!get_credentials(ssid, sizeof(ssid), password, sizeof(password))) {
-        set_state(WIFI_MANAGER_IDLE);
+        set_state(WIFI_MANAGER_OFF);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -193,9 +204,9 @@ static void wifi_event_handler(void *arg,
                                void *event_data)
 {
     (void)arg;
-    (void)event_data;
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        set_disconnect_reason(0);
         if (wifi_manager_is_enabled() && wifi_manager_has_credentials()) {
             set_state(WIFI_MANAGER_CONNECTING);
         } else {
@@ -206,13 +217,19 @@ static void wifi_event_handler(void *arg,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         set_ip(nullptr);
+        const auto *event = static_cast<const wifi_event_sta_disconnected_t *>(event_data);
+        if (event != nullptr) {
+            set_disconnect_reason(event->reason);
+        }
         if (!wifi_manager_is_enabled()) {
             set_state(WIFI_MANAGER_OFF);
             return;
         }
         set_state(WIFI_MANAGER_FAILED);
         if (wifi_manager_has_credentials()) {
-            ESP_LOGI(TAG, "WiFi disconnected, retry in 5 seconds");
+            ESP_LOGI(TAG,
+                     "WiFi disconnected (reason=%u), retry in 5 seconds",
+                     event != nullptr ? event->reason : 0);
             schedule_retry();
         }
         return;
@@ -226,6 +243,7 @@ static void wifi_event_handler(void *arg,
         char ip[16] = {};
         esp_ip4addr_ntoa(&event->ip_info.ip, ip, sizeof(ip));
         set_ip(ip);
+        set_disconnect_reason(0);
         set_state(WIFI_MANAGER_CONNECTED);
         stop_retry_timer();
         ESP_LOGI(TAG, "WiFi connected, ip=%s", ip);
@@ -366,7 +384,8 @@ esp_err_t wifi_manager_init(void)
     }
 
     s_initialized = true;
-    set_state(s_has_credentials ? WIFI_MANAGER_IDLE : WIFI_MANAGER_OFF);
+    set_disconnect_reason(0);
+    set_state(WIFI_MANAGER_OFF);
     return ESP_OK;
 }
 
@@ -390,6 +409,7 @@ esp_err_t wifi_manager_set_enabled(bool enabled)
             s_started = false;
         }
         set_ip(nullptr);
+        set_disconnect_reason(0);
         set_state(WIFI_MANAGER_OFF);
         return ESP_OK;
     }
@@ -423,8 +443,7 @@ bool wifi_manager_has_credentials(void)
 esp_err_t wifi_manager_connect(const char *ssid, const char *password)
 {
     if (ssid == nullptr || ssid[0] == '\0' ||
-        std::strlen(ssid) > WIFI_SSID_MAX_LEN ||
-        (password != nullptr && std::strlen(password) > WIFI_PASSWORD_MAX_LEN)) {
+        std::strlen(ssid) > WIFI_SSID_MAX_LEN) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -433,11 +452,21 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password)
         return err;
     }
 
+    char saved_password[WIFI_PASSWORD_MAX_LEN + 1] = {};
+    if (password == nullptr) {
+        get_credentials(nullptr, 0, saved_password, sizeof(saved_password));
+        password = saved_password;
+    }
+    if (std::strlen(password) > WIFI_PASSWORD_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     err = save_credentials_to_nvs(ssid, password);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Save WiFi credentials failed: %s", esp_err_to_name(err));
         return err;
     }
+    ESP_LOGI(TAG, "WiFi credentials saved, connecting to %s", ssid);
 
     portENTER_CRITICAL(&s_lock);
     copy_string(s_ssid, sizeof(s_ssid), ssid);
@@ -445,6 +474,7 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password)
     s_has_credentials = true;
     s_enabled = true;
     portEXIT_CRITICAL(&s_lock);
+    set_disconnect_reason(0);
 
     return start_and_connect();
 }
@@ -480,7 +510,18 @@ void wifi_manager_get_status(wifi_manager_status_t *status)
     status->state = s_state;
     status->enabled = s_enabled;
     status->has_credentials = s_has_credentials;
+    status->disconnect_reason = s_disconnect_reason;
+    status->rssi_valid = false;
+    status->rssi = 0;
     copy_string(status->ssid, sizeof(status->ssid), s_ssid);
     copy_string(status->ip, sizeof(status->ip), s_ip);
     portEXIT_CRITICAL(&s_lock);
+
+    if (status->state == WIFI_MANAGER_CONNECTED) {
+        int rssi = 0;
+        if (esp_wifi_sta_get_rssi(&rssi) == ESP_OK) {
+            status->rssi = (int8_t)rssi;
+            status->rssi_valid = true;
+        }
+    }
 }

@@ -45,7 +45,7 @@ preview 可以可靠验证：
 - 字体和图片资源是否正确加载。
 - 圆屏裁切和安全区是否越界。
 - 配色和大致明暗关系。
-- 设置菜单四个页面的布局、图标、Tab、Done 和配色，包括 WiFi 页的静态状态、开关、按钮，以及 WiFi 配网键盘弹层。
+- 设置菜单四个页面的布局、图标、Tab、Done 和配色，包括 WiFi 页的静态状态、开关、按钮，以及 WiFi 配网摘要页和 SSID/密码单字段编辑页。
 - 主题代码是否能正常构建、返回有效的 root 对象。
 
 preview 不能验证：
@@ -54,7 +54,7 @@ preview 不能验证：
 - UI 旋转的跟手性、主题切换过渡和刷新性能。
 - 自动旋转开关、关闭后的归正行为和触摸坐标映射。
 - RTC 时间、时区、跨天/跨月和星期显示。
-- 设置菜单的触摸交互、开合动画流畅度和息屏逻辑；WiFi 配网弹层只渲染初始空输入状态，真实连接状态和 NTP 同步结果不在预览范围内。菜单布局和配色可以通过预览图检查。
+- 设置菜单的触摸交互、开合动画流畅度和息屏逻辑；WiFi 配网摘要页和编辑页只渲染初始空输入状态，真实键盘输入、连接状态和 NTP 同步结果不在预览范围内。菜单布局和配色可以通过预览图检查。
 - 长时间运行和逐帧 `tick` 下的动画中间状态。
 - 固件侧的 snapshot 复用、buffer 分配和显示锁行为。
 
@@ -88,7 +88,7 @@ preview 不能验证：
 6. 调用 `lv_obj_update_layout()`，再对 `lv_screen_active()` 执行 `lv_snapshot_take(..., LV_COLOR_FORMAT_RGB565)`。
 7. 把 RGB565 逐像素移位成 RGB888，写出 PPM 到 `out/ppm/`。
 8. 调用 `destroy_overlay()` 并清理 screen，继续下一个主题。
-9. 主题渲染完成后，用默认设置创建一次菜单，渲染 `brightness`、`sleep`、`motion_off`、`motion_on`、`wifi` 五个页面，并额外打开 WiFi 配网弹层渲染 `wifi_setup`，共六个页面到 `out/menu_ppm/`。
+9. 主题渲染完成后，用默认设置创建一次菜单，渲染 `brightness`、`sleep`、`motion_off`、`motion_on`、`wifi` 五个页面，再渲染一个模拟已连接状态的 `wifi_connected`，并打开 WiFi 配网摘要页和 SSID/密码编辑页，渲染 `wifi_setup`、`wifi_setup_ssid`、`wifi_setup_password`，共九个页面到 `out/menu_ppm/`。
 10. 菜单页面切换通过 `clock_settings_menu_set_page()`，截图前等待打开动画结束。
 
 ### 3.3 后处理
@@ -122,13 +122,13 @@ preview 不能验证：
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 6 个菜单页面/配网弹层对比图 |
+| `out/menu/contact_menu.png` | 9 个菜单页面/配网弹层对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围、最大半径和越界提示 |
 
 `run.sh` 每次运行前会清空上一轮的 `out/ppm`、`out/raw`、`out/round`、`out/menu`、`out/menu_ppm`、`out/r1.0`、`out/*.ppm`、对比图和 `report.txt`，避免不同时刻的旧图混入对比图。
 
-`out/menu/*.png` 的圆外灰色只表示真实圆屏之外的区域，不是菜单背景；纯黑方图在 `out/menu/raw/`。菜单半径报告在 `out/menu/report.txt`。WiFi 配网键盘贴近圆屏底部，`wifi_setup` 可能提示超出 205 px 安全区，但圆屏遮罩图仍应作为最终裁切依据。
+`out/menu/*.png` 的圆外灰色只表示真实圆屏之外的区域，不是菜单背景；纯黑方图在 `out/menu/raw/`。菜单半径报告在 `out/menu/report.txt`。WiFi 配网编辑页的放大键盘和底部按钮可能提示超出 205 px 安全区，但当前内容仍在 233 px 圆屏半径内，最终以圆屏遮罩图为准。
 
 ## 5. 维护约定
 
@@ -160,7 +160,7 @@ preview 不能验证：
 - `run.sh` 适合一次生成一个时刻的完整产物；要比较多个时刻，可以手动多次执行 `build/preview --time HH:MM:SS`，再运行一次 `render.py`。
 - 预览固定日期，不会覆盖跨天、星期变化、月份边界或 12/24 小时制差异。
 - 预览只验证构图和配色；亮度、Gamma、刷新流畅度、旋转和过渡必须上板确认。
-- 设置菜单页面的布局、Tab、Done、配色和圆屏裁切可以预览，WiFi 页和配网弹层只渲染静态占位状态；触摸、配网输入、真实连接、NTP 同步、开合动画流畅度和息屏逻辑仍要上板确认。
+- 设置菜单页面的布局、Tab、Done、配色和圆屏裁切可以预览，WiFi 页、配网摘要页和 SSID/密码编辑页只渲染静态占位状态；触摸、配网输入、真实连接、NTP 同步、开合动画流畅度和息屏逻辑仍要上板确认。
 - `report.txt` 的“超出安全区”是提示，不是失败；当前多数主题会贴近边缘绘制外圈或边框。
 
 ## 6. 代码索引

@@ -3,14 +3,23 @@
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "portmacro.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "NtpTimeSync";
-static constexpr const char *NTP_SERVER = "ntp.aliyun.com";
+static constexpr const char *NTP_SERVERS[] = {
+    "ntp.aliyun.com",
+    "ntp.tencent.com",
+    "cn.pool.ntp.org",
+};
+static constexpr size_t NTP_SERVER_COUNT = sizeof(NTP_SERVERS) / sizeof(NTP_SERVERS[0]);
+static_assert(NTP_SERVER_COUNT <= CONFIG_LWIP_SNTP_MAX_SERVERS,
+              "NTP server list exceeds CONFIG_LWIP_SNTP_MAX_SERVERS");
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_initialized = false;
 static bool s_running = false;
 static bool s_synced = false;
+static bool s_syncing = false;
 static bool s_rtc_write_pending = false;
 static time_t s_last_sync_time = 0;
 
@@ -21,6 +30,7 @@ static void on_time_synced(struct timeval *tv)
     const time_t now = time(nullptr);
     portENTER_CRITICAL(&s_lock);
     s_synced = true;
+    s_syncing = false;
     s_last_sync_time = now;
     // The callback runs in the lwIP/SNTP task. Defer the I2C RTC write to the
     // LVGL timer so it does not block the TCP/IP stack and stays serialized
@@ -38,7 +48,10 @@ esp_err_t ntp_time_sync_init(void)
     }
 
     esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, NTP_SERVER);
+    for (size_t i = 0; i < NTP_SERVER_COUNT; ++i) {
+        esp_sntp_setservername((uint8_t)i, NTP_SERVERS[i]);
+        ESP_LOGI(TAG, "SNTP server[%u]=%s", (unsigned)i, NTP_SERVERS[i]);
+    }
     esp_sntp_set_time_sync_notification_cb(on_time_synced);
     s_initialized = true;
     return ESP_OK;
@@ -61,8 +74,9 @@ esp_err_t ntp_time_sync_start(void)
     esp_sntp_init();
     portENTER_CRITICAL(&s_lock);
     s_running = true;
+    s_syncing = true;
     portEXIT_CRITICAL(&s_lock);
-    ESP_LOGI(TAG, "SNTP started, server=%s", NTP_SERVER);
+    ESP_LOGI(TAG, "SNTP started, primary=%s", NTP_SERVERS[0]);
     return ESP_OK;
 }
 
@@ -71,6 +85,7 @@ void ntp_time_sync_stop(void)
     portENTER_CRITICAL(&s_lock);
     const bool running = s_running;
     s_running = false;
+    s_syncing = false;
     portEXIT_CRITICAL(&s_lock);
 
     if (running) {
@@ -93,6 +108,10 @@ esp_err_t ntp_time_sync_sync_now(void)
     if (!running) {
         return ntp_time_sync_start();
     }
+
+    portENTER_CRITICAL(&s_lock);
+    s_syncing = true;
+    portEXIT_CRITICAL(&s_lock);
 
     if (!esp_sntp_restart()) {
         // The initial esp_sntp_init() may still be queued in the lwIP task.
@@ -120,6 +139,14 @@ bool ntp_time_sync_is_synced(void)
     const bool synced = s_synced;
     portEXIT_CRITICAL(&s_lock);
     return synced;
+}
+
+bool ntp_time_sync_is_syncing(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    const bool syncing = s_syncing;
+    portEXIT_CRITICAL(&s_lock);
+    return syncing;
 }
 
 time_t ntp_time_sync_last_sync_time(void)

@@ -18,6 +18,7 @@
 #include "clock_theme.h"
 #include "esp_log.h"
 #include "esp_io_expander.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "imu_demo.h"
 #include "iot_button.h"
@@ -873,19 +874,24 @@ static void on_menu_wifi(bool enabled, void *user_ctx)
     ESP_LOGI(TAG, "WiFi setting is %s", enabled ? "on" : "off");
 }
 
-static void on_menu_wifi_setup(const char *ssid, const char *password, void *user_ctx)
+static bool on_menu_wifi_setup(const char *ssid, const char *password, void *user_ctx)
 {
     (void)user_ctx;
 
+    ESP_LOGI(TAG,
+             "WiFi setup request: ssid=%s password=%s",
+             ssid,
+             password != nullptr ? "provided" : "unchanged");
     const esp_err_t err = wifi_manager_connect(ssid, password);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi connect request failed: %s", esp_err_to_name(err));
-        return;
+        return false;
     }
 
     s_settings.wifi_enabled = true;
     schedule_settings_save();
     ESP_LOGI(TAG, "WiFi credentials saved for SSID=%s", ssid);
+    return true;
 }
 
 static void on_menu_ntp(bool enabled, void *user_ctx)
@@ -1030,6 +1036,32 @@ static void update_settings_menu_timeout(lv_timer_t *timer)
     close_settings_menu();
 }
 
+static const char *wifi_reason_text(uint8_t reason)
+{
+    if (reason == 0) {
+        return "Connection failed";
+    }
+    switch (reason) {
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+    case WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+    case WIFI_REASON_NO_AP_FOUND_IN_RSSI_THRESHOLD:
+        return "Network not found";
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+        return "Wrong password";
+    case WIFI_REASON_ASSOC_FAIL:
+        return "Association failed";
+    case WIFI_REASON_CONNECTION_FAIL:
+        return "Connection failed";
+    case WIFI_REASON_BEACON_TIMEOUT:
+        return "Signal lost";
+    default:
+        return "Connection lost";
+    }
+}
+
 static void update_network_status(lv_timer_t *timer)
 {
     (void)timer;
@@ -1063,24 +1095,55 @@ static void update_network_status(lv_timer_t *timer)
     }
 
     char state[64] = {};
+    char detail[72] = {};
     switch (wifi.state) {
     case WIFI_MANAGER_OFF:
         snprintf(state, sizeof(state), "WiFi off");
-        break;
-    case WIFI_MANAGER_IDLE:
-        snprintf(state,
-                 sizeof(state),
+        snprintf(detail,
+                 sizeof(detail),
                  "%s",
-                 wifi.has_credentials ? "WiFi ready" : "Not configured");
+                 wifi.has_credentials ? "Tap switch to connect" : "Tap Setup to configure");
         break;
     case WIFI_MANAGER_CONNECTING:
         snprintf(state, sizeof(state), "Connecting...");
+        snprintf(detail, sizeof(detail), "%s", wifi.ssid[0] != '\0' ? wifi.ssid : "Starting WiFi...");
         break;
-    case WIFI_MANAGER_CONNECTED:
+    case WIFI_MANAGER_CONNECTED: {
         snprintf(state, sizeof(state), "Connected: %s", wifi.ssid);
+
+        char network[40] = {};
+        if (wifi.ip[0] != '\0' && wifi.rssi_valid) {
+            snprintf(network, sizeof(network), "IP %s  %d dBm", wifi.ip, wifi.rssi);
+        } else if (wifi.ip[0] != '\0') {
+            snprintf(network, sizeof(network), "IP %s", wifi.ip);
+        } else {
+            snprintf(network, sizeof(network), "Connected");
+        }
+
+        char ntp[24] = {};
+        if (!s_settings.ntp_enabled) {
+            snprintf(ntp, sizeof(ntp), "NTP off");
+        } else if (ntp_time_sync_is_syncing()) {
+            snprintf(ntp, sizeof(ntp), "Syncing time...");
+        } else {
+            const time_t last_sync = ntp_time_sync_last_sync_time();
+            if (last_sync > 0) {
+                struct tm timeinfo = {};
+                localtime_r(&last_sync, &timeinfo);
+                snprintf(ntp, sizeof(ntp), "Sync %02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+            } else {
+                snprintf(ntp, sizeof(ntp), "Not synced");
+            }
+        }
+        snprintf(detail, sizeof(detail), "%s | %s", network, ntp);
         break;
+    }
     case WIFI_MANAGER_FAILED:
         snprintf(state, sizeof(state), "Connection failed");
+        snprintf(detail,
+                 sizeof(detail),
+                 "%s | Retrying",
+                 wifi_reason_text(wifi.disconnect_reason));
         break;
     default:
         snprintf(state, sizeof(state), "WiFi unknown");
@@ -1089,14 +1152,12 @@ static void update_network_status(lv_timer_t *timer)
 
     clock_settings_menu_wifi_status_t status = {};
     status.state = state;
+    status.detail = detail;
     status.ssid = wifi.ssid;
-    status.ip = wifi.ip;
     status.enabled = wifi.enabled;
     status.has_credentials = wifi.has_credentials;
     status.connected = connected;
     status.ntp_enabled = s_settings.ntp_enabled;
-    status.ntp_synced = ntp_time_sync_is_synced();
-    status.last_sync_time = ntp_time_sync_last_sync_time();
     clock_settings_menu_update_wifi_status(&status);
 }
 

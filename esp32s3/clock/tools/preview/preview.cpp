@@ -172,15 +172,19 @@ void render_menu(const std::filesystem::path &out_dir)
         const char *name;
         uint32_t index;
         bool auto_rotate;
-        bool wifi_setup;
+        int wifi_setup;
+        bool wifi_connected;
     };
     static constexpr MenuPage kMenuPages[] = {
-        {"brightness", 0, false, false},
-        {"sleep", 1, false, false},
-        {"motion_off", 2, false, false},
-        {"motion_on", 2, true, false},
-        {"wifi", 3, false, false},
-        {"wifi_setup", 3, false, true},
+        {"brightness", 0, false, -1, false},
+        {"sleep", 1, false, -1, false},
+        {"motion_off", 2, false, -1, false},
+        {"motion_on", 2, true, -1, false},
+        {"wifi", 3, false, -1, false},
+        {"wifi_connected", 3, false, -1, true},
+        {"wifi_setup", 3, false, 0, false},
+        {"wifi_setup_ssid", 3, false, 1, false},
+        {"wifi_setup_password", 3, false, 2, false},
     };
 
     for (const MenuPage &page : kMenuPages) {
@@ -207,8 +211,22 @@ void render_menu(const std::filesystem::path &out_dir)
         // Let the menu entrance animation settle before snapshotting.
         run_lvgl_for(400);
         clock_settings_menu_set_page(page.index);
-        if (page.wifi_setup) {
+        if (page.wifi_connected) {
+            clock_settings_menu_wifi_status_t status = {};
+            status.state = "Connected: HomeWiFi";
+            status.detail = "IP 192.168.1.23  -58 dBm | Sync 14:32";
+            status.ssid = "HomeWiFi";
+            status.enabled = true;
+            status.has_credentials = true;
+            status.connected = true;
+            status.ntp_enabled = true;
+            clock_settings_menu_update_wifi_status(&status);
+        }
+        if (page.wifi_setup >= 0) {
             clock_settings_menu_open_wifi_setup();
+            if (page.wifi_setup > 0) {
+                clock_settings_menu_open_wifi_setup_edit((uint32_t)(page.wifi_setup - 1));
+            }
         }
         run_lvgl_for(40);
         lv_obj_update_layout(screen);
