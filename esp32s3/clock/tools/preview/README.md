@@ -1,6 +1,6 @@
 # 主题与菜单预览工具
 
-主机端渲染 `main/clock_theme_*.cpp` 和设置菜单的离屏预览，用于快速检查构图、对齐、裁切和配色，**不参与 ESP-IDF 构建**。WiFi 页、配网摘要页和 SSID/密码编辑页用静态状态渲染，真实连接/NTP 同步不在预览范围内。
+主机端渲染 `main/clock_theme_*.cpp` 和设置菜单的离屏预览，用于快速检查构图、对齐、裁切和配色，**不参与 ESP-IDF 构建**。WiFi 页、配网摘要页和 SSID/密码编辑页用静态状态渲染，`sleep` 页和 `battery_detail` 使用模拟电池状态；真实连接/NTP 同步和 AXP2101 电池数据不在预览范围内。
 
 预览工具和固件编译的是同一批主题源码，但入口、LVGL 配置、时间源、显示后端和截图对象不同；它是主机端近似预览，不是固件本体。详细的设计边界和差异说明见 [`../../doc/preview-tool.md`](../../doc/preview-tool.md)。
 
@@ -50,7 +50,7 @@
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 10 个菜单页面/配网弹层圆屏对比图 |
+| `out/menu/contact_menu.png` | 11 个菜单页面/详情弹层圆屏对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围与安全区越界提示 |
 
@@ -68,7 +68,7 @@
 
 1. `CMakeLists.txt` 通过 LVGL 自带的 `env_support/cmake/os_desktop.cmake` 把 `managed_components/lvgl__lvgl` 编成主机库。
 2. `lv_conf.h` 是关键配置，需与设备端对齐：RGB565、Montserrat 12~40 子集、SNAPSHOT/SCALE/CANVAS/ARC 等。
-3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后创建设置菜单并渲染 5 个页面，再渲染模拟已连接状态、WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，共渲染 10 张。
+3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后创建设置菜单并渲染 6 个页面，再渲染模拟已连接状态、WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，共渲染 11 张。
 4. `render.py` 负责 PPM → PNG、主题圆形遮罩、拼图和菜单 PNG 转换。
 
 ## 与固件的主要差异

@@ -42,6 +42,17 @@ typedef struct {
 } clock_settings_menu_wifi_status_t;
 
 typedef struct {
+    bool initialized;
+    bool battery_present;
+    bool charging;
+    bool discharging;
+    bool full;
+    bool vbus_present;
+    uint16_t battery_mv;
+    uint8_t battery_percent;
+} clock_settings_menu_power_status_t;
+
+typedef struct {
     const clock_settings_t *settings;
     clock_settings_menu_brightness_cb_t brightness_cb;
     clock_settings_menu_sleep_cb_t sleep_cb;
@@ -63,7 +74,10 @@ void clock_settings_menu_open_wifi_setup(void);
 void clock_settings_menu_open_wifi_setup_edit(uint32_t field);
 void clock_settings_menu_start_wifi_scan(void);
 void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_status_t *status);
+void clock_settings_menu_update_power_status(const clock_settings_menu_power_status_t *status);
 bool clock_settings_menu_is_setup_open(void);
+bool clock_settings_menu_is_power_detail_open(void);
+void clock_settings_menu_open_power_detail(void);
 void clock_settings_menu_close_async(clock_settings_menu_close_done_cb_t done_cb, void *user_ctx);
 void clock_settings_menu_delete_immediately(void);
 

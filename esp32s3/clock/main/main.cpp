@@ -25,6 +25,7 @@
 #include "lvgl.h"
 #include "ntp_time_sync.h"
 #include "nvs_flash.h"
+#include "power_manager.h"
 #include "rtc_time_sync.h"
 #include "sdkconfig.h"
 #include "spring_angle.h"
@@ -60,7 +61,7 @@ static constexpr uint32_t CLOCK_INPUT_TIMER_MS = 15;
 static constexpr uint32_t CLOCK_SETTINGS_SAVE_DELAY_MS = 500;
 static constexpr uint32_t CLOCK_MENU_TIMEOUT_MS = 60 * 1000;
 static constexpr uint32_t PWR_BUTTON_PIN_MASK = IO_EXPANDER_PIN_NUM_4;
-static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 0;
+static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 1;
 
 static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 16;
 static constexpr uint32_t CLOCK_THEME_ANIMATION_TIMER_MS = 33;
@@ -97,6 +98,7 @@ static lv_timer_t *s_theme_animation_timer = NULL;
 static lv_timer_t *s_clock_rotation_timer = NULL;
 static lv_timer_t *s_auto_sleep_timer = NULL;
 static lv_timer_t *s_wifi_status_timer = NULL;
+static lv_timer_t *s_power_status_timer = NULL;
 static uint32_t s_ntp_manual_sync_until_ms = 0;
 static lv_timer_t *s_input_timer = NULL;
 static lv_timer_t *s_settings_save_timer = NULL;
@@ -133,6 +135,7 @@ static bool s_touch_action_blocked_until_release = false;
 static bool s_screen_sleeping = false;
 static esp_io_expander_handle_t s_pwr_io_expander = NULL;
 static bool s_pwr_button_ready = false;
+static bool s_pwr_button_ignore_release = false;
 static bool s_pwr_button_stable_pressed = false;
 static bool s_pwr_button_candidate_pressed = false;
 static uint32_t s_pwr_button_candidate_since_ms = 0;
@@ -175,6 +178,7 @@ static void update_theme_transition(lv_timer_t *timer);
 static void update_brightness_fade(lv_timer_t *timer);
 static void update_settings_menu_timeout(lv_timer_t *timer);
 static void update_network_status(lv_timer_t *timer);
+static void update_power_status(lv_timer_t *timer);
 static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
 static void apply_auto_rotate_setting(bool enabled);
@@ -1000,6 +1004,7 @@ static void open_settings_menu(void)
     s_settings_menu_closing = false;
     s_settings_menu_last_activity_ms = lv_tick_get();
     update_network_status(NULL);
+    update_power_status(NULL);
     clock_touch_gesture_set_enabled(false);
     keep_touch_layer_foreground();
     update_clock_rendering_state();
@@ -1049,7 +1054,7 @@ static void update_settings_menu_timeout(lv_timer_t *timer)
         return;
     }
 
-    if (clock_settings_menu_is_setup_open()) {
+    if (clock_settings_menu_is_setup_open() || clock_settings_menu_is_power_detail_open()) {
         s_settings_menu_last_activity_ms = lv_tick_get();
         return;
     }
@@ -1087,6 +1092,30 @@ static const char *wifi_reason_text(uint8_t reason)
     default:
         return "Connection lost";
     }
+}
+
+static void update_power_status(lv_timer_t *timer)
+{
+    (void)timer;
+
+    power_manager_update();
+    if (s_settings_menu == NULL) {
+        return;
+    }
+
+    power_status_t power = {};
+    power_manager_get_status(&power);
+
+    clock_settings_menu_power_status_t status = {};
+    status.initialized = power.initialized;
+    status.battery_present = power.battery_present;
+    status.charging = power.charging;
+    status.discharging = power.discharging;
+    status.full = power.full;
+    status.vbus_present = power.vbus_present;
+    status.battery_mv = power.battery_mv;
+    status.battery_percent = power.battery_percent;
+    clock_settings_menu_update_power_status(&status);
 }
 
 static void update_network_status(lv_timer_t *timer)
@@ -1346,10 +1375,19 @@ static void update_pwr_button(lv_timer_t *timer)
     s_pwr_button_stable_pressed = raw_pressed;
     if (s_pwr_button_stable_pressed) {
         s_pwr_button_press_start_ms = now_ms;
+        ESP_LOGI(TAG, "PWR button pressed");
+        return;
+    }
+
+    if (s_pwr_button_ignore_release) {
+        // The press used to power the board on must not toggle screen sleep.
+        s_pwr_button_ignore_release = false;
+        ESP_LOGI(TAG, "PWR button power-on press ignored");
         return;
     }
 
     const uint32_t press_ms = now_ms - s_pwr_button_press_start_ms;
+    ESP_LOGI(TAG, "PWR button released after %u ms", (unsigned)press_ms);
     if (press_ms <= PWR_BUTTON_SINGLE_CLICK_MAX_MS) {
         s_pwr_single_click_pending = true;
     }
@@ -1602,6 +1640,7 @@ static void create_clock_ui(void)
     s_auto_sleep_timer = lv_timer_create(update_auto_sleep, 1000, NULL);
     lv_timer_create(update_settings_menu_timeout, 1000, NULL);
     s_wifi_status_timer = lv_timer_create(update_network_status, 500, NULL);
+    s_power_status_timer = lv_timer_create(update_power_status, 2000, NULL);
     s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
 
     s_theme_transition_timer =
@@ -1696,12 +1735,15 @@ static void pwr_button_init(void)
     const bool pressed = ((level_mask & PWR_BUTTON_PIN_MASK) != 0) != (PWR_BUTTON_ACTIVE_LEVEL == 0);
     const uint32_t now_ms = lv_tick_get();
     s_pwr_button_stable_pressed = pressed;
+    s_pwr_button_ignore_release = pressed;
     s_pwr_button_candidate_pressed = pressed;
     s_pwr_button_candidate_since_ms = now_ms;
     s_pwr_button_press_start_ms = pressed ? now_ms : 0;
     s_pwr_button_last_poll_ms = now_ms;
     s_pwr_button_ready = true;
-    ESP_LOGI(TAG, "PWR button polling on EXIO4");
+    ESP_LOGI(TAG,
+             "PWR button polling on EXIO4, initial=%s",
+             pressed ? "pressed" : "released");
 }
 
 extern "C" void app_main(void)
@@ -1737,6 +1779,11 @@ extern "C" void app_main(void)
              (unsigned)s_current_theme_index);
 
     rtc_time_sync_from_external_rtc();
+
+    const esp_err_t power_err = power_manager_init();
+    if (power_err != ESP_OK) {
+        ESP_LOGW(TAG, "Power manager init failed: %s", esp_err_to_name(power_err));
+    }
 
     esp_err_t wifi_err = wifi_manager_init();
     if (wifi_err != ESP_OK) {

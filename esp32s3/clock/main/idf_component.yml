@@ -2,3 +2,4 @@
 dependencies:
   waveshare/esp32_s3_touch_amoled_1_75: "*"
   espressif/button: "^4.1.7"
+  cube32esp/xpowerslib: "^0.3.3"

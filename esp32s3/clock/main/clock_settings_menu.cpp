@@ -83,6 +83,17 @@ static lv_obj_t *s_menu_content = nullptr;
 static lv_obj_t *s_menu_wheel = nullptr;
 static lv_obj_t *s_brightness_value = nullptr;
 static lv_obj_t *s_auto_rotate_status = nullptr;
+static lv_obj_t *s_power_card = nullptr;
+static lv_obj_t *s_power_battery = nullptr;
+static lv_obj_t *s_power_battery_detail = nullptr;
+static lv_obj_t *s_power_detail_overlay = nullptr;
+static lv_obj_t *s_power_detail_percent = nullptr;
+static lv_obj_t *s_power_detail_voltage = nullptr;
+static lv_obj_t *s_power_detail_state = nullptr;
+static lv_obj_t *s_power_detail_extra = nullptr;
+static lv_obj_t *s_power_detail_config = nullptr;
+static clock_settings_menu_power_status_t s_power_status = {};
+static bool s_power_status_valid = false;
 static lv_obj_t *s_wifi_status = nullptr;
 static lv_obj_t *s_wifi_switch = nullptr;
 static lv_obj_t *s_ntp_switch = nullptr;
@@ -128,6 +139,7 @@ static void *s_close_done_ctx = nullptr;
 
 static void set_wheel_scroll_enabled(bool enabled);
 static void open_wifi_setup(void);
+static void on_power_card_clicked(lv_event_t *event);
 
 static void reset_wifi_setup_pointers(void)
 {
@@ -161,6 +173,16 @@ static void reset_menu_widget_pointers(void)
     s_menu_wheel = nullptr;
     s_brightness_value = nullptr;
     s_auto_rotate_status = nullptr;
+    s_power_card = nullptr;
+    s_power_battery = nullptr;
+    s_power_battery_detail = nullptr;
+    s_power_detail_overlay = nullptr;
+    s_power_detail_percent = nullptr;
+    s_power_detail_voltage = nullptr;
+    s_power_detail_state = nullptr;
+    s_power_detail_extra = nullptr;
+    s_power_detail_config = nullptr;
+    s_power_status_valid = false;
     s_wifi_status = nullptr;
     s_wifi_switch = nullptr;
     s_ntp_switch = nullptr;
@@ -1419,6 +1441,16 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     s_menu_wheel = nullptr;
     s_brightness_value = nullptr;
     s_auto_rotate_status = nullptr;
+    s_power_card = nullptr;
+    s_power_battery = nullptr;
+    s_power_battery_detail = nullptr;
+    s_power_detail_overlay = nullptr;
+    s_power_detail_percent = nullptr;
+    s_power_detail_voltage = nullptr;
+    s_power_detail_state = nullptr;
+    s_power_detail_extra = nullptr;
+    s_power_detail_config = nullptr;
+    s_power_status_valid = false;
     s_wifi_status = nullptr;
     s_wifi_switch = nullptr;
     s_ntp_switch = nullptr;
@@ -1558,11 +1590,50 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
 
     lv_obj_t *sleep_page = make_setting_page(wheel);
     make_page_caption(sleep_page, "POWER");
-    make_page_header(sleep_page, LV_SYMBOL_POWER, "Sleep");
+    make_page_header(sleep_page, LV_SYMBOL_POWER, "Power");
+
+    s_power_card = lv_button_create(sleep_page);
+    lv_obj_set_size(s_power_card, 280, 64);
+    lv_obj_set_style_pad_all(s_power_card, 0, 0);
+    lv_obj_set_style_radius(s_power_card, 16, 0);
+    lv_obj_set_style_bg_color(s_power_card, lv_color_hex(MENU_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_color(s_power_card, lv_color_hex(MENU_COLOR_SURFACE_PRESSED), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(s_power_card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_power_card, 1, 0);
+    lv_obj_set_style_border_color(s_power_card, lv_color_hex(MENU_COLOR_BORDER), 0);
+    lv_obj_set_style_shadow_width(s_power_card, 0, 0);
+    lv_obj_set_style_margin_top(s_power_card, 8, 0);
+    lv_obj_add_flag(s_power_card, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    lv_obj_add_event_cb(s_power_card, on_power_card_clicked, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *battery_caption = make_label(s_power_card, "BATTERY", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(battery_caption, &lv_font_montserrat_10, 0);
+    lv_obj_align(battery_caption, LV_ALIGN_TOP_LEFT, 14, 5);
+
+    s_power_battery = make_label(s_power_card, "Battery --", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(s_power_battery, &lv_font_montserrat_16, 0);
+    lv_obj_set_width(s_power_battery, 220);
+    lv_obj_set_style_text_align(s_power_battery, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(s_power_battery, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_power_battery, LV_ALIGN_TOP_LEFT, 14, 20);
+
+    s_power_battery_detail = make_label(s_power_card, "", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(s_power_battery_detail, &lv_font_montserrat_12, 0);
+    lv_obj_set_width(s_power_battery_detail, 220);
+    lv_obj_set_style_text_align(s_power_battery_detail, LV_TEXT_ALIGN_LEFT, 0);
+    lv_label_set_long_mode(s_power_battery_detail, LV_LABEL_LONG_DOT);
+    lv_obj_align(s_power_battery_detail, LV_ALIGN_TOP_LEFT, 14, 41);
+
+    lv_obj_t *battery_chevron = make_label(s_power_card,
+                                           LV_SYMBOL_RIGHT,
+                                           lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(battery_chevron, &lv_font_montserrat_16, 0);
+    lv_obj_align(battery_chevron, LV_ALIGN_RIGHT_MID, -12, 0);
+
     lv_obj_t *sleep_grid = lv_obj_create(sleep_page);
     lv_obj_remove_style_all(sleep_grid);
     lv_obj_set_size(sleep_grid, 280, 52);
-    lv_obj_set_style_margin_top(sleep_grid, 18, 0);
+    lv_obj_set_style_margin_top(sleep_grid, 8, 0);
     lv_obj_set_style_pad_column(sleep_grid, 8, 0);
     lv_obj_set_flex_flow(sleep_grid, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(sleep_grid, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1583,7 +1654,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_t *sleep_hint = make_value_label(sleep_page, "Screen timeout");
     lv_obj_set_style_text_font(sleep_hint, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(sleep_hint, lv_color_hex(MENU_COLOR_MUTED), 0);
-    lv_obj_set_style_margin_top(sleep_hint, 12, 0);
+    lv_obj_set_style_margin_top(sleep_hint, 8, 0);
 
     lv_obj_t *motion_page = make_setting_page(wheel);
     make_page_caption(motion_page, "MOTION");
@@ -1815,9 +1886,221 @@ void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_statu
     s_updating_wifi_ui = false;
 }
 
+static void update_power_detail_labels(void)
+{
+    if (s_power_detail_overlay == nullptr) {
+        return;
+    }
+
+    char percent[16] = "--";
+    char voltage[32] = {};
+    char state[32] = "Battery";
+    char extra[64] = {};
+    char config[64] = {};
+    bool low_battery = false;
+    lv_color_t state_color = lv_color_hex(MENU_COLOR_TEXT);
+
+    if (!s_power_status_valid || !s_power_status.initialized) {
+        snprintf(voltage, sizeof(voltage), "PMU unavailable");
+        snprintf(state, sizeof(state), "Battery");
+        snprintf(extra, sizeof(extra), "AXP2101 not detected");
+        state_color = lv_color_hex(MENU_COLOR_MUTED);
+    } else if (!s_power_status.battery_present) {
+        snprintf(voltage, sizeof(voltage), "No battery");
+        snprintf(state, sizeof(state), "%s", s_power_status.vbus_present ? "USB powered" : "No battery");
+        snprintf(extra, sizeof(extra), "%s", s_power_status.vbus_present ? "USB connected" : "Battery not detected");
+        snprintf(config, sizeof(config), "Charge 4.2 V / 400 mA");
+        state_color = lv_color_hex(MENU_COLOR_MUTED);
+    } else {
+        snprintf(percent, sizeof(percent), "%u%%", s_power_status.battery_percent);
+        snprintf(voltage,
+                 sizeof(voltage),
+                 "%u.%02u V",
+                 s_power_status.battery_mv / 1000,
+                 (s_power_status.battery_mv % 1000) / 10);
+        const char *state_text = s_power_status.charging ? "Charging"
+                                 : s_power_status.full   ? "Full"
+                                 : s_power_status.discharging ? "Discharging"
+                                                              : "Standby";
+        snprintf(state, sizeof(state), "%s", state_text);
+        snprintf(extra, sizeof(extra), "%s", s_power_status.vbus_present ? "USB connected" : "On battery");
+        snprintf(config, sizeof(config), "Charge 4.2 V / 400 mA");
+        low_battery = s_power_status.discharging && s_power_status.battery_percent <= 15;
+        if (low_battery) {
+            snprintf(extra, sizeof(extra), "Low battery");
+            state_color = lv_color_hex(MENU_COLOR_WARM);
+        } else if (s_power_status.charging) {
+            state_color = lv_color_hex(MENU_COLOR_ACCENT);
+        }
+    }
+
+    if (s_power_detail_percent != nullptr) {
+        set_label_text_if_changed(s_power_detail_percent, percent);
+    }
+    if (s_power_detail_voltage != nullptr) {
+        set_label_text_if_changed(s_power_detail_voltage, voltage);
+    }
+    if (s_power_detail_state != nullptr) {
+        set_label_text_if_changed(s_power_detail_state, state);
+        lv_obj_set_style_text_color(s_power_detail_state, state_color, 0);
+    }
+    if (s_power_detail_extra != nullptr) {
+        set_label_text_if_changed(s_power_detail_extra, extra);
+        lv_obj_set_style_text_color(s_power_detail_extra,
+                                    lv_color_hex(low_battery ? MENU_COLOR_WARM : MENU_COLOR_MUTED),
+                                    0);
+    }
+    if (s_power_detail_config != nullptr) {
+        set_label_text_if_changed(s_power_detail_config, config);
+    }
+}
+
+static void close_power_detail(void)
+{
+    if (s_power_detail_overlay != nullptr) {
+        lv_obj_delete(s_power_detail_overlay);
+    }
+    s_power_detail_overlay = nullptr;
+    s_power_detail_percent = nullptr;
+    s_power_detail_voltage = nullptr;
+    s_power_detail_state = nullptr;
+    s_power_detail_extra = nullptr;
+    s_power_detail_config = nullptr;
+}
+
+static void on_power_detail_close(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    close_power_detail();
+}
+
+static void open_power_detail(void)
+{
+    if (s_power_detail_overlay != nullptr || s_menu_root == nullptr) {
+        return;
+    }
+
+    s_power_detail_overlay = lv_obj_create(s_menu_root);
+    lv_obj_remove_style_all(s_power_detail_overlay);
+    lv_obj_set_size(s_power_detail_overlay, 466, 466);
+    lv_obj_center(s_power_detail_overlay);
+    lv_obj_add_flag(s_power_detail_overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_power_detail_overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(s_power_detail_overlay, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(s_power_detail_overlay, lv_color_hex(MENU_COLOR_BG), 0);
+    lv_obj_set_style_bg_opa(s_power_detail_overlay, LV_OPA_COVER, 0);
+
+    lv_obj_t *title = make_label(s_power_detail_overlay, "Battery", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_24, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 28);
+
+    s_power_detail_percent =
+        make_label(s_power_detail_overlay, "--", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(s_power_detail_percent, &lv_font_montserrat_44, 0);
+    lv_obj_align(s_power_detail_percent, LV_ALIGN_TOP_MID, 0, 72);
+
+    s_power_detail_voltage =
+        make_label(s_power_detail_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(s_power_detail_voltage, &lv_font_montserrat_20, 0);
+    lv_obj_align(s_power_detail_voltage, LV_ALIGN_TOP_MID, 0, 128);
+
+    s_power_detail_state =
+        make_label(s_power_detail_overlay, "Battery", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(s_power_detail_state, &lv_font_montserrat_18, 0);
+    lv_obj_align(s_power_detail_state, LV_ALIGN_TOP_MID, 0, 162);
+
+    s_power_detail_extra =
+        make_label(s_power_detail_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(s_power_detail_extra, &lv_font_montserrat_12, 0);
+    lv_obj_align(s_power_detail_extra, LV_ALIGN_TOP_MID, 0, 192);
+
+    s_power_detail_config =
+        make_label(s_power_detail_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(s_power_detail_config, &lv_font_montserrat_12, 0);
+    lv_obj_align(s_power_detail_config, LV_ALIGN_TOP_MID, 0, 214);
+
+    lv_obj_t *close_button = make_action_button(s_power_detail_overlay, "Close", 140);
+    lv_obj_align(close_button, LV_ALIGN_TOP_MID, 0, 320);
+    lv_obj_add_event_cb(close_button, on_power_detail_close, LV_EVENT_CLICKED, nullptr);
+
+    update_power_detail_labels();
+    lv_obj_move_foreground(s_power_detail_overlay);
+    notify_activity();
+}
+
+static void on_power_card_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    open_power_detail();
+}
+
+void clock_settings_menu_update_power_status(const clock_settings_menu_power_status_t *status)
+{
+    if (status == nullptr) {
+        return;
+    }
+
+    s_power_status = *status;
+    s_power_status_valid = true;
+
+    char primary[32] = {};
+    char detail[48] = {};
+    bool low_battery = false;
+
+    if (!status->initialized) {
+        snprintf(primary, sizeof(primary), "Battery unavailable");
+        snprintf(detail, sizeof(detail), "PMU not detected");
+    } else if (!status->battery_present) {
+        snprintf(primary, sizeof(primary), "No battery");
+        snprintf(detail, sizeof(detail), "%s", status->vbus_present ? "USB powered" : "Battery not detected");
+    } else {
+        snprintf(primary, sizeof(primary), "Battery %u%%", status->battery_percent);
+        const char *state = status->charging ? "Charging"
+                            : status->full   ? "Full"
+                            : status->discharging ? "Discharging"
+                                                  : "Standby";
+        snprintf(detail,
+                 sizeof(detail),
+                 "%u.%02u V - %s",
+                 status->battery_mv / 1000,
+                 (status->battery_mv % 1000) / 10,
+                 state);
+        low_battery = status->discharging && status->battery_percent <= 15;
+    }
+
+    if (s_power_battery != nullptr) {
+        set_label_text_if_changed(s_power_battery, primary);
+        lv_obj_set_style_text_color(s_power_battery,
+                                    lv_color_hex(low_battery ? MENU_COLOR_WARM
+                                                             : MENU_COLOR_TEXT),
+                                    0);
+    }
+    if (s_power_battery_detail != nullptr) {
+        set_label_text_if_changed(s_power_battery_detail, detail);
+        lv_obj_set_style_text_color(s_power_battery_detail,
+                                    lv_color_hex(low_battery ? MENU_COLOR_WARM
+                                                             : MENU_COLOR_MUTED),
+                                    0);
+    }
+    update_power_detail_labels();
+}
+
 bool clock_settings_menu_is_setup_open(void)
 {
     return s_wifi_setup_overlay != nullptr;
+}
+
+bool clock_settings_menu_is_power_detail_open(void)
+{
+    return s_power_detail_overlay != nullptr;
+}
+
+void clock_settings_menu_open_power_detail(void)
+{
+    // Host preview helper: open the battery detail overlay without touch input.
+    open_power_detail();
 }
 
 void clock_settings_menu_close_async(clock_settings_menu_close_done_cb_t done_cb, void *user_ctx)

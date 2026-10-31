@@ -198,18 +198,20 @@ void render_menu(const std::filesystem::path &out_dir)
         int wifi_setup;
         bool wifi_connected;
         bool wifi_scan;
+        bool power_detail;
     };
     static constexpr MenuPage kMenuPages[] = {
-        {"brightness", 0, false, -1, false, false},
-        {"sleep", 1, false, -1, false, false},
-        {"motion_off", 2, false, -1, false, false},
-        {"motion_on", 2, true, -1, false, false},
-        {"wifi", 3, false, -1, false, false},
-        {"wifi_connected", 3, false, -1, true, false},
-        {"wifi_setup", 3, false, 0, false, false},
-        {"wifi_scan", 3, false, 0, false, true},
-        {"wifi_setup_ssid", 3, false, 1, false, false},
-        {"wifi_setup_password", 3, false, 2, false, false},
+        {"brightness", 0, false, -1, false, false, false},
+        {"sleep", 1, false, -1, false, false, false},
+        {"battery_detail", 1, false, -1, false, false, true},
+        {"motion_off", 2, false, -1, false, false, false},
+        {"motion_on", 2, true, -1, false, false, false},
+        {"wifi", 3, false, -1, false, false, false},
+        {"wifi_connected", 3, false, -1, true, false, false},
+        {"wifi_setup", 3, false, 0, false, false, false},
+        {"wifi_scan", 3, false, 0, false, true, false},
+        {"wifi_setup_ssid", 3, false, 1, false, false, false},
+        {"wifi_setup_password", 3, false, 2, false, false, false},
     };
 
     for (const MenuPage &page : kMenuPages) {
@@ -237,6 +239,19 @@ void render_menu(const std::filesystem::path &out_dir)
         // Let the menu entrance animation settle before snapshotting.
         run_lvgl_for(400);
         clock_settings_menu_set_page(page.index);
+        if (page.index == 1) {
+            clock_settings_menu_power_status_t power = {};
+            power.initialized = true;
+            power.battery_present = true;
+            power.charging = true;
+            power.vbus_present = true;
+            power.battery_mv = 3950;
+            power.battery_percent = 82;
+            clock_settings_menu_update_power_status(&power);
+        }
+        if (page.power_detail) {
+            clock_settings_menu_open_power_detail();
+        }
         if (page.wifi_connected) {
             clock_settings_menu_wifi_status_t status = {};
             status.state = "Connected: HomeWiFi";

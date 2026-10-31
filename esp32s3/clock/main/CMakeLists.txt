@@ -7,6 +7,7 @@ set(MAIN_SRCS
     "imu_demo.cpp"
     "wifi_manager.cpp"
     "ntp_time_sync.cpp"
+    "power_manager.cpp"
     "lv_font_clock_96.c"
     "lv_font_clock_144.c"
     "clock_theme_minimal.cpp"
