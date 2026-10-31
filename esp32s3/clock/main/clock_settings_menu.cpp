@@ -1912,7 +1912,11 @@ static void update_power_detail_labels(void)
         snprintf(config, sizeof(config), "Charge 4.2 V / 400 mA");
         state_color = lv_color_hex(MENU_COLOR_MUTED);
     } else {
-        snprintf(percent, sizeof(percent), "%u%%", s_power_status.battery_percent);
+        snprintf(percent,
+                 sizeof(percent),
+                 "%s%u%%",
+                 s_power_status.battery_percent_estimated ? "~" : "",
+                 s_power_status.battery_percent);
         snprintf(voltage,
                  sizeof(voltage),
                  "%u.%02u V",
@@ -1924,7 +1928,12 @@ static void update_power_detail_labels(void)
                                                               : "Standby";
         snprintf(state, sizeof(state), "%s", state_text);
         snprintf(extra, sizeof(extra), "%s", s_power_status.vbus_present ? "USB connected" : "On battery");
-        snprintf(config, sizeof(config), "Charge 4.2 V / 400 mA");
+        snprintf(config,
+                 sizeof(config),
+                 "%s",
+                 s_power_status.battery_percent_estimated
+                     ? "Estimated | 4.2 V / 400 mA"
+                     : "Charge 4.2 V / 400 mA");
         low_battery = s_power_status.discharging && s_power_status.battery_percent <= 15;
         if (low_battery) {
             snprintf(extra, sizeof(extra), "Low battery");
@@ -2056,7 +2065,11 @@ void clock_settings_menu_update_power_status(const clock_settings_menu_power_sta
         snprintf(primary, sizeof(primary), "No battery");
         snprintf(detail, sizeof(detail), "%s", status->vbus_present ? "USB powered" : "Battery not detected");
     } else {
-        snprintf(primary, sizeof(primary), "Battery %u%%", status->battery_percent);
+        snprintf(primary,
+                 sizeof(primary),
+                 "Battery %s%u%%",
+                 status->battery_percent_estimated ? "~" : "",
+                 status->battery_percent);
         const char *state = status->charging ? "Charging"
                             : status->full   ? "Full"
                             : status->discharging ? "Discharging"

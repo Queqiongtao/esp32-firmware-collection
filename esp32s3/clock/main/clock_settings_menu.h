@@ -50,6 +50,7 @@ typedef struct {
     bool vbus_present;
     uint16_t battery_mv;
     uint8_t battery_percent;
+    bool battery_percent_estimated;
 } clock_settings_menu_power_status_t;
 
 typedef struct {

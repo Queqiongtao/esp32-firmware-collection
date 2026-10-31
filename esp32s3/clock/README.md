@@ -17,7 +17,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - Sleep and wake use a short brightness fade
 - Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image when auto-rotate is enabled
 - PCF85063 external RTC syncs system time, with build time as fallback; NTP updates the system time and writes it back to the RTC after WiFi connects
-- AXP2101 manages 3.7 V battery charging and power-path control; the Power page shows a clickable battery card and a Battery detail overlay with percentage, voltage and charging state
+- AXP2101 manages 3.7 V battery charging and power-path control; the Power page shows a clickable battery card and a Battery detail overlay with percentage, voltage and charging state. When the E-Gauge is unavailable, the percentage is estimated from battery voltage and marked with a `~` prefix.
 - QMI8658 IMU computes in-plane gravity angle for optional clock rotation
 - GPIO0 and touch swipes switch themes
 - Theme switch order and implementation details are documented in `PROJECT_OVERVIEW.md`
@@ -74,7 +74,7 @@ Build output:
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
 - The theme index is stored as `theme_id` in the NVS `clock_settings` namespace. It maps to the `s_themes` array order, so adding or reordering themes remaps saved values.
 - Auto-rotate is stored as `auto_rotate` in the same NVS namespace. It defaults to off, and existing devices without the key stay off after upgrading.
-- The Power page battery card opens a Battery detail overlay with large percentage, voltage, USB state and charge configuration. AXP2101 uses the shared I2C bus at address `0x34`. TS pin temperature measurement is disabled, and charging is configured for 50 mA precharge, 400 mA constant current, 25 mA termination and 4.2 V target. EXIO4 is active-high for PWR; the first release after battery power-on is ignored to avoid immediately sleeping the screen.
+- The Power page battery card opens a Battery detail overlay with large percentage, voltage, USB state and charge configuration. AXP2101 uses the shared I2C bus at address `0x34`. TS pin temperature measurement is disabled, and charging is configured for 50 mA precharge, 400 mA constant current, 25 mA termination and 4.2 V target. The E-Gauge is explicitly enabled (REG18h bit3), but register `0xA4` may stay at 0 on this board; in that case the firmware estimates the percentage from a 3300–4200 mV curve (with 70 mV charging compensation), marks the value with `~`, and shows `Estimated | 4.2 V / 400 mA` in the detail overlay. EXIO4 is active-high for PWR; the first release after battery power-on is ignored to avoid immediately sleeping the screen.
 - The WiFi enable flag is stored as `wifi` and NTP auto-sync as `ntp` in the `clock_settings` namespace; `ntp` defaults to on for devices upgrading without the key. If WiFi is enabled on boot and credentials exist, the device connects automatically and retries every 5 seconds after a disconnect. The WiFi page reports `WiFi off` whenever the switch is off, even if saved credentials exist.
 
 ## Key Files
@@ -84,7 +84,7 @@ Build output:
 - `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback, plus system-time write-back after NTP sync
 - `main/wifi_manager.cpp` / `main/wifi_manager.h`: WiFi station connection, NVS credentials, AP scanning and reconnect handling
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`: SNTP start/stop, sync status and manual sync
-- `main/power_manager.cpp` / `main/power_manager.h`: AXP2101 charging configuration and battery telemetry
+- `main/power_manager.cpp` / `main/power_manager.h`: AXP2101 charging configuration, battery telemetry and voltage-based percentage fallback
 - `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, auto-rotate, WiFi flag, NTP flag, theme index)
 - `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`: settings menu UI (WiFi setup, AP scan list, 6-column keyboard and NTP controls)
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`: touch swipe/flick and long-press gesture layer

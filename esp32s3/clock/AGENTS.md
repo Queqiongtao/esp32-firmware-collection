@@ -12,7 +12,7 @@
 - 使用 LVGL v9 构建 UI。
 - 使用可复用 RGB565 draw buffer 和 `lv_snapshot_take_to_draw_buf()` 更新当前主题截图；IMU 旋转默认关闭，可在设置菜单 Motion 页开启。
 - 使用 PCF85063 外部 RTC 同步系统时间。
-- 使用 AXP2101 管理电池充电和电源路径，并在 Power 页显示电量、电压和充电状态。
+- 使用 AXP2101 管理电池充电和电源路径，并在 Power 页显示电量、电压和充电状态；E-Gauge 无效时按电池电压估算电量，并用 `~` 前缀标识。
 - 使用 QMI8658 IMU 计算平面重力角度。
 - GPIO0 单击切换时钟主题，长按打开设置菜单；触摸屏左右滑动手势切换主题，基本静止长按约 2 秒打开设置菜单。
 - 主题切换带约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进，不丢切换。
@@ -32,7 +32,7 @@
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟旋转角计算。
 - `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接状态机、NVS 凭据读写、AP 扫描和断线重连。
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`：SNTP 启停、手动触发同步和同步状态。
-- `main/power_manager.cpp` / `main/power_manager.h`：AXP2101 初始化、充电配置和电池状态读取。
+- `main/power_manager.cpp` / `main/power_manager.h`：AXP2101 初始化、充电配置、电池状态读取，以及 E-Gauge 无效时的电压估算兜底。
 - `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
 - `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：LVGL 设置菜单 UI（亮度/息屏/自动旋转/WiFi 分页、WiFi 配网摘要/扫描列表/单字段编辑弹层、NTP 控制和 Done/超时关闭）。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸屏手势层（普通滑动/快速轻扫切换主题、长按打开菜单、旋转坐标映射）。
@@ -90,7 +90,7 @@
 - WiFi 页提供开关、Setup 配网、Auto NTP 开关、Sync now 和两行状态显示；连接后显示 SSID、IP、RSSI 和 NTP 同步状态，失败时显示错误原因。保存凭据或启动连接失败时，配网弹层保持打开并显示错误，不再静默关闭。
 - Setup 弹层采用“摘要页 + 单字段编辑页”：摘要页显示 WiFi Name/Password 两个大条目，并提供 Scan networks 按钮扫描附近 AP；点选 SSID 后直接进入密码编辑，隐藏网络仍可手动输入。编辑页只显示一个输入框，使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，当前输入框用薄荷绿边框高亮，密码支持显示/隐藏。密码以明文保存在 NVS `wifi_creds` 命名空间；连接成功后 SNTP 自动启动，依次使用 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org` 三台服务器。
 - WiFi 扫描在 LVGL 事件中同步执行，扫描期间界面不响应触摸，通常持续 1–3 秒；最多展示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描完成后关闭。
-- AXP2101 使用共享 BSP I2C 总线，地址 `0x34`；初始化时关闭 TS 引脚温度检测，设置 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止电压。
+- AXP2101 使用共享 BSP I2C 总线，地址 `0x34`；初始化时关闭 TS 引脚温度检测，设置 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止电压，并显式使能 E-Gauge（REG18h bit3）。本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0，此时 `power_manager` 使用 3300–4200 mV 电压曲线估算电量（充电时先补偿 70 mV），模块状态中的 `battery_percent_estimated` 为 true，UI 用 `~` 前缀和 `Estimated | 4.2 V / 400 mA` 标识估算值；串口首次更新会打印 `gauge=... percent=... (estimated) battery_mv=...`。
 - PCF85063、QMI8658、AXP2101 和触摸控制器共用 BSP I2C 总线。
 - `bsp_i2c_get_handle()` 会隐式初始化 I2C，RTC 可以在显示启动前使用。
 - QMI8658 仅启用加速度计并读取 6 字节加速度数据；菜单打开、屏幕息屏或自动旋转关闭时会暂停采样。
@@ -119,6 +119,6 @@
   - 自动旋转开启后，断电重启是否保持开启；关闭后是否保持关闭，且启动时钟不跟随倾斜。
   - 自动旋转关闭时，触摸滑动切换主题的坐标映射是否正常，没有残留旋转。
   - 手动/自动息屏和亮屏渐变是否正常；用于唤醒的触摸/按键是否不会同时触发切换或菜单。
-  - Power 页电池卡片是否显示电池百分比、电压和充电/放电状态，点击后 Battery 详情弹层是否正常；仅电池长按 PWR 是否能开机且开机后不会立即息屏；USB 与电池切换、充电状态是否正常。
+  - Power 页电池卡片是否显示电池百分比、电压和充电/放电状态，点击后 Battery 详情弹层是否正常；E-Gauge 为 0 时是否显示 `~` 估算电量和 `Estimated` 提示，串口是否打印 `gauge=0 percent=... (estimated)`；仅电池长按 PWR 是否能开机且开机后不会立即息屏；USB 与电池切换、充电状态是否正常。
 - 如果没有硬件，最终说明中要明确哪些行为只完成了编译验证，哪些需要上板验证。
 - 纯文档变更不需要构建，但需要检查路径、命令和模块描述是否与源码一致。

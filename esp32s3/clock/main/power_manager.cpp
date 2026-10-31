@@ -21,6 +21,41 @@ static i2c_master_dev_handle_t s_pmu_device = nullptr;
 static bool s_pmu_ready = false;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static power_status_t s_status = {};
+static bool s_status_logged = false;
+
+static uint8_t estimate_battery_percent(uint16_t battery_mv, bool charging)
+{
+    if (battery_mv == 0) {
+        return 0;
+    }
+
+    // Rough 1S LiPo open-circuit voltage curve. Charging raises terminal
+    // voltage, so compensate a little before looking up the estimate.
+    static const uint16_t voltages[] = {
+        3300, 3400, 3500, 3600, 3700, 3800, 3900, 4000, 4100, 4200,
+    };
+    static const uint8_t percents[] = {
+        0, 5, 10, 20, 35, 50, 65, 80, 90, 100,
+    };
+
+    int32_t ocv = (int32_t)battery_mv - (charging ? 70 : 0);
+    if (ocv <= voltages[0]) {
+        return 0;
+    }
+    if (ocv >= voltages[sizeof(voltages) / sizeof(voltages[0]) - 1]) {
+        return 100;
+    }
+
+    for (size_t i = 1; i < sizeof(voltages) / sizeof(voltages[0]); ++i) {
+        if (ocv <= voltages[i]) {
+            const int32_t span = voltages[i] - voltages[i - 1];
+            const int32_t offset = ocv - voltages[i - 1];
+            const int32_t delta = percents[i] - percents[i - 1];
+            return (uint8_t)(percents[i - 1] + (offset * delta + span / 2) / span);
+        }
+    }
+    return 100;
+}
 
 static int pmu_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *data, uint8_t len)
 {
@@ -96,6 +131,7 @@ esp_err_t power_manager_init(void)
     s_pmu.setChargerConstantCurr(XPOWERS_AXP2101_CHG_CUR_400MA);
     s_pmu.setChargerTerminationCurr(XPOWERS_AXP2101_CHG_ITERM_25MA);
     s_pmu.setChargeTargetVoltage(XPOWERS_AXP2101_CHG_VOL_4V2);
+    s_pmu.setRegisterBit(XPOWERS_AXP2101_CHARGE_GAUGE_WDT_CTRL, 3); // E-Gauge enable
     s_pmu.enableCellbatteryCharge();
     s_pmu.setLowBatWarnThreshold(15);
     s_pmu.setLowBatShutdownThreshold(5);
@@ -133,13 +169,17 @@ void power_manager_update(void)
     next.vbus_mv = s_pmu.getVbusVoltage();
     next.system_mv = s_pmu.getSystemVoltage();
 
-    int percent = next.battery_present ? s_pmu.getBatteryPercent() : 0;
-    if (percent < 0) {
-        percent = 0;
-    } else if (percent > 100) {
-        percent = 100;
+    const int gauge_percent = next.battery_present ? s_pmu.getBatteryPercent() : 0;
+    if (gauge_percent > 0 && gauge_percent <= 100) {
+        next.battery_percent = (uint8_t)gauge_percent;
+        next.battery_percent_estimated = false;
+    } else if (next.battery_present && next.battery_mv > 0) {
+        next.battery_percent = estimate_battery_percent(next.battery_mv, next.charging);
+        next.battery_percent_estimated = true;
+    } else {
+        next.battery_percent = 0;
+        next.battery_percent_estimated = true;
     }
-    next.battery_percent = (uint8_t)percent;
 
     const xpowers_chg_status_t charger_status = s_pmu.getChargerStatus();
     next.full = charger_status == XPOWERS_AXP2101_CHG_DONE_STATE ||
@@ -149,6 +189,17 @@ void power_manager_update(void)
     portENTER_CRITICAL(&s_lock);
     s_status = next;
     portEXIT_CRITICAL(&s_lock);
+
+    if (!s_status_logged) {
+        s_status_logged = true;
+        ESP_LOGI(TAG,
+                 "gauge=%d percent=%u%s battery_mv=%u charging=%d",
+                 gauge_percent,
+                 next.battery_percent,
+                 next.battery_percent_estimated ? " (estimated)" : "",
+                 next.battery_mv,
+                 next.charging ? 1 : 0);
+    }
 }
 
 void power_manager_get_status(power_status_t *status)

@@ -20,6 +20,7 @@ typedef struct {
     uint16_t vbus_mv;
     uint16_t system_mv;
     uint8_t battery_percent;
+    bool battery_percent_estimated;
 } power_status_t;
 
 esp_err_t power_manager_init(void);

@@ -247,6 +247,7 @@ void render_menu(const std::filesystem::path &out_dir)
             power.vbus_present = true;
             power.battery_mv = 3950;
             power.battery_percent = 82;
+            power.battery_percent_estimated = true;
             clock_settings_menu_update_power_status(&power);
         }
         if (page.power_detail) {

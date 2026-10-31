@@ -1115,6 +1115,7 @@ static void update_power_status(lv_timer_t *timer)
     status.vbus_present = power.vbus_present;
     status.battery_mv = power.battery_mv;
     status.battery_percent = power.battery_percent;
+    status.battery_percent_estimated = power.battery_percent_estimated;
     clock_settings_menu_update_power_status(&status);
 }
 
