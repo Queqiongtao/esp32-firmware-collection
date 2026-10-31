@@ -1,5 +1,7 @@
 #include "clock_theme.h"
 
+#include <cstdio>
+
 #include "lvgl.h"
 
 namespace {
@@ -33,6 +35,21 @@ constexpr uint32_t kPalette[] = {
 };
 constexpr int32_t kPaletteCount = sizeof(kPalette) / sizeof(kPalette[0]);
 
+constexpr uint32_t kColorInfoDate = kPalette[4];      // cream
+constexpr uint32_t kColorInfoSeparator = kPalette[8]; // lavender
+constexpr uint32_t kColorInfoSeconds = kPalette[1];   // rose
+constexpr int32_t kInfoRowWidth = 280;
+constexpr int32_t kInfoRowHeight = 30;
+constexpr int32_t kInfoRowTop = 330;
+
+const char *const kWeekdayAbbr[7] = {
+    "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT",
+};
+const char *const kMonthAbbr[12] = {
+    "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+    "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+};
+
 // 12x20 glyph masks sampled from Paytone One (SIL OFL 1.1) at a
 // 200px raster size, threshold 120, resized to 12x20. Bit 11 is the
 // leftmost column; each set bit becomes one 6px mosaic tile.
@@ -63,8 +80,15 @@ constexpr int32_t kDigitColumns[4] = {0, 13, 34, 47};
 constexpr int32_t kColonColumn = 28;
 
 lv_obj_t *s_canvas = nullptr;
+lv_obj_t *s_info_row = nullptr;
+lv_obj_t *s_date_label = nullptr;
+lv_obj_t *s_seconds_label = nullptr;
 int s_last_hour = -1;
 int s_last_minute = -1;
+int s_last_mday = -1;
+int s_last_mon = -1;
+int s_last_wday = -1;
+int s_last_second = -1;
 
 uint8_t tile_color_index(int digit, int row, int col,
                          const uint8_t *above, uint8_t left)
@@ -79,6 +103,16 @@ uint8_t tile_color_index(int digit, int row, int col,
         return index;
     }
     return start;
+}
+
+lv_obj_t *make_info_label(lv_obj_t *parent, const char *text, uint32_t color)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), 0);
+    lv_obj_set_style_text_letter_space(label, 1, 0);
+    return label;
 }
 
 void draw_tile(lv_layer_t *layer, int32_t x, int32_t y, uint32_t color)
@@ -170,10 +204,24 @@ void canvas_delete_cb(lv_event_t *event)
     s_canvas = nullptr;
 }
 
+void root_delete_cb(lv_event_t *event)
+{
+    (void)event;
+    s_canvas = nullptr;
+    s_info_row = nullptr;
+    s_date_label = nullptr;
+    s_seconds_label = nullptr;
+}
+
 } // namespace
 
 static lv_obj_t *dot_matrix_build(lv_obj_t *parent)
 {
+    s_canvas = nullptr;
+    s_info_row = nullptr;
+    s_date_label = nullptr;
+    s_seconds_label = nullptr;
+
     lv_obj_t *root = lv_obj_create(parent);
     lv_obj_remove_style_all(root);
     lv_obj_clear_flag(root, LV_OBJ_FLAG_SCROLLABLE);
@@ -181,6 +229,27 @@ static lv_obj_t *dot_matrix_build(lv_obj_t *parent)
     lv_obj_center(root);
     lv_obj_set_style_bg_color(root, lv_color_hex(kColorBackground), 0);
     lv_obj_set_style_bg_opa(root, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(root, root_delete_cb, LV_EVENT_DELETE, nullptr);
+
+    s_info_row = lv_obj_create(root);
+    lv_obj_remove_style_all(s_info_row);
+    lv_obj_clear_flag(s_info_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(s_info_row, kInfoRowWidth, kInfoRowHeight);
+    lv_obj_align(s_info_row, LV_ALIGN_TOP_MID, 0, kInfoRowTop);
+    lv_obj_set_flex_flow(s_info_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(s_info_row,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(s_info_row, 8, 0);
+
+    s_date_label =
+        make_info_label(s_info_row, "--- -- ---", kColorInfoDate);
+    lv_obj_t *separator =
+        make_info_label(s_info_row, "\xE2\x80\xA2", kColorInfoSeparator);
+    lv_obj_set_style_text_letter_space(separator, 0, 0);
+    s_seconds_label =
+        make_info_label(s_info_row, "--", kColorInfoSeconds);
 
     lv_obj_t *canvas = lv_canvas_create(root);
     lv_draw_buf_t *draw_buf = lv_draw_buf_create(kPanelWidth,
@@ -202,6 +271,10 @@ static lv_obj_t *dot_matrix_build(lv_obj_t *parent)
     s_canvas = canvas;
     s_last_hour = -1;
     s_last_minute = -1;
+    s_last_mday = -1;
+    s_last_mon = -1;
+    s_last_wday = -1;
+    s_last_second = -1;
     return root;
 }
 
@@ -211,21 +284,52 @@ static bool dot_matrix_update(const struct tm *timeinfo)
         return false;
     }
 
-    const bool changed = s_last_hour != timeinfo->tm_hour ||
-                         s_last_minute != timeinfo->tm_min;
+    const bool minute_changed = s_last_hour != timeinfo->tm_hour ||
+                                s_last_minute != timeinfo->tm_min;
+    const bool date_changed = s_last_mday != timeinfo->tm_mday ||
+                              s_last_mon != timeinfo->tm_mon ||
+                              s_last_wday != timeinfo->tm_wday;
+    const bool seconds_changed = s_last_second != timeinfo->tm_sec;
+
     s_last_hour = timeinfo->tm_hour;
     s_last_minute = timeinfo->tm_min;
+    s_last_mday = timeinfo->tm_mday;
+    s_last_mon = timeinfo->tm_mon;
+    s_last_wday = timeinfo->tm_wday;
+    s_last_second = timeinfo->tm_sec;
 
-    if (changed) {
+    if (minute_changed) {
         render_time(timeinfo->tm_hour, timeinfo->tm_min);
     }
-    return changed;
+
+    if (date_changed && s_date_label != nullptr) {
+        char date_text[24] = {};
+        snprintf(date_text,
+                 sizeof(date_text),
+                 "%s %02d %s",
+                 kWeekdayAbbr[timeinfo->tm_wday % 7],
+                 timeinfo->tm_mday,
+                 kMonthAbbr[timeinfo->tm_mon % 12]);
+        lv_label_set_text(s_date_label, date_text);
+    }
+
+    if (seconds_changed && s_seconds_label != nullptr) {
+        char seconds_text[4] = {};
+        snprintf(seconds_text, sizeof(seconds_text), "%02d", timeinfo->tm_sec);
+        lv_label_set_text(s_seconds_label, seconds_text);
+    }
+
+    return minute_changed || date_changed || seconds_changed;
 }
 
 static void dot_matrix_reset(void)
 {
     s_last_hour = -1;
     s_last_minute = -1;
+    s_last_mday = -1;
+    s_last_mon = -1;
+    s_last_wday = -1;
+    s_last_second = -1;
 }
 
 const clock_theme_t g_clock_theme_dot_matrix = {

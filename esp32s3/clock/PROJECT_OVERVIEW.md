@@ -255,7 +255,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
-- `main/clock_theme_dot_matrix.cpp`：59×20、6×6 单格彩色点阵像素时钟，Paytone One 12×20 字形、10 色糖果配色，只显示 `HH:MM`；冒号左右留白，无背景网格、日期和扫描动画。
+- `main/clock_theme_dot_matrix.cpp`：59×20、6×6 单格彩色点阵像素时钟，Paytone One 12×20 字形、10 色糖果配色；主时间 `HH:MM`，底部一行显示 `TUE 20 OCT • 35`，冒号左右留白，无背景网格和扫描动画。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源；字体为 4bpp，生成方法见 `tools/fonts/README.md`。

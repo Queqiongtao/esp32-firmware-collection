@@ -100,7 +100,7 @@ Build output:
 - `tools/fonts/`: M5 font regeneration script and notes
 - `main/clock_theme_segment.cpp`
 - `main/clock_theme_analog.cpp`
-- `main/clock_theme_dot_matrix.cpp`: 59×20 dot-matrix clock with 6 px tiles, Paytone One 12×20 glyphs and a 10-color candy palette; shows only HH:MM, with generous colon spacing and no background grid, date or scan animation
+- `main/clock_theme_dot_matrix.cpp`: 59×20 dot-matrix clock with 6 px tiles, Paytone One 12×20 glyphs and a 10-color candy palette; shows HH:MM with a `TUE 20 OCT • 35` info line, generous colon spacing and no background grid or scan animation
 - `components/qmi8658/`: QMI8658 I2C driver
 - `components/pcf85063/`: PCF85063 I2C driver
 - `components/ui_physics/`: angle spring smoothing
