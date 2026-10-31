@@ -627,6 +627,10 @@ lv_display_t *bsp_display_start(void)
             .swap_xy = 0,
             .mirror_x = 1,
             .mirror_y = 1}};
+    // WiFi scan runs synchronously from an LVGL event callback. The default
+    // 8 KB LVGL task stack is too small for the blocking scan call chain and
+    // can corrupt the task stack/TCB.
+    cfg.lv_adapter_cfg.task_stack_size = 16 * 1024;
     return bsp_display_start_with_config(&cfg);
 }
 

@@ -20,6 +20,7 @@
 #include "esp_io_expander.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "imu_demo.h"
 #include "iot_button.h"
 #include "lvgl.h"
@@ -887,14 +888,21 @@ static uint32_t on_menu_wifi_scan(clock_settings_menu_wifi_ap_t *results,
         return 0;
     }
 
-    wifi_manager_ap_t aps[8] = {};
+    static wifi_manager_ap_t aps[8];
     const uint32_t limit = max_results < 8 ? max_results : 8;
     size_t count = 0;
+    ESP_LOGI(TAG,
+             "WiFi scan requested, lvgl stack free=%u",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
     const esp_err_t err = wifi_manager_scan(aps, limit, &count);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
         return 0;
     }
+    ESP_LOGI(TAG,
+             "WiFi scan finished, count=%u, lvgl stack free=%u",
+             (unsigned)count,
+             (unsigned)uxTaskGetStackHighWaterMark(NULL));
 
     for (size_t i = 0; i < count; ++i) {
         snprintf(results[i].ssid, sizeof(results[i].ssid), "%s", aps[i].ssid);

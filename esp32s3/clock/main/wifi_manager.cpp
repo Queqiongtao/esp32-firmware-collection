@@ -467,13 +467,20 @@ esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size
     }
 
     wifi_scan_config_t config = {};
+    ESP_LOGI(TAG, "WiFi scan start");
     err = esp_wifi_scan_start(&config, true);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi scan start failed: %s", esp_err_to_name(err));
+    }
     if (err == ESP_OK) {
+        bool ap_list_freed = false;
         uint16_t found = 0;
         if (esp_wifi_scan_get_ap_num(&found) == ESP_OK && found > 0) {
             static wifi_ap_record_t records[16];
             uint16_t fetch_count = found > 16 ? 16 : found;
             if (esp_wifi_scan_get_ap_records(&fetch_count, records) == ESP_OK) {
+                // esp_wifi_scan_get_ap_records() already frees the scan list.
+                ap_list_freed = true;
                 for (uint16_t i = 0; i < fetch_count && *count < max_results; ++i) {
                     if (records[i].ssid[0] == '\0') {
                         continue;
@@ -499,7 +506,11 @@ esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size
                 }
             }
         }
-        esp_wifi_clear_ap_list();
+        if (!ap_list_freed) {
+            // Only free the list when records were not fetched; a successful
+            // esp_wifi_scan_get_ap_records() call has already released it.
+            esp_wifi_clear_ap_list();
+        }
     }
 
     if (started_here && !s_enabled) {

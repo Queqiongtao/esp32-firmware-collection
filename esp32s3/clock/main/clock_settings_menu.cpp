@@ -1037,7 +1037,7 @@ static void start_wifi_scan(void)
     set_wifi_setup_status("Scanning...", false);
     lv_refr_now(nullptr);
 
-    clock_settings_menu_wifi_ap_t aps[8] = {};
+    static clock_settings_menu_wifi_ap_t aps[8];
     uint32_t count = s_config.wifi_scan_cb(aps, 8, s_config.user_ctx);
     if (count > 8) {
         count = 8;
