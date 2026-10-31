@@ -12,7 +12,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 - Switchable themes: minimal, segment, analog, outline analog, and four M5 WatchFace themes
 - Current theme index is persisted in NVS and restored on boot
 - Theme changes use a short scale/fade transition; rapid swipes are queued instead of dropped
-- Settings menu opens on the brightness page and closes via the top-center Done button or after 1 minute without menu activity; the WiFi page supports on-screen SSID/password entry and NTP time sync
+- Settings menu opens on the brightness page and closes via the top-center Done button or after 1 minute without menu activity; the WiFi page supports on-screen SSID/password entry, nearby AP scanning and NTP time sync
 - Motion settings page provides an Auto Rotate switch; it is off by default and pauses IMU sampling when disabled
 - Sleep and wake use a short brightness fade
 - Current theme is snapshotted into a reusable RGB565 buffer and rotated as an image when auto-rotate is enabled
@@ -65,7 +65,8 @@ Build output:
 - A roughly 2-second stationary long press opens settings; moving more than 16 px cancels long press and leaves the gesture available for swipe handling.
 - The settings menu opens on the brightness page and contains Brightness, Sleep, Motion and WiFi pages. Use the four icon-and-label tabs arranged on a shallow arc at the bottom to switch pages; Done is centered at the top. Tapping outside the menu no longer closes it; use Done, wait 1 minute without menu activity, or let the screen sleep. Auto Rotate on the Motion page is off by default.
 - The WiFi page has an enable switch, a Setup button, an Auto NTP switch, a Sync now button and two status lines. When connected, the detail line shows IP, RSSI and NTP state; failures show a short reason such as `Wrong password` or `Network not found`.
-- Setup opens a summary overlay with separate WiFi Name and Password rows. Tapping a row opens a single-field editor with a larger keyboard, a mint focus border and a password show/hide button. Done, Back and the keyboard back action keep the current draft; Connect saves it and stays on the summary with an error if saving or starting WiFi fails. Credentials are stored in the NVS `wifi_creds` namespace in plaintext; editing only the SSID keeps the saved password. NVS namespace/key names are limited to 15 characters. The menu timeout is paused while the setup overlay is open.
+- Setup opens a summary overlay with separate WiFi Name and Password rows and a Scan networks button that lists nearby APs; selecting an SSID goes straight to password entry, while hidden networks can still be typed manually. Tapping a row opens a single-field editor with a 6-column 350 × 270 keyboard, larger 58 × 54 px keys, key popovers, case/symbol layers, a mint focus border and a password show/hide button. Done and Back keep the current draft; Connect saves it and stays on the summary with an error if saving or starting WiFi fails. Credentials are stored in the NVS `wifi_creds` namespace in plaintext; editing only the SSID keeps the saved password. NVS namespace/key names are limited to 15 characters. The menu timeout is paused while the setup overlay is open.
+- Scan networks calls `esp_wifi_scan_start()` synchronously from the LVGL event. The UI shows `Scanning...` for roughly 1–3 seconds and then lists up to 8 APs. If WiFi was off, the STA is started temporarily and stopped after the scan; hidden networks can still be entered manually.
 - After WiFi connects, SNTP starts automatically with `ntp.aliyun.com`, `ntp.tencent.com` and `cn.pool.ntp.org` as fallback servers and the synchronized time is written back to the PCF85063. Auto NTP can be disabled; Sync now remains available while WiFi is connected. A manual sync keeps SNTP alive for up to 30 seconds when Auto NTP is off.
 - Sleep and wake use a roughly 200 ms brightness fade. The first touch that wakes the screen only turns it on; it does not switch themes or activate menu items.
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
@@ -78,10 +79,10 @@ Build output:
 - `main/main.cpp`: app entry, theme switching and transition, LVGL snapshot, rotation spring, brightness fade, GPIO0/touch/power-key wiring
 - `main/imu_demo.cpp`: accelerometer sampling and clock angle update
 - `main/rtc_time_sync.cpp`: PCF85063 time sync with build-time fallback, plus system-time write-back after NTP sync
-- `main/wifi_manager.cpp` / `main/wifi_manager.h`: WiFi station connection, NVS credentials and reconnect handling
+- `main/wifi_manager.cpp` / `main/wifi_manager.h`: WiFi station connection, NVS credentials, AP scanning and reconnect handling
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`: SNTP start/stop, sync status and manual sync
 - `main/clock_settings.cpp` / `main/clock_settings.h`: NVS settings (brightness, sleep timeout, auto-rotate, WiFi flag, NTP flag, theme index)
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`: settings menu UI
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`: settings menu UI (WiFi setup, AP scan list, 6-column keyboard and NTP controls)
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`: touch swipe/flick and long-press gesture layer
 - `main/clock_theme.h`: theme interface
 - `main/clock_theme_minimal.cpp`

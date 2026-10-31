@@ -440,6 +440,78 @@ bool wifi_manager_has_credentials(void)
     return has_credentials;
 }
 
+esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size_t *count)
+{
+    if (results == nullptr || max_results == 0 || count == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *count = 0;
+
+    esp_err_t err = wifi_manager_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    bool started_here = false;
+    if (!s_started) {
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            return err;
+        }
+        err = esp_wifi_start();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+            return err;
+        }
+        s_started = true;
+        started_here = true;
+    }
+
+    wifi_scan_config_t config = {};
+    err = esp_wifi_scan_start(&config, true);
+    if (err == ESP_OK) {
+        uint16_t found = 0;
+        if (esp_wifi_scan_get_ap_num(&found) == ESP_OK && found > 0) {
+            static wifi_ap_record_t records[16];
+            uint16_t fetch_count = found > 16 ? 16 : found;
+            if (esp_wifi_scan_get_ap_records(&fetch_count, records) == ESP_OK) {
+                for (uint16_t i = 0; i < fetch_count && *count < max_results; ++i) {
+                    if (records[i].ssid[0] == '\0') {
+                        continue;
+                    }
+                    const char *ssid = reinterpret_cast<const char *>(records[i].ssid);
+                    bool duplicate = false;
+                    for (size_t j = 0; j < *count; ++j) {
+                        if (std::strcmp(results[j].ssid, ssid) == 0) {
+                            if (records[i].rssi > results[j].rssi) {
+                                results[j].rssi = records[i].rssi;
+                            }
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                    if (duplicate) {
+                        continue;
+                    }
+                    copy_string(results[*count].ssid, sizeof(results[*count].ssid), ssid);
+                    results[*count].rssi = records[i].rssi;
+                    results[*count].secure = records[i].authmode != WIFI_AUTH_OPEN;
+                    ++(*count);
+                }
+            }
+        }
+        esp_wifi_clear_ap_list();
+    }
+
+    if (started_here && !s_enabled) {
+        esp_wifi_stop();
+        s_started = false;
+        set_state(WIFI_MANAGER_OFF);
+    }
+
+    ESP_LOGI(TAG, "WiFi scan found %u networks", (unsigned)*count);
+    return err;
+}
+
 esp_err_t wifi_manager_connect(const char *ssid, const char *password)
 {
     if (ssid == nullptr || ssid[0] == '\0' ||

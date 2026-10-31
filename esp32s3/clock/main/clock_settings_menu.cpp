@@ -37,6 +37,33 @@ static const char *const MENU_TAB_LABELS[MENU_PAGE_COUNT] = {
 static constexpr int32_t MENU_TAB_X[MENU_PAGE_COUNT] = {0, 68, 136, 204};
 static constexpr int32_t MENU_TAB_Y[MENU_PAGE_COUNT] = {0, 10, 10, 0};
 
+static constexpr uint8_t WIFI_KB_LAYER_LOWER = 0;
+static constexpr uint8_t WIFI_KB_LAYER_UPPER = 1;
+static constexpr uint8_t WIFI_KB_LAYER_SYMBOL = 2;
+
+static const char *const WIFI_KB_LOWER_MAP[] = {
+    "a", "b", "c", "d", "e", "f", "\n",
+    "g", "h", "i", "j", "k", "l", "\n",
+    "m", "n", "o", "p", "q", "r", "\n",
+    "s", "t", "u", "v", "w", "x", "\n",
+    "y", "z", "Aa", "123", "Space", LV_SYMBOL_BACKSPACE, ""
+};
+static const char *const WIFI_KB_UPPER_MAP[] = {
+    "A", "B", "C", "D", "E", "F", "\n",
+    "G", "H", "I", "J", "K", "L", "\n",
+    "M", "N", "O", "P", "Q", "R", "\n",
+    "S", "T", "U", "V", "W", "X", "\n",
+    "Y", "Z", "Aa", "123", "Space", LV_SYMBOL_BACKSPACE, ""
+};
+static const char *const WIFI_KB_SYMBOL_MAP[] = {
+    "1", "2", "3", "4", "5", "6", "\n",
+    "7", "8", "9", "0", "-", "_", "\n",
+    ".", ",", ":", ";", "!", "?", "\n",
+    "@", "#", "$", "%", "^", "&", "\n",
+    "*", "(", ")", "+", "=", "/", "\n",
+    "abc", "Space", LV_SYMBOL_BACKSPACE, "'", "\"", "\\", ""
+};
+
 static constexpr uint32_t MENU_COLOR_BG = 0x000000;
 static constexpr uint32_t MENU_COLOR_SURFACE = 0x241B3A;
 static constexpr uint32_t MENU_COLOR_SURFACE_PRESSED = 0x2E2348;
@@ -64,6 +91,8 @@ static lv_obj_t *s_wifi_detail = nullptr;
 static lv_obj_t *s_wifi_setup_overlay = nullptr;
 static lv_obj_t *s_wifi_summary_view = nullptr;
 static lv_obj_t *s_wifi_edit_view = nullptr;
+static lv_obj_t *s_wifi_scan_view = nullptr;
+static lv_obj_t *s_wifi_scan_list = nullptr;
 static lv_obj_t *s_wifi_summary_ssid = nullptr;
 static lv_obj_t *s_wifi_summary_password = nullptr;
 static lv_obj_t *s_wifi_edit_title = nullptr;
@@ -71,7 +100,10 @@ static lv_obj_t *s_wifi_input = nullptr;
 static lv_obj_t *s_wifi_password_eye = nullptr;
 static lv_obj_t *s_wifi_password_eye_label = nullptr;
 static lv_obj_t *s_wifi_keyboard = nullptr;
+static lv_obj_t *s_wifi_key_popover = nullptr;
+static lv_obj_t *s_wifi_key_popover_label = nullptr;
 static lv_obj_t *s_wifi_setup_status = nullptr;
+static uint8_t s_wifi_keyboard_layer = 0;
 static bool s_updating_wifi_ui = false;
 static bool s_wifi_has_credentials = false;
 static bool s_wifi_connected = false;
@@ -82,6 +114,7 @@ static bool s_wifi_input_updating = false;
 static char s_wifi_ssid_buffer[33] = {};
 static char s_wifi_password_buffer[65] = {};
 static char s_wifi_saved_ssid[33] = {};
+static char s_wifi_scan_ssids[8][33] = {};
 static uint8_t s_wifi_edit_field = 0;
 static lv_obj_t *s_page_tabs[MENU_PAGE_COUNT] = {};
 static lv_obj_t *s_page_tab_icons[MENU_PAGE_COUNT] = {};
@@ -101,6 +134,8 @@ static void reset_wifi_setup_pointers(void)
     s_wifi_setup_overlay = nullptr;
     s_wifi_summary_view = nullptr;
     s_wifi_edit_view = nullptr;
+    s_wifi_scan_view = nullptr;
+    s_wifi_scan_list = nullptr;
     s_wifi_summary_ssid = nullptr;
     s_wifi_summary_password = nullptr;
     s_wifi_edit_title = nullptr;
@@ -108,6 +143,8 @@ static void reset_wifi_setup_pointers(void)
     s_wifi_password_eye = nullptr;
     s_wifi_password_eye_label = nullptr;
     s_wifi_keyboard = nullptr;
+    s_wifi_key_popover = nullptr;
+    s_wifi_key_popover_label = nullptr;
     s_wifi_setup_status = nullptr;
     s_updating_wifi_ui = false;
     s_wifi_password_visible = false;
@@ -115,6 +152,7 @@ static void reset_wifi_setup_pointers(void)
     s_wifi_password_dirty = false;
     s_wifi_input_updating = false;
     s_wifi_edit_field = 0;
+    s_wifi_keyboard_layer = 0;
 }
 
 static void reset_menu_widget_pointers(void)
@@ -558,29 +596,27 @@ static lv_obj_t *make_small_button(lv_obj_t *parent, const char *text)
     return button;
 }
 
-static void style_keyboard(lv_obj_t *keyboard)
+static void style_wifi_keyboard(lv_obj_t *keyboard)
 {
-    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_BG), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(keyboard, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(keyboard, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(keyboard, 2, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(keyboard, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(keyboard, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(keyboard, 3, LV_PART_MAIN);
+    lv_obj_clear_flag(keyboard, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_SURFACE), LV_PART_ITEMS);
     lv_obj_set_style_bg_opa(keyboard, LV_OPA_COVER, LV_PART_ITEMS);
     lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_TEXT), LV_PART_ITEMS);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_18, LV_PART_ITEMS);
     lv_obj_set_style_border_width(keyboard, 0, LV_PART_ITEMS);
-    lv_obj_set_style_radius(keyboard, 8, LV_PART_ITEMS);
+    lv_obj_set_style_radius(keyboard, 10, LV_PART_ITEMS);
     lv_obj_set_style_shadow_width(keyboard, 0, LV_PART_ITEMS);
 
     const lv_style_selector_t pressed =
         (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_PRESSED;
     lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_ACCENT), pressed);
     lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_ACCENT_TEXT), pressed);
-
-    const lv_style_selector_t checked =
-        (lv_style_selector_t)LV_PART_ITEMS | (lv_style_selector_t)LV_STATE_CHECKED;
-    lv_obj_set_style_bg_color(keyboard, lv_color_hex(MENU_COLOR_SURFACE_PRESSED), checked);
-    lv_obj_set_style_text_color(keyboard, lv_color_hex(MENU_COLOR_WARM), checked);
 }
 
 static void copy_text(char *dest, size_t dest_size, const char *src)
@@ -670,7 +706,7 @@ static void update_wifi_setup_summary(void)
     if (s_wifi_summary_password != nullptr) {
         const char *text = "Not set";
         if (s_wifi_password_touched) {
-            text = s_wifi_password_buffer[0] != '\0' ? "********" : "Open network";
+            text = s_wifi_password_buffer[0] != '\0' ? "********" : "Enter password";
         } else if (s_wifi_has_credentials) {
             text = "Saved password";
         }
@@ -691,6 +727,109 @@ static void update_password_eye(void)
     }
 }
 
+static const char *const *wifi_keyboard_map(void)
+{
+    switch (s_wifi_keyboard_layer) {
+    case WIFI_KB_LAYER_UPPER:
+        return WIFI_KB_UPPER_MAP;
+    case WIFI_KB_LAYER_SYMBOL:
+        return WIFI_KB_SYMBOL_MAP;
+    default:
+        return WIFI_KB_LOWER_MAP;
+    }
+}
+
+static void update_wifi_keyboard_map(void)
+{
+    if (s_wifi_keyboard == nullptr) {
+        return;
+    }
+    lv_buttonmatrix_set_map(s_wifi_keyboard, wifi_keyboard_map());
+    lv_obj_update_layout(s_wifi_keyboard);
+}
+
+static void apply_wifi_keyboard_map_async(void *unused)
+{
+    (void)unused;
+    update_wifi_keyboard_map();
+}
+
+static void hide_wifi_key_popover(void)
+{
+    if (s_wifi_key_popover != nullptr) {
+        lv_obj_add_flag(s_wifi_key_popover, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void show_wifi_key_popover(const char *text)
+{
+    if (s_wifi_key_popover == nullptr || s_wifi_key_popover_label == nullptr || text == nullptr) {
+        return;
+    }
+    lv_label_set_text(s_wifi_key_popover_label, text);
+    const bool single_char = strlen(text) == 1;
+    lv_obj_set_style_text_font(s_wifi_key_popover_label,
+                               single_char ? &lv_font_montserrat_28
+                                           : &lv_font_montserrat_16,
+                               0);
+    lv_obj_clear_flag(s_wifi_key_popover, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_wifi_key_popover);
+}
+
+static void on_wifi_keyboard_value_changed(lv_event_t *event)
+{
+    lv_obj_t *keyboard = static_cast<lv_obj_t *>(lv_event_get_target(event));
+    const uint32_t id = lv_buttonmatrix_get_selected_button(keyboard);
+    const char *text = lv_buttonmatrix_get_button_text(keyboard, id);
+    if (text == nullptr) {
+        return;
+    }
+
+    if (strcmp(text, "Aa") == 0) {
+        s_wifi_keyboard_layer =
+            s_wifi_keyboard_layer == WIFI_KB_LAYER_UPPER ? WIFI_KB_LAYER_LOWER
+                                                         : WIFI_KB_LAYER_UPPER;
+        hide_wifi_key_popover();
+        lv_async_call(apply_wifi_keyboard_map_async, nullptr);
+        notify_activity();
+        return;
+    }
+    if (strcmp(text, "123") == 0) {
+        s_wifi_keyboard_layer = WIFI_KB_LAYER_SYMBOL;
+        hide_wifi_key_popover();
+        lv_async_call(apply_wifi_keyboard_map_async, nullptr);
+        notify_activity();
+        return;
+    }
+    if (strcmp(text, "abc") == 0) {
+        s_wifi_keyboard_layer = WIFI_KB_LAYER_LOWER;
+        hide_wifi_key_popover();
+        lv_async_call(apply_wifi_keyboard_map_async, nullptr);
+        notify_activity();
+        return;
+    }
+
+    show_wifi_key_popover(text);
+    if (strcmp(text, "Space") == 0) {
+        if (s_wifi_input != nullptr) {
+            lv_textarea_add_char(s_wifi_input, ' ');
+        }
+    } else if (strcmp(text, LV_SYMBOL_BACKSPACE) == 0) {
+        if (s_wifi_input != nullptr) {
+            lv_textarea_delete_char(s_wifi_input);
+        }
+    } else if (strlen(text) == 1 && s_wifi_input != nullptr) {
+        lv_textarea_add_char(s_wifi_input, (uint8_t)text[0]);
+    }
+    notify_activity();
+}
+
+static void on_wifi_keyboard_released(lv_event_t *event)
+{
+    (void)event;
+    hide_wifi_key_popover();
+}
+
 static void show_wifi_summary(void)
 {
     s_wifi_edit_field = 0;
@@ -699,6 +838,9 @@ static void show_wifi_summary(void)
     }
     if (s_wifi_edit_view != nullptr) {
         lv_obj_add_flag(s_wifi_edit_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_wifi_scan_view != nullptr) {
+        lv_obj_add_flag(s_wifi_scan_view, LV_OBJ_FLAG_HIDDEN);
     }
     if (s_wifi_setup_status != nullptr) {
         lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 300);
@@ -719,6 +861,9 @@ static void show_wifi_edit(uint8_t field)
     if (s_wifi_summary_view != nullptr) {
         lv_obj_add_flag(s_wifi_summary_view, LV_OBJ_FLAG_HIDDEN);
     }
+    if (s_wifi_scan_view != nullptr) {
+        lv_obj_add_flag(s_wifi_scan_view, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_clear_flag(s_wifi_edit_view, LV_OBJ_FLAG_HIDDEN);
 
     lv_textarea_set_password_mode(s_wifi_input, false);
@@ -731,13 +876,13 @@ static void show_wifi_edit(uint8_t field)
     s_wifi_password_dirty = false;
     s_wifi_password_visible = false;
     if (password) {
-        lv_obj_set_width(s_wifi_input, 260);
+        lv_obj_set_width(s_wifi_input, 224);
         if (s_wifi_password_eye != nullptr) {
             lv_obj_clear_flag(s_wifi_password_eye, LV_OBJ_FLAG_HIDDEN);
         }
         update_password_eye();
     } else {
-        lv_obj_set_width(s_wifi_input, 320);
+        lv_obj_set_width(s_wifi_input, 276);
         if (s_wifi_password_eye != nullptr) {
             lv_obj_add_flag(s_wifi_password_eye, LV_OBJ_FLAG_HIDDEN);
         }
@@ -752,22 +897,18 @@ static void show_wifi_edit(uint8_t field)
         set_label_text_if_changed(s_wifi_edit_title, password ? "Editing Password" : "Editing WiFi Name");
     }
     if (s_wifi_setup_status != nullptr) {
-        lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 400);
+        lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 426);
         const char *hint = "";
         if (password && s_wifi_has_credentials && !s_wifi_password_touched) {
-            hint = "Leave blank to keep saved password";
+            hint = "Blank keeps saved password";
         }
         set_wifi_setup_status(hint, false);
     }
 
-    lv_keyboard_set_textarea(s_wifi_keyboard, s_wifi_input);
+    s_wifi_keyboard_layer = WIFI_KB_LAYER_LOWER;
+    update_wifi_keyboard_map();
+    hide_wifi_key_popover();
     lv_obj_add_state(s_wifi_input, LV_STATE_FOCUSED);
-    notify_activity();
-}
-
-static void on_wifi_setup_activity(lv_event_t *event)
-{
-    (void)event;
     notify_activity();
 }
 
@@ -781,6 +922,14 @@ static void on_wifi_input_changed(lv_event_t *event)
     const char *text = lv_textarea_get_text(s_wifi_input);
     if (s_wifi_edit_field == 0) {
         copy_text(s_wifi_ssid_buffer, sizeof(s_wifi_ssid_buffer), text);
+        if (!s_wifi_password_dirty && s_wifi_saved_ssid[0] != '\0') {
+            if (strcmp(s_wifi_ssid_buffer, s_wifi_saved_ssid) == 0) {
+                s_wifi_password_touched = false;
+            } else {
+                s_wifi_password_touched = true;
+                s_wifi_password_buffer[0] = '\0';
+            }
+        }
     } else {
         copy_text(s_wifi_password_buffer, sizeof(s_wifi_password_buffer), text);
         s_wifi_password_dirty = true;
@@ -816,6 +965,118 @@ static void on_wifi_edit_back(lv_event_t *event)
     show_wifi_summary();
 }
 
+static void show_wifi_scan(void)
+{
+    s_wifi_edit_field = 0;
+    if (s_wifi_summary_view != nullptr) {
+        lv_obj_add_flag(s_wifi_summary_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_wifi_edit_view != nullptr) {
+        lv_obj_add_flag(s_wifi_edit_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_wifi_scan_view != nullptr) {
+        lv_obj_clear_flag(s_wifi_scan_view, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_wifi_setup_status != nullptr) {
+        lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 366);
+        set_wifi_setup_status("Select a network", false);
+    }
+    if (s_wifi_scan_list != nullptr) {
+        lv_obj_scroll_to_y(s_wifi_scan_list, 0, LV_ANIM_OFF);
+    }
+}
+
+static void on_wifi_scan_row_clicked(lv_event_t *event)
+{
+    const uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
+    if (index >= 8 || s_wifi_scan_ssids[index][0] == '\0') {
+        return;
+    }
+    copy_text(s_wifi_ssid_buffer,
+              sizeof(s_wifi_ssid_buffer),
+              s_wifi_scan_ssids[index]);
+    s_wifi_password_buffer[0] = '\0';
+    const bool same_network =
+        s_wifi_saved_ssid[0] != '\0' &&
+        strcmp(s_wifi_ssid_buffer, s_wifi_saved_ssid) == 0;
+    s_wifi_password_touched = !same_network && s_wifi_saved_ssid[0] != '\0';
+    s_wifi_password_dirty = false;
+    notify_activity();
+    show_wifi_edit(1);
+}
+
+static void start_wifi_scan(void)
+{
+    if (s_config.wifi_scan_cb == nullptr || s_wifi_scan_list == nullptr) {
+        set_wifi_setup_status("Scan not available", true);
+        return;
+    }
+
+    set_wifi_setup_status("Scanning...", false);
+    lv_refr_now(nullptr);
+
+    clock_settings_menu_wifi_ap_t aps[8] = {};
+    uint32_t count = s_config.wifi_scan_cb(aps, 8, s_config.user_ctx);
+    if (count > 8) {
+        count = 8;
+    }
+    if (count == 0) {
+        set_wifi_setup_status("No networks found", true);
+        return;
+    }
+
+    lv_obj_clean(s_wifi_scan_list);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (aps[i].ssid[0] == '\0') {
+            continue;
+        }
+        copy_text(s_wifi_scan_ssids[i], sizeof(s_wifi_scan_ssids[i]), aps[i].ssid);
+
+        lv_obj_t *row = lv_button_create(s_wifi_scan_list);
+        lv_obj_set_size(row, 300, 46);
+        style_small_button(row);
+        lv_obj_add_event_cb(row,
+                            on_wifi_scan_row_clicked,
+                            LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)i);
+
+        lv_obj_t *ssid_label = make_label(row, aps[i].ssid, lv_color_hex(MENU_COLOR_TEXT));
+        lv_obj_set_style_text_font(ssid_label, &lv_font_montserrat_16, 0);
+        lv_obj_set_width(ssid_label, 205);
+        lv_obj_set_style_text_align(ssid_label, LV_TEXT_ALIGN_LEFT, 0);
+        lv_label_set_long_mode(ssid_label, LV_LABEL_LONG_DOT);
+        lv_obj_align(ssid_label, LV_ALIGN_LEFT_MID, 14, 0);
+
+        char rssi[16] = {};
+        snprintf(rssi, sizeof(rssi), "%d dBm", aps[i].rssi);
+        lv_obj_t *rssi_label = make_label(row, rssi, lv_color_hex(MENU_COLOR_MUTED));
+        lv_obj_set_style_text_font(rssi_label, &lv_font_montserrat_12, 0);
+        lv_obj_align(rssi_label, LV_ALIGN_RIGHT_MID, -14, 0);
+    }
+    show_wifi_scan();
+}
+
+static void on_wifi_scan_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    start_wifi_scan();
+}
+
+static void on_wifi_scan_back(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    show_wifi_summary();
+}
+
+static void on_wifi_scan_manual(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    show_wifi_edit(0);
+}
+
 static void on_wifi_edit_done(lv_event_t *event)
 {
     (void)event;
@@ -847,16 +1108,6 @@ static void on_wifi_password_eye_clicked(lv_event_t *event)
     s_wifi_password_visible = !s_wifi_password_visible;
     update_password_eye();
     notify_activity();
-}
-
-static void on_wifi_keyboard_ready(lv_event_t *event)
-{
-    on_wifi_edit_done(event);
-}
-
-static void on_wifi_keyboard_cancel(lv_event_t *event)
-{
-    on_wifi_edit_back(event);
 }
 
 static void on_wifi_setup_connect(lv_event_t *event)
@@ -932,27 +1183,27 @@ static void open_wifi_setup(void)
     lv_obj_set_style_text_font(summary_title, &lv_font_montserrat_24, 0);
     lv_obj_align(summary_title, LV_ALIGN_TOP_MID, 0, 36);
 
-    lv_obj_t *summary_hint =
-        make_label(s_wifi_summary_view, "Tap a field to edit", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(summary_hint, &lv_font_montserrat_12, 0);
-    lv_obj_align(summary_hint, LV_ALIGN_TOP_MID, 0, 68);
+    lv_obj_t *scan_button = make_small_button(s_wifi_summary_view, "Scan networks");
+    lv_obj_set_size(scan_button, 180, 34);
+    lv_obj_align(scan_button, LV_ALIGN_TOP_MID, 0, 62);
+    lv_obj_add_event_cb(scan_button, on_wifi_scan_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *ssid_row =
         make_summary_row(s_wifi_summary_view, "WiFi Name", &s_wifi_summary_ssid);
-    lv_obj_align(ssid_row, LV_ALIGN_TOP_MID, 0, 96);
+    lv_obj_align(ssid_row, LV_ALIGN_TOP_MID, 0, 104);
     lv_obj_add_event_cb(ssid_row, on_wifi_summary_ssid_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *password_row =
         make_summary_row(s_wifi_summary_view, "Password", &s_wifi_summary_password);
-    lv_obj_align(password_row, LV_ALIGN_TOP_MID, 0, 164);
+    lv_obj_align(password_row, LV_ALIGN_TOP_MID, 0, 172);
     lv_obj_add_event_cb(password_row, on_wifi_summary_password_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *cancel_button = make_action_button(s_wifi_summary_view, "Cancel", 130);
-    lv_obj_align(cancel_button, LV_ALIGN_TOP_MID, -75, 242);
+    lv_obj_align(cancel_button, LV_ALIGN_TOP_MID, -75, 250);
     lv_obj_add_event_cb(cancel_button, on_wifi_setup_cancel, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *connect_button = make_action_button(s_wifi_summary_view, "Connect", 130);
-    lv_obj_align(connect_button, LV_ALIGN_TOP_MID, 75, 242);
+    lv_obj_align(connect_button, LV_ALIGN_TOP_MID, 75, 250);
     lv_obj_add_event_cb(connect_button, on_wifi_setup_connect, LV_EVENT_CLICKED, nullptr);
 
     s_wifi_edit_view = lv_obj_create(s_wifi_setup_overlay);
@@ -969,8 +1220,8 @@ static void open_wifi_setup(void)
 
     lv_obj_t *edit_row = lv_obj_create(s_wifi_edit_view);
     lv_obj_remove_style_all(edit_row);
-    lv_obj_set_size(edit_row, 320, 52);
-    lv_obj_align(edit_row, LV_ALIGN_TOP_MID, 0, 70);
+    lv_obj_set_size(edit_row, 276, 44);
+    lv_obj_align(edit_row, LV_ALIGN_TOP_MID, 0, 54);
     lv_obj_set_flex_flow(edit_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(edit_row,
                           LV_FLEX_ALIGN_CENTER,
@@ -980,7 +1231,7 @@ static void open_wifi_setup(void)
     lv_obj_clear_flag(edit_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_wifi_input = lv_textarea_create(edit_row);
-    lv_obj_set_size(s_wifi_input, 320, 48);
+    lv_obj_set_size(s_wifi_input, 276, 40);
     lv_textarea_set_one_line(s_wifi_input, true);
     lv_textarea_set_placeholder_text(s_wifi_input, "WiFi name");
     lv_obj_set_style_text_font(s_wifi_input, &lv_font_montserrat_20, 0);
@@ -998,8 +1249,8 @@ static void open_wifi_setup(void)
     lv_obj_add_event_cb(s_wifi_input, on_wifi_input_changed, LV_EVENT_VALUE_CHANGED, nullptr);
 
     s_wifi_password_eye = lv_button_create(edit_row);
-    lv_obj_set_size(s_wifi_password_eye, 44, 44);
-    lv_obj_set_style_radius(s_wifi_password_eye, 22, 0);
+    lv_obj_set_size(s_wifi_password_eye, 40, 40);
+    lv_obj_set_style_radius(s_wifi_password_eye, 20, 0);
     lv_obj_set_style_bg_color(s_wifi_password_eye, lv_color_hex(MENU_COLOR_SURFACE), 0);
     lv_obj_set_style_bg_color(s_wifi_password_eye,
                               lv_color_hex(MENU_COLOR_SURFACE_PRESSED),
@@ -1016,31 +1267,92 @@ static void open_wifi_setup(void)
     lv_obj_add_event_cb(s_wifi_password_eye, on_wifi_password_eye_clicked, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_flag(s_wifi_password_eye, LV_OBJ_FLAG_HIDDEN);
 
-    s_wifi_keyboard = lv_keyboard_create(s_wifi_edit_view);
-    lv_obj_set_size(s_wifi_keyboard, 380, 212);
-    lv_obj_align(s_wifi_keyboard, LV_ALIGN_TOP_MID, 0, 128);
-    style_keyboard(s_wifi_keyboard);
-    lv_keyboard_set_mode(s_wifi_keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
-    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_setup_activity, LV_EVENT_PRESSED, nullptr);
-    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_setup_activity, LV_EVENT_VALUE_CHANGED, nullptr);
-    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_keyboard_ready, LV_EVENT_READY, nullptr);
-    lv_obj_add_event_cb(s_wifi_keyboard, on_wifi_keyboard_cancel, LV_EVENT_CANCEL, nullptr);
+    s_wifi_keyboard = lv_buttonmatrix_create(s_wifi_edit_view);
+    lv_obj_set_size(s_wifi_keyboard, 350, 270);
+    lv_obj_align(s_wifi_keyboard, LV_ALIGN_TOP_MID, 0, 104);
+    style_wifi_keyboard(s_wifi_keyboard);
+    lv_buttonmatrix_set_map(s_wifi_keyboard, WIFI_KB_LOWER_MAP);
+    lv_obj_add_event_cb(s_wifi_keyboard,
+                        on_wifi_keyboard_value_changed,
+                        LV_EVENT_VALUE_CHANGED,
+                        nullptr);
+    lv_obj_add_event_cb(s_wifi_keyboard,
+                        on_wifi_keyboard_released,
+                        LV_EVENT_RELEASED,
+                        nullptr);
+    lv_obj_add_event_cb(s_wifi_keyboard,
+                        on_wifi_keyboard_released,
+                        LV_EVENT_PRESS_LOST,
+                        nullptr);
 
     lv_obj_t *back_button = make_action_button(s_wifi_edit_view, "Back", 130);
-    lv_obj_align(back_button, LV_ALIGN_TOP_MID, -75, 348);
+    lv_obj_align(back_button, LV_ALIGN_TOP_MID, -75, 380);
     lv_obj_add_event_cb(back_button, on_wifi_edit_back, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *done_button = make_action_button(s_wifi_edit_view, "Done", 130);
-    lv_obj_align(done_button, LV_ALIGN_TOP_MID, 75, 348);
+    lv_obj_align(done_button, LV_ALIGN_TOP_MID, 75, 380);
     lv_obj_add_event_cb(done_button, on_wifi_edit_done, LV_EVENT_CLICKED, nullptr);
+
+    s_wifi_scan_view = lv_obj_create(s_wifi_setup_overlay);
+    lv_obj_remove_style_all(s_wifi_scan_view);
+    lv_obj_set_size(s_wifi_scan_view, 466, 466);
+    lv_obj_center(s_wifi_scan_view);
+    lv_obj_clear_flag(s_wifi_scan_view, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_wifi_scan_view, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(s_wifi_scan_view, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_t *scan_title =
+        make_label(s_wifi_scan_view, "Nearby Networks", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(scan_title, &lv_font_montserrat_22, 0);
+    lv_obj_align(scan_title, LV_ALIGN_TOP_MID, 0, 36);
+
+    s_wifi_scan_list = lv_obj_create(s_wifi_scan_view);
+    lv_obj_remove_style_all(s_wifi_scan_list);
+    lv_obj_set_size(s_wifi_scan_list, 320, 200);
+    lv_obj_align(s_wifi_scan_list, LV_ALIGN_TOP_MID, 0, 80);
+    lv_obj_set_flex_flow(s_wifi_scan_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_wifi_scan_list,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(s_wifi_scan_list, 4, 0);
+    lv_obj_set_scroll_dir(s_wifi_scan_list, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_wifi_scan_list, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_add_flag(s_wifi_scan_list, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *manual_button = make_action_button(s_wifi_scan_view, "Manual", 120);
+    lv_obj_align(manual_button, LV_ALIGN_TOP_MID, -65, 316);
+    lv_obj_add_event_cb(manual_button, on_wifi_scan_manual, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *scan_back_button = make_action_button(s_wifi_scan_view, "Back", 100);
+    lv_obj_align(scan_back_button, LV_ALIGN_TOP_MID, 65, 316);
+    lv_obj_add_event_cb(scan_back_button, on_wifi_scan_back, LV_EVENT_CLICKED, nullptr);
+
+    s_wifi_key_popover = lv_obj_create(s_wifi_edit_view);
+    lv_obj_remove_style_all(s_wifi_key_popover);
+    lv_obj_set_size(s_wifi_key_popover, 52, 52);
+    lv_obj_align(s_wifi_key_popover, LV_ALIGN_TOP_MID, 0, 24);
+    lv_obj_clear_flag(s_wifi_key_popover, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(s_wifi_key_popover, 26, 0);
+    lv_obj_set_style_bg_color(s_wifi_key_popover, lv_color_hex(MENU_COLOR_SURFACE), 0);
+    lv_obj_set_style_bg_opa(s_wifi_key_popover, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(s_wifi_key_popover, 2, 0);
+    lv_obj_set_style_border_color(s_wifi_key_popover, lv_color_hex(MENU_COLOR_ACCENT), 0);
+    lv_obj_set_style_shadow_width(s_wifi_key_popover, 0, 0);
+    s_wifi_key_popover_label = lv_label_create(s_wifi_key_popover);
+    lv_label_set_text(s_wifi_key_popover_label, "");
+    lv_obj_set_style_text_font(s_wifi_key_popover_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(s_wifi_key_popover_label, lv_color_hex(MENU_COLOR_TEXT), 0);
+    lv_obj_center(s_wifi_key_popover_label);
+    lv_obj_add_flag(s_wifi_key_popover, LV_OBJ_FLAG_HIDDEN);
 
     s_wifi_setup_status =
         make_label(s_wifi_setup_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
     lv_obj_set_style_text_font(s_wifi_setup_status, &lv_font_montserrat_12, 0);
-    lv_obj_set_width(s_wifi_setup_status, 280);
+    lv_obj_set_width(s_wifi_setup_status, 200);
     lv_obj_set_style_text_align(s_wifi_setup_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_wifi_setup_status, LV_LABEL_LONG_DOT);
-    lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 300);
+    lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 426);
 
     show_wifi_summary();
     lv_obj_move_foreground(s_wifi_setup_status);
@@ -1435,6 +1747,12 @@ void clock_settings_menu_open_wifi_setup_edit(uint32_t field)
         open_wifi_setup();
     }
     show_wifi_edit(field != 0 ? 1 : 0);
+}
+
+void clock_settings_menu_start_wifi_scan(void)
+{
+    // Host preview helper: run the configured scan callback without touch input.
+    start_wifi_scan();
 }
 
 void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_status_t *status)

@@ -874,6 +874,32 @@ static void on_menu_wifi(bool enabled, void *user_ctx)
     ESP_LOGI(TAG, "WiFi setting is %s", enabled ? "on" : "off");
 }
 
+static uint32_t on_menu_wifi_scan(clock_settings_menu_wifi_ap_t *results,
+                                  uint32_t max_results,
+                                  void *user_ctx)
+{
+    (void)user_ctx;
+    if (results == nullptr || max_results == 0) {
+        return 0;
+    }
+
+    wifi_manager_ap_t aps[8] = {};
+    const uint32_t limit = max_results < 8 ? max_results : 8;
+    size_t count = 0;
+    const esp_err_t err = wifi_manager_scan(aps, limit, &count);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
+        return 0;
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        snprintf(results[i].ssid, sizeof(results[i].ssid), "%s", aps[i].ssid);
+        results[i].rssi = aps[i].rssi;
+        results[i].secure = aps[i].secure;
+    }
+    return (uint32_t)count;
+}
+
 static bool on_menu_wifi_setup(const char *ssid, const char *password, void *user_ctx)
 {
     (void)user_ctx;
@@ -958,6 +984,7 @@ static void open_settings_menu(void)
         .auto_rotate_cb = on_menu_auto_rotate,
         .wifi_cb = on_menu_wifi,
         .wifi_setup_cb = on_menu_wifi_setup,
+        .wifi_scan_cb = on_menu_wifi_scan,
         .ntp_cb = on_menu_ntp,
         .ntp_sync_cb = on_menu_ntp_sync,
         .close_cb = on_menu_close,

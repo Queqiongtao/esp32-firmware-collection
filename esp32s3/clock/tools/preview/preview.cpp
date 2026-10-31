@@ -166,6 +166,29 @@ void render_theme(const clock_theme_t *theme,
     lv_obj_clean(screen);
 }
 
+uint32_t preview_scan_cb(clock_settings_menu_wifi_ap_t *results,
+                         uint32_t max_results,
+                         void *user_ctx)
+{
+    (void)user_ctx;
+    static const char *const names[] = {
+        "QQT",
+        "TP-LINK_5G",
+        "CMCC-1234",
+        "HomeWiFi",
+        "Xiaomi_2.4G",
+    };
+    static const int8_t rssi[] = {-48, -61, -73, -55, -68};
+    const uint32_t count = sizeof(names) / sizeof(names[0]);
+    const uint32_t limit = count < max_results ? count : max_results;
+    for (uint32_t i = 0; i < limit; ++i) {
+        std::snprintf(results[i].ssid, sizeof(results[i].ssid), "%s", names[i]);
+        results[i].rssi = rssi[i];
+        results[i].secure = true;
+    }
+    return limit;
+}
+
 void render_menu(const std::filesystem::path &out_dir)
 {
     struct MenuPage {
@@ -174,17 +197,19 @@ void render_menu(const std::filesystem::path &out_dir)
         bool auto_rotate;
         int wifi_setup;
         bool wifi_connected;
+        bool wifi_scan;
     };
     static constexpr MenuPage kMenuPages[] = {
-        {"brightness", 0, false, -1, false},
-        {"sleep", 1, false, -1, false},
-        {"motion_off", 2, false, -1, false},
-        {"motion_on", 2, true, -1, false},
-        {"wifi", 3, false, -1, false},
-        {"wifi_connected", 3, false, -1, true},
-        {"wifi_setup", 3, false, 0, false},
-        {"wifi_setup_ssid", 3, false, 1, false},
-        {"wifi_setup_password", 3, false, 2, false},
+        {"brightness", 0, false, -1, false, false},
+        {"sleep", 1, false, -1, false, false},
+        {"motion_off", 2, false, -1, false, false},
+        {"motion_on", 2, true, -1, false, false},
+        {"wifi", 3, false, -1, false, false},
+        {"wifi_connected", 3, false, -1, true, false},
+        {"wifi_setup", 3, false, 0, false, false},
+        {"wifi_scan", 3, false, 0, false, true},
+        {"wifi_setup_ssid", 3, false, 1, false, false},
+        {"wifi_setup_password", 3, false, 2, false, false},
     };
 
     for (const MenuPage &page : kMenuPages) {
@@ -202,6 +227,7 @@ void render_menu(const std::filesystem::path &out_dir)
 
         clock_settings_menu_config_t config = {};
         config.settings = &settings;
+        config.wifi_scan_cb = preview_scan_cb;
 
         if (clock_settings_menu_create(screen, &config) == nullptr) {
             std::fprintf(stderr, "menu %s create failed\n", page.name);
@@ -224,7 +250,9 @@ void render_menu(const std::filesystem::path &out_dir)
         }
         if (page.wifi_setup >= 0) {
             clock_settings_menu_open_wifi_setup();
-            if (page.wifi_setup > 0) {
+            if (page.wifi_scan) {
+                clock_settings_menu_start_wifi_scan();
+            } else if (page.wifi_setup > 0) {
                 clock_settings_menu_open_wifi_setup_edit((uint32_t)(page.wifi_setup - 1));
             }
         }

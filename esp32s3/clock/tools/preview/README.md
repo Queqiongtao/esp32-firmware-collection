@@ -50,7 +50,7 @@
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 9 个菜单页面/配网弹层圆屏对比图 |
+| `out/menu/contact_menu.png` | 10 个菜单页面/配网弹层圆屏对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围与安全区越界提示 |
 
@@ -68,7 +68,7 @@
 
 1. `CMakeLists.txt` 通过 LVGL 自带的 `env_support/cmake/os_desktop.cmake` 把 `managed_components/lvgl__lvgl` 编成主机库。
 2. `lv_conf.h` 是关键配置，需与设备端对齐：RGB565、Montserrat 12~40 子集、SNAPSHOT/SCALE/CANVAS/ARC 等。
-3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后创建设置菜单并渲染 5 个页面，再渲染模拟已连接状态、WiFi 配网摘要页和 SSID/密码编辑页，共渲染 9 张。
+3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后创建设置菜单并渲染 5 个页面，再渲染模拟已连接状态、WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，共渲染 10 张。
 4. `render.py` 负责 PPM → PNG、主题圆形遮罩、拼图和菜单 PNG 转换。
 
 ## 与固件的主要差异

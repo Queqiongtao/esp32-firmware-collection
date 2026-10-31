@@ -14,6 +14,17 @@ typedef void (*clock_settings_menu_sleep_cb_t)(uint32_t sleep_timeout_sec, void 
 typedef void (*clock_settings_menu_auto_rotate_cb_t)(bool enabled, void *user_ctx);
 typedef void (*clock_settings_menu_wifi_cb_t)(bool enabled, void *user_ctx);
 typedef bool (*clock_settings_menu_wifi_setup_cb_t)(const char *ssid, const char *password, void *user_ctx);
+
+typedef struct {
+    char ssid[33];
+    int8_t rssi;
+    bool secure;
+} clock_settings_menu_wifi_ap_t;
+
+typedef uint32_t (*clock_settings_menu_wifi_scan_cb_t)(clock_settings_menu_wifi_ap_t *results,
+                                                       uint32_t max_results,
+                                                       void *user_ctx);
+
 typedef void (*clock_settings_menu_ntp_cb_t)(bool enabled, void *user_ctx);
 typedef void (*clock_settings_menu_ntp_sync_cb_t)(void *user_ctx);
 typedef void (*clock_settings_menu_close_cb_t)(void *user_ctx);
@@ -37,6 +48,7 @@ typedef struct {
     clock_settings_menu_auto_rotate_cb_t auto_rotate_cb;
     clock_settings_menu_wifi_cb_t wifi_cb;
     clock_settings_menu_wifi_setup_cb_t wifi_setup_cb;
+    clock_settings_menu_wifi_scan_cb_t wifi_scan_cb;
     clock_settings_menu_ntp_cb_t ntp_cb;
     clock_settings_menu_ntp_sync_cb_t ntp_sync_cb;
     clock_settings_menu_close_cb_t close_cb;
@@ -49,6 +61,7 @@ void clock_settings_menu_move_foreground(void);
 void clock_settings_menu_set_page(uint32_t page_index);
 void clock_settings_menu_open_wifi_setup(void);
 void clock_settings_menu_open_wifi_setup_edit(uint32_t field);
+void clock_settings_menu_start_wifi_scan(void);
 void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_status_t *status);
 bool clock_settings_menu_is_setup_open(void);
 void clock_settings_menu_close_async(clock_settings_menu_close_done_cb_t done_cb, void *user_ctx);

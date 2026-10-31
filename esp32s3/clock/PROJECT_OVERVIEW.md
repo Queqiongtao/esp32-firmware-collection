@@ -14,7 +14,7 @@
 - 当前主题索引通过 NVS 恢复，重启后保持上次主题。
 - 主题切换使用约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进。
 - 设置菜单默认亮度页，支持亮度、息屏、自动旋转、WiFi 配网和 NTP 自动对时；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭。
-- WiFi 凭据通过设置菜单的屏幕键盘输入并保存到 NVS；连接成功后自动启动 SNTP，对时结果写回 PCF85063。
+- WiFi 凭据可通过设置菜单的屏幕键盘输入，也可扫描附近 AP 后点选 SSID；凭据保存到 NVS，连接成功后自动启动 SNTP，对时结果写回 PCF85063。
 - 手动/自动息屏和亮屏使用约 200 ms 亮度渐变；用于唤醒的触摸/按键不会同时执行切换或菜单操作。
 - PCF85063 外部 RTC 同步系统时间。
 - RTC 时间无效或不可用时，用固件编译时间兜底，并尝试写回 RTC。
@@ -109,8 +109,9 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 2. Sleep：息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
 4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮和两行状态信息。连接后状态行显示 SSID，详情行显示 IP、RSSI 和 NTP 状态；失败时详情行显示 Network not found、Wrong password 等原因。
-   - 点击 Setup 打开配网摘要页，显示 WiFi Name 和 Password 两个大条目；点击条目进入单字段编辑页，键盘约 380 × 212，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
-   - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back/键盘返回都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
+   - 点击 Setup 打开配网摘要页，显示 WiFi Name 和 Password 两个大条目，并提供 Scan networks 按钮扫描附近 AP；点选 SSID 后直接进入密码编辑，隐藏网络仍可手动输入。
+   - 单字段编辑页使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
+   - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back 都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
 
 菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
@@ -240,7 +241,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 
 - `main/main.cpp`：应用入口、主题注册与过渡、LVGL snapshot、旋转弹簧、亮度渐变、按钮和 IMU 回调接入。
 - `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi、WiFi 配网弹层和 NTP 控制）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi、WiFi 配网摘要/扫描列表/编辑弹层和 NTP 控制）。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
@@ -248,7 +249,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，以及从系统时间写回 RTC。
-- `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接、NVS 凭据和断线重连。
+- `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接、NVS 凭据、AP 扫描和断线重连。
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`：SNTP 启停、同步状态和手动对时。
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟平面角计算。
 - `components/qmi8658/`：QMI8658 I2C 驱动。
@@ -293,6 +294,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
 - WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
 - WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络）。
+- `Scan networks` 在 LVGL 事件中同步调用 `esp_wifi_scan_start()`；扫描期间界面停在 `Scanning...`，完成后最多显示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描后恢复关闭；隐藏网络仍可手动输入。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。
 - `PROJECT_CONTEXT.md` 已弃用，不应作为当前工程事实来源。
@@ -315,7 +317,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
 - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正。
 - WiFi 页状态是否与开关一致，连接后是否显示 IP/RSSI，失败时是否显示原因；Auto NTP 和 Sync now 是否正常。
-- WiFi 配网摘要页是否显示当前 SSID/密码状态；SSID/密码编辑页是否一次只编辑一个字段、键盘是否便于触摸、焦点高亮和密码显示/隐藏是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
+- WiFi 配网摘要页是否显示当前 SSID/密码状态，Scan networks 是否能列出附近 AP；SSID/密码编辑页是否一次只编辑一个字段、6 列键盘是否便于触摸、按键气泡/大小写/符号层/焦点高亮/密码显示隐藏是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
 - Brightness 胶囊进度条拖动是否跟手，拖动时页面是否不会误滚动。
 - 菜单打开/关闭的淡入缩放动画是否流畅，关闭后是否没有残留遮罩或菜单对象。
 - 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。
