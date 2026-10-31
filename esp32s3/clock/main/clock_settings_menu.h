@@ -35,7 +35,23 @@ typedef enum {
     CLOCK_SETTINGS_MENU_UI_SOUND_CLICK = 0,
     CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM,
     CLOCK_SETTINGS_MENU_UI_SOUND_ERROR,
+    CLOCK_SETTINGS_MENU_UI_SOUND_SWIPE,
+    CLOCK_SETTINGS_MENU_UI_SOUND_MENU_OPEN,
 } clock_settings_menu_ui_sound_t;
+
+typedef enum {
+    CLOCK_SETTINGS_MENU_TEST_CLICK = 0,
+    CLOCK_SETTINGS_MENU_TEST_CONFIRM,
+    CLOCK_SETTINGS_MENU_TEST_ERROR,
+    CLOCK_SETTINGS_MENU_TEST_WAKE,
+    CLOCK_SETTINGS_MENU_TEST_SLEEP,
+    CLOCK_SETTINGS_MENU_TEST_CHIME,
+    CLOCK_SETTINGS_MENU_TEST_TIMER,
+    CLOCK_SETTINGS_MENU_TEST_ALARM_CHIME,
+    CLOCK_SETTINGS_MENU_TEST_ALARM_BEEP,
+    CLOCK_SETTINGS_MENU_TEST_ALARM_MELODY,
+    CLOCK_SETTINGS_MENU_TEST_1KHZ,
+} clock_settings_menu_test_sound_t;
 
 typedef enum {
     CLOCK_SETTINGS_MENU_TIMER_START = 0,
@@ -114,6 +130,7 @@ void clock_settings_menu_open_wifi_setup_edit(uint32_t field);
 void clock_settings_menu_start_wifi_scan(void);
 void clock_settings_menu_open_alarm_list(void);
 void clock_settings_menu_open_alarm_editor(uint32_t index);
+void clock_settings_menu_open_audio_test(void);
 void clock_settings_menu_open_timer(void);
 void clock_settings_menu_open_sleep(void);
 void clock_settings_menu_update_wifi_status(const clock_settings_menu_wifi_status_t *status);

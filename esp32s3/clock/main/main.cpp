@@ -1075,11 +1075,45 @@ static void on_menu_test_sound(uint8_t sound, void *user_ctx)
     if (audio_manager_is_noise_playing()) {
         audio_manager_stop();
     }
-    if (sound == 1) {
-        audio_manager_play(AUDIO_SOUND_TEST, false);
-    } else {
-        audio_manager_play(AUDIO_SOUND_CONFIRM, false);
+
+    audio_manager_sound_t selected = AUDIO_SOUND_CONFIRM;
+    switch (sound) {
+    case CLOCK_SETTINGS_MENU_TEST_CLICK:
+        selected = AUDIO_SOUND_CLICK;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_CONFIRM:
+        selected = AUDIO_SOUND_CONFIRM;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_ERROR:
+        selected = AUDIO_SOUND_ERROR;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_WAKE:
+        selected = AUDIO_SOUND_WAKE;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_SLEEP:
+        selected = AUDIO_SOUND_SLEEP;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_CHIME:
+        selected = AUDIO_SOUND_CHIME;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_TIMER:
+        selected = AUDIO_SOUND_TIMER_DONE;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_ALARM_CHIME:
+        selected = AUDIO_SOUND_ALARM_CHIME;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_ALARM_BEEP:
+        selected = AUDIO_SOUND_ALARM_BEEP;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_ALARM_MELODY:
+        selected = AUDIO_SOUND_ALARM_MELODY;
+        break;
+    case CLOCK_SETTINGS_MENU_TEST_1KHZ:
+    default:
+        selected = AUDIO_SOUND_TEST;
+        break;
     }
+    audio_manager_play(selected, false);
 }
 
 static void on_menu_alarm(uint8_t index, const clock_alarm_t *alarm, void *user_ctx)
@@ -1107,7 +1141,27 @@ static void on_menu_ui_sound(clock_settings_menu_ui_sound_t sound, void *user_ct
         s_alarm_active_index >= 0 || audio_manager_is_noise_playing()) {
         return;
     }
-    audio_manager_play((audio_manager_sound_t)sound, false);
+
+    audio_manager_sound_t selected = AUDIO_SOUND_CLICK;
+    switch (sound) {
+    case CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM:
+        selected = AUDIO_SOUND_CONFIRM;
+        break;
+    case CLOCK_SETTINGS_MENU_UI_SOUND_ERROR:
+        selected = AUDIO_SOUND_ERROR;
+        break;
+    case CLOCK_SETTINGS_MENU_UI_SOUND_SWIPE:
+        selected = AUDIO_SOUND_SWIPE;
+        break;
+    case CLOCK_SETTINGS_MENU_UI_SOUND_MENU_OPEN:
+        selected = AUDIO_SOUND_MENU_OPEN;
+        break;
+    case CLOCK_SETTINGS_MENU_UI_SOUND_CLICK:
+    default:
+        selected = AUDIO_SOUND_CLICK;
+        break;
+    }
+    audio_manager_play(selected, false);
 }
 
 static lv_obj_t *create_alert_shell(const char *title, const char *big_text, const char *detail)
@@ -1550,7 +1604,7 @@ static void open_settings_menu(void)
     }
     if (s_settings.sound_enabled && s_settings.ui_sounds &&
         s_alarm_active_index < 0 && !audio_manager_is_noise_playing()) {
-        audio_manager_play(AUDIO_SOUND_CLICK, false);
+        audio_manager_play(AUDIO_SOUND_MENU_OPEN, false);
     }
 
     s_settings_menu_closing = false;

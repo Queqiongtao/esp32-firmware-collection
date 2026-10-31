@@ -88,7 +88,7 @@ preview 不能验证：
 6. 调用 `lv_obj_update_layout()`，再对 `lv_screen_active()` 执行 `lv_snapshot_take(..., LV_COLOR_FORMAT_RGB565)`。
 7. 把 RGB565 逐像素移位成 RGB888，写出 PPM 到 `out/ppm/`。
 8. 调用 `destroy_overlay()` 并清理 screen，继续下一个主题。
-9. 主题渲染完成后，用默认设置创建一次菜单，渲染 `brightness`、`sleep`、`battery_detail`、`motion_off`、`motion_on`、`wifi` 六个页面，再渲染一个模拟已连接状态的 `wifi_connected`，以及 WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，渲染 `wifi_setup`、`wifi_scan`、`wifi_setup_ssid`、`wifi_setup_password`；再渲染 `sound`、`alarm_list`、`alarm_edit`、`timer`、`sleep_noise`，共十六个页面到 `out/menu_ppm/`。
+9. 主题渲染完成后，用默认设置创建一次菜单，渲染 `brightness`、`sleep`、`battery_detail`、`motion_off`、`motion_on`、`wifi` 六个页面，再渲染一个模拟已连接状态的 `wifi_connected`，以及 WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，渲染 `wifi_setup`、`wifi_scan`、`wifi_setup_ssid`、`wifi_setup_password`；再渲染 `sound`、`alarm_list`、`alarm_edit`、`audio_test`、`timer`、`sleep_noise`，共十七个页面到 `out/menu_ppm/`。
 10. 菜单页面切换通过 `clock_settings_menu_set_page()`，截图前等待打开动画结束。
 
 ### 3.3 后处理
@@ -122,7 +122,7 @@ preview 不能验证：
 | `out/contact_all.png` | 全部 7 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 16 个菜单页面/详情弹层对比图 |
+| `out/menu/contact_menu.png` | 17 个菜单页面/详情弹层对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围、最大半径和越界提示 |
 

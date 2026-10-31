@@ -24,85 +24,116 @@ constexpr uint32_t kReleaseFrames = kSampleRate * 14 / 1000;
 constexpr uint32_t kAlarmRampMs = 30000;
 constexpr uint8_t kAlarmMinVolume = 70;
 
+enum class Timbre : uint8_t {
+    Sine,
+    Bell,
+    Triangle,
+    Square,
+    Click,
+    Swish,
+};
+
 struct Note {
     uint16_t frequency;
     uint16_t duration_ms;
     uint8_t level;
+    Timbre timbre;
+    uint8_t attack_ms;
+    uint8_t release_ms;
+    uint8_t decay;
 };
 
 constexpr Note kClick[] = {
-    {1400, 80, 85},
+    {2200, 45, 55, Timbre::Click, 1, 8, 90},
 };
 
 constexpr Note kConfirm[] = {
-    {880, 80, 80},
-    {1320, 140, 80},
+    {1046, 90, 58, Timbre::Bell, 5, 30, 55},
+    {1568, 220, 52, Timbre::Bell, 5, 60, 70},
 };
 
 constexpr Note kError[] = {
-    {220, 140, 80},
-    {180, 180, 80},
+    {196, 130, 58, Timbre::Triangle, 8, 30, 25},
+    {147, 240, 58, Timbre::Triangle, 8, 60, 40},
+};
+
+constexpr Note kMenuOpen[] = {
+    {440, 80, 42, Timbre::Triangle, 4, 20, 20},
+    {660, 140, 40, Timbre::Bell, 6, 40, 45},
+};
+
+constexpr Note kSwipe[] = {
+    {1200, 70, 28, Timbre::Swish, 4, 30, 70},
 };
 
 constexpr Note kWake[] = {
-    {880, 120, 75},
-    {1320, 220, 75},
+    {523, 140, 48, Timbre::Bell, 18, 40, 35},
+    {659, 140, 48, Timbre::Bell, 18, 40, 40},
+    {784, 160, 48, Timbre::Bell, 18, 45, 45},
+    {1046, 360, 45, Timbre::Bell, 20, 80, 55},
 };
 
 constexpr Note kSleep[] = {
-    {1320, 110, 70},
-    {880, 220, 70},
+    {784, 180, 48, Timbre::Bell, 10, 50, 40},
+    {659, 220, 46, Timbre::Bell, 10, 60, 45},
+    {523, 420, 44, Timbre::Bell, 12, 120, 55},
 };
 
 constexpr Note kTestTone[] = {
-    {1000, 1000, 80},
+    {1000, 1000, 80, Timbre::Sine, 5, 20, 0},
 };
 
 constexpr Note kChime[] = {
-    {880, 180, 52},
-    {1108, 180, 50},
-    {1320, 260, 46},
-    {1760, 420, 40},
+    {523, 340, 48, Timbre::Bell, 10, 80, 40},
+    {659, 340, 46, Timbre::Bell, 10, 80, 42},
+    {784, 380, 44, Timbre::Bell, 10, 90, 45},
+    {1046, 520, 42, Timbre::Bell, 10, 120, 50},
 };
 
 constexpr Note kTimerDone[] = {
-    {1046, 140, 52},
-    {1318, 140, 52},
-    {1568, 320, 48},
+    {1318, 150, 55, Timbre::Triangle, 3, 20, 20},
+    {1568, 150, 55, Timbre::Triangle, 3, 20, 20},
+    {2093, 300, 50, Timbre::Bell, 5, 50, 55},
+    {0, 140, 0, Timbre::Sine, 0, 0, 0},
+    {1318, 150, 55, Timbre::Triangle, 3, 20, 20},
+    {1568, 150, 55, Timbre::Triangle, 3, 20, 20},
+    {2093, 360, 50, Timbre::Bell, 5, 50, 55},
 };
 
 constexpr Note kAlarmChime[] = {
-    {880, 220, 55},
-    {0, 80, 0},
-    {1108, 220, 55},
-    {0, 80, 0},
-    {1320, 220, 55},
-    {0, 600, 0},
-    {1046, 220, 52},
-    {0, 80, 0},
-    {1318, 220, 52},
-    {0, 80, 0},
-    {1568, 500, 48},
-    {0, 900, 0},
+    {880, 260, 58, Timbre::Bell, 5, 60, 50},
+    {0, 80, 0, Timbre::Sine, 0, 0, 0},
+    {880, 200, 45, Timbre::Bell, 5, 40, 60},
+    {0, 450, 0, Timbre::Sine, 0, 0, 0},
+    {1108, 260, 58, Timbre::Bell, 5, 60, 50},
+    {0, 80, 0, Timbre::Sine, 0, 0, 0},
+    {1108, 200, 45, Timbre::Bell, 5, 40, 60},
+    {0, 450, 0, Timbre::Sine, 0, 0, 0},
+    {1320, 300, 58, Timbre::Bell, 5, 60, 50},
+    {0, 80, 0, Timbre::Sine, 0, 0, 0},
+    {1320, 220, 45, Timbre::Bell, 5, 40, 60},
+    {0, 850, 0, Timbre::Sine, 0, 0, 0},
 };
 
 constexpr Note kAlarmBeep[] = {
-    {1000, 180, 58},
-    {0, 120, 0},
-    {1000, 180, 58},
-    {0, 800, 0},
+    {1800, 90, 65, Timbre::Square, 2, 10, 0},
+    {0, 90, 0, Timbre::Sine, 0, 0, 0},
+    {1800, 90, 65, Timbre::Square, 2, 10, 0},
+    {0, 90, 0, Timbre::Sine, 0, 0, 0},
+    {1800, 90, 65, Timbre::Square, 2, 10, 0},
+    {0, 700, 0, Timbre::Sine, 0, 0, 0},
 };
 
 constexpr Note kAlarmMelody[] = {
-    {659, 180, 48},
-    {784, 180, 48},
-    {988, 180, 48},
-    {1318, 360, 52},
-    {0, 200, 0},
-    {1175, 180, 48},
-    {988, 180, 48},
-    {784, 360, 48},
-    {0, 800, 0},
+    {523, 180, 50, Timbre::Bell, 5, 40, 45},
+    {659, 180, 50, Timbre::Bell, 5, 40, 45},
+    {784, 180, 50, Timbre::Bell, 5, 40, 45},
+    {1046, 380, 52, Timbre::Bell, 5, 60, 55},
+    {0, 200, 0, Timbre::Sine, 0, 0, 0},
+    {880, 200, 48, Timbre::Bell, 5, 40, 50},
+    {784, 200, 48, Timbre::Bell, 5, 40, 50},
+    {659, 380, 48, Timbre::Bell, 5, 60, 55},
+    {0, 700, 0, Timbre::Sine, 0, 0, 0},
 };
 
 enum class CommandType : uint8_t {
@@ -251,33 +282,80 @@ bool write_silence(uint32_t frames)
 }
 
 void fill_note(size_t frames,
-               uint16_t frequency,
+               const Note &note,
                uint32_t note_frame,
                uint32_t note_frames,
-               uint8_t level,
                float ramp_gain,
                uint32_t &phase,
                uint32_t phase_step)
 {
-    const float base = (float)level / 100.0f;
+    const float base = (float)note.level / 100.0f;
+    const uint32_t attack_frames =
+        std::max<uint32_t>(1, (uint32_t)note.attack_ms * s_sample_rate / 1000U);
+    const uint32_t release_frames =
+        std::max<uint32_t>(1, (uint32_t)note.release_ms * s_sample_rate / 1000U);
+    const float duration_s =
+        std::max(0.001f, (float)note_frames / (float)s_sample_rate);
+    const float decay_rate =
+        note.decay > 0 ? ((float)note.decay / 100.0f * 8.0f / duration_s) : 0.0f;
+
     for (size_t i = 0; i < frames; ++i) {
         const uint32_t frame = note_frame + (uint32_t)i;
         float envelope = 1.0f;
-        if (frame < kAttackFrames) {
-            envelope = (float)frame / (float)kAttackFrames;
+        if (frame < attack_frames) {
+            envelope = (float)frame / (float)attack_frames;
         }
         const uint32_t remaining = note_frames > frame ? note_frames - frame : 0;
-        if (remaining < kReleaseFrames) {
-            envelope = std::min(envelope, (float)remaining / (float)kReleaseFrames);
+        if (remaining < release_frames) {
+            envelope = std::min(envelope, (float)remaining / (float)release_frames);
+        }
+        if (decay_rate > 0.0f) {
+            envelope *= std::exp(-decay_rate * (float)frame / (float)s_sample_rate);
         }
 
         float sample = 0.0f;
-        if (frequency != 0) {
+        if (note.frequency != 0) {
             const float phase_radians =
                 (float)((double)phase * 2.0 * M_PI / 4294967296.0);
-            sample = std::sin(phase_radians) * base * envelope * ramp_gain;
+            const float sine = std::sin(phase_radians);
+            switch (note.timbre) {
+            case Timbre::Bell:
+                sample = (sine +
+                          0.35f * std::sin(phase_radians * 2.0f) +
+                          0.16f * std::sin(phase_radians * 3.0f) +
+                          0.18f * std::sin(phase_radians * 1.003f)) /
+                         1.69f;
+                break;
+            case Timbre::Triangle:
+                sample = (2.0f / (float)M_PI) * std::asin(std::max(-1.0f, std::min(1.0f, sine)));
+                break;
+            case Timbre::Square:
+                sample = std::tanh(2.2f * sine);
+                break;
+            case Timbre::Click: {
+                const float noise =
+                    ((int32_t)(esp_random() & 0xFFFFU) - 32768) / 32768.0f;
+                const float transient =
+                    noise * std::exp(-(float)frame / (float)(s_sample_rate * 0.004f));
+                sample = sine * 0.55f + transient * 0.45f;
+                break;
+            }
+            case Timbre::Swish: {
+                const float noise =
+                    ((int32_t)(esp_random() & 0xFFFFU) - 32768) / 32768.0f;
+                sample = noise * 0.9f;
+                break;
+            }
+            case Timbre::Sine:
+            default:
+                sample = sine;
+                break;
+            }
+            sample *= base * envelope * ramp_gain;
             phase += phase_step;
         }
+
+        sample = std::max(-1.0f, std::min(1.0f, sample));
         s_samples[i] = (int16_t)std::lround(sample * 32767.0f * 0.8f);
     }
 }
@@ -339,10 +417,9 @@ bool play_notes(const Note *notes,
                     ramp_gain = 0.2f + 0.8f * progress;
                 }
                 fill_note(chunk,
-                          note.frequency,
+                          note,
                           done,
                           frames,
-                          note.level,
                           ramp_gain,
                           phase,
                           phase_step);
@@ -499,6 +576,16 @@ void audio_task(void *arg)
                 play_notes(kConfirm, sizeof(kConfirm) / sizeof(kConfirm[0]), false, false);
             } else if (command.sound == AUDIO_SOUND_ERROR) {
                 play_notes(kError, sizeof(kError) / sizeof(kError[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_SWIPE) {
+                play_notes(kSwipe, sizeof(kSwipe) / sizeof(kSwipe[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_MENU_OPEN) {
+                play_notes(kMenuOpen, sizeof(kMenuOpen) / sizeof(kMenuOpen[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_ALARM_CHIME) {
+                play_notes(kAlarmChime, sizeof(kAlarmChime) / sizeof(kAlarmChime[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_ALARM_BEEP) {
+                play_notes(kAlarmBeep, sizeof(kAlarmBeep) / sizeof(kAlarmBeep[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_ALARM_MELODY) {
+                play_notes(kAlarmMelody, sizeof(kAlarmMelody) / sizeof(kAlarmMelody[0]), false, false);
             } else if (command.sound == AUDIO_SOUND_CHIME) {
                 play_notes(kChime, sizeof(kChime) / sizeof(kChime[0]), false, false);
             } else {

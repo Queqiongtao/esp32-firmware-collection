@@ -113,7 +113,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 2. Power：可点击的电池卡片显示百分比、电压和充电/放电状态；点击进入 Battery 详情弹层，查看大号电量、USB 状态和充电配置。E-Gauge 无效时百分比带 `~` 前缀，详情页显示 `Estimated | 4.2 V / 400 mA`。下方保留息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
 4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮和两行状态信息。连接后状态行显示 SSID，详情行显示 IP、RSSI 和 NTP 状态；失败时详情行显示 Network not found、Wrong password 等原因。
-5. Sound：总开关、音量、Test 试听、UI 音效、整点报时，以及 Alarms/Timer/Sleep 三个弹层。Alarms 支持 3 个闹钟、星期重复、声音选择和 Snooze/Stop；Timer 支持 5/15/25/45 分钟和 Pomodoro 25/5；Sleep 支持 White/Brown 与 15/30/60 分钟，仅 USB 供电可用。
+5. Sound：总开关、音量、Audio test 试听弹层、UI 音效、整点报时，以及 Alarms/Timer/Sleep 三个弹层。Alarms 支持 3 个闹钟、星期重复、声音选择和 Snooze/Stop；Timer 支持 5/15/25/45 分钟和 Pomodoro 25/5；Sleep 支持 White/Brown 与 15/30/60 分钟，仅 USB 供电可用。
    - 点击 Setup 打开配网摘要页，显示 WiFi Name 和 Password 两个大条目，并提供 Scan networks 按钮扫描附近 AP；点选 SSID 后直接进入密码编辑，隐藏网络仍可手动输入。
    - 单字段编辑页使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
    - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back 都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。

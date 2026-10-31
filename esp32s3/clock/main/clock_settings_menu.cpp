@@ -136,6 +136,7 @@ static lv_obj_t *s_timer_status = nullptr;
 static lv_obj_t *s_timer_start_button = nullptr;
 static lv_obj_t *s_timer_pause_button = nullptr;
 static lv_obj_t *s_sleep_overlay = nullptr;
+static lv_obj_t *s_audio_test_overlay = nullptr;
 static lv_obj_t *s_sleep_type_buttons[2] = {};
 static lv_obj_t *s_sleep_duration_buttons[3] = {};
 static lv_obj_t *s_sleep_status = nullptr;
@@ -242,6 +243,7 @@ static void reset_sound_pointers(void)
     s_timer_start_button = nullptr;
     s_timer_pause_button = nullptr;
     s_sleep_overlay = nullptr;
+    s_audio_test_overlay = nullptr;
     for (size_t i = 0; i < 2; ++i) {
         s_sleep_type_buttons[i] = nullptr;
     }
@@ -539,7 +541,7 @@ static void on_wheel_scroll_end(lv_event_t *event)
         s_suppress_scroll_sound_until_ms = 0;
     } else {
         s_suppress_scroll_sound_until_ms = 0;
-        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_SWIPE);
     }
     lv_obj_t *wheel = static_cast<lv_obj_t *>(lv_event_get_target(event));
     int32_t active_index = (lv_obj_get_scroll_y(wheel) + MENU_PAGE_STRIDE / 2) / MENU_PAGE_STRIDE;
@@ -1884,6 +1886,53 @@ static void open_sleep_overlay(void)
     notify_activity();
 }
 
+
+static void on_audio_test_item_clicked(lv_event_t *event)
+{
+    notify_activity();
+    const uint8_t sound = (uint8_t)(uintptr_t)lv_event_get_user_data(event);
+    if (s_config.test_sound_cb != nullptr) {
+        s_config.test_sound_cb(sound, s_config.user_ctx);
+    }
+}
+
+static void on_audio_test_close(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+    if (s_audio_test_overlay != nullptr) {
+        lv_obj_delete(s_audio_test_overlay);
+    }
+    s_audio_test_overlay = nullptr;
+}
+
+static void open_audio_test_overlay(void)
+{
+    if (s_audio_test_overlay != nullptr) {
+        return;
+    }
+    s_audio_test_overlay = make_sound_overlay_shell("Audio test");
+
+    static const char *const labels[] = {
+        "Click", "Confirm", "Error", "Wake", "Sleep", "Chime",
+        "Timer", "Alarm bell", "Alarm beep", "Alarm tune", "1 kHz",
+    };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+        lv_obj_t *button = make_action_button(s_audio_test_overlay, labels[i], 138);
+        lv_obj_set_height(button, 36);
+        lv_obj_align(button,
+                     LV_ALIGN_TOP_MID,
+                     (i % 2 == 0) ? -78 : 78,
+                     56 + (int32_t)(i / 2) * 40);
+        lv_obj_add_event_cb(button, on_audio_test_item_clicked, LV_EVENT_CLICKED,
+                            (void *)(uintptr_t)i);
+    }
+
+    make_close_overlay_button(s_audio_test_overlay, on_audio_test_close);
+    notify_activity();
+}
+
 static void on_sound_master_changed(lv_event_t *event)
 {
     notify_activity();
@@ -1916,7 +1965,7 @@ static void on_sound_volume_released(lv_event_t *event)
     notify_activity();
     play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM);
     if (s_config.test_sound_cb != nullptr) {
-        s_config.test_sound_cb(0, s_config.user_ctx);
+        s_config.test_sound_cb(CLOCK_SETTINGS_MENU_TEST_CONFIRM, s_config.user_ctx);
     }
 }
 
@@ -1924,9 +1973,7 @@ static void on_test_sound_clicked(lv_event_t *event)
 {
     (void)event;
     notify_activity();
-    if (s_config.test_sound_cb != nullptr) {
-        s_config.test_sound_cb(1, s_config.user_ctx);
-    }
+    open_audio_test_overlay();
 }
 
 static void on_ui_sounds_changed(lv_event_t *event)
@@ -3120,7 +3167,8 @@ bool clock_settings_menu_is_setup_open(void)
            s_alarm_list_overlay != nullptr ||
            s_alarm_edit_overlay != nullptr ||
            s_timer_overlay != nullptr ||
-           s_sleep_overlay != nullptr;
+           s_sleep_overlay != nullptr ||
+           s_audio_test_overlay != nullptr;
 }
 
 bool clock_settings_menu_is_power_detail_open(void)
@@ -3153,6 +3201,11 @@ void clock_settings_menu_open_timer(void)
 void clock_settings_menu_open_sleep(void)
 {
     open_sleep_overlay();
+}
+
+void clock_settings_menu_open_audio_test(void)
+{
+    open_audio_test_overlay();
 }
 
 void clock_settings_menu_close_async(clock_settings_menu_close_done_cb_t done_cb, void *user_ctx)

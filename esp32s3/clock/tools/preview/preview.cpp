@@ -215,6 +215,7 @@ void render_menu(const std::filesystem::path &out_dir)
         {"sound", 4, false, -1, false, false, false, 0},
         {"alarm_list", 4, false, -1, false, false, false, 1},
         {"alarm_edit", 4, false, -1, false, false, false, 4},
+        {"audio_test", 4, false, -1, false, false, false, 5},
         {"timer", 4, false, -1, false, false, false, 2},
         {"sleep_noise", 4, false, -1, false, false, false, 3},
     };
@@ -269,6 +270,8 @@ void render_menu(const std::filesystem::path &out_dir)
             clock_settings_menu_open_alarm_list();
         } else if (page.sound_overlay == 4) {
             clock_settings_menu_open_alarm_editor(0);
+        } else if (page.sound_overlay == 5) {
+            clock_settings_menu_open_audio_test();
         } else if (page.sound_overlay == 2) {
             clock_settings_menu_update_timer_status(true, false, false, false, 23 * 60 + 45);
             clock_settings_menu_open_timer();
