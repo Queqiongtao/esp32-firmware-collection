@@ -153,6 +153,7 @@ static uint32_t s_sleep_minutes_selected = 15;
 static bool s_sleep_status_playing = false;
 static bool s_sleep_status_usb = false;
 static uint8_t s_wifi_keyboard_layer = 0;
+static uint32_t s_suppress_scroll_sound_until_ms = 0;
 static bool s_updating_wifi_ui = false;
 static bool s_wifi_has_credentials = false;
 static bool s_wifi_connected = false;
@@ -253,6 +254,7 @@ static void reset_sound_pointers(void)
 static void reset_menu_widget_pointers(void)
 {
     reset_sound_pointers();
+    s_suppress_scroll_sound_until_ms = 0;
     s_menu_content = nullptr;
     s_menu_wheel = nullptr;
     s_brightness_value = nullptr;
@@ -513,11 +515,17 @@ static void scroll_to_page(lv_obj_t *wheel, uint32_t active_index, lv_anim_enabl
 static void on_page_tab_clicked(lv_event_t *event)
 {
     notify_activity();
-    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
     const uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
     if (index >= MENU_PAGE_COUNT || s_menu_wheel == nullptr) {
         return;
     }
+
+    const int32_t current_index =
+        (lv_obj_get_scroll_y(s_menu_wheel) + MENU_PAGE_STRIDE / 2) / MENU_PAGE_STRIDE;
+    if (index != (uintptr_t)current_index) {
+        s_suppress_scroll_sound_until_ms = lv_tick_get() + 600;
+    }
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
     set_wheel_scroll_enabled(true);
     scroll_to_page(s_menu_wheel, (uint32_t)index, LV_ANIM_ON);
 }
@@ -525,6 +533,14 @@ static void on_page_tab_clicked(lv_event_t *event)
 static void on_wheel_scroll_end(lv_event_t *event)
 {
     notify_activity();
+    const uint32_t now_ms = lv_tick_get();
+    if (s_suppress_scroll_sound_until_ms != 0 &&
+        (int32_t)(s_suppress_scroll_sound_until_ms - now_ms) > 0) {
+        s_suppress_scroll_sound_until_ms = 0;
+    } else {
+        s_suppress_scroll_sound_until_ms = 0;
+        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+    }
     lv_obj_t *wheel = static_cast<lv_obj_t *>(lv_event_get_target(event));
     int32_t active_index = (lv_obj_get_scroll_y(wheel) + MENU_PAGE_STRIDE / 2) / MENU_PAGE_STRIDE;
     if (active_index < 0) {
@@ -895,6 +911,8 @@ static void on_wifi_keyboard_value_changed(lv_event_t *event)
         return;
     }
 
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+
     if (strcmp(text, "Aa") == 0) {
         s_wifi_keyboard_layer =
             s_wifi_keyboard_layer == WIFI_KB_LAYER_UPPER ? WIFI_KB_LAYER_LOWER
@@ -1099,6 +1117,7 @@ static void show_wifi_scan(void)
 
 static void on_wifi_scan_row_clicked(lv_event_t *event)
 {
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
     const uintptr_t index = (uintptr_t)lv_event_get_user_data(event);
     if (index >= 8 || s_wifi_scan_ssids[index][0] == '\0') {
         return;
@@ -1901,16 +1920,25 @@ static void on_sound_volume_released(lv_event_t *event)
     }
 }
 
+static void on_test_sound_clicked(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    if (s_config.test_sound_cb != nullptr) {
+        s_config.test_sound_cb(1, s_config.user_ctx);
+    }
+}
+
 static void on_ui_sounds_changed(lv_event_t *event)
 {
     notify_activity();
     lv_obj_t *sw = static_cast<lv_obj_t *>(lv_event_get_target(event));
     const bool enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
-    if (enabled) {
-        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
-    }
     if (s_config.ui_sounds_cb != nullptr) {
         s_config.ui_sounds_cb(enabled, s_config.user_ctx);
+    }
+    if (enabled) {
+        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
     }
 }
 
@@ -1967,6 +1995,7 @@ static void on_wifi_edit_done(lv_event_t *event)
                   sizeof(s_wifi_ssid_buffer),
                   lv_textarea_get_text(s_wifi_input));
         if (s_wifi_ssid_buffer[0] == '\0') {
+            play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_ERROR);
             set_wifi_setup_status("Enter WiFi name", true);
             return;
         }
@@ -1977,6 +2006,7 @@ static void on_wifi_edit_done(lv_event_t *event)
         s_wifi_password_touched = true;
     }
 
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM);
     show_wifi_summary();
 }
 
@@ -1996,6 +2026,7 @@ static void on_wifi_setup_connect(lv_event_t *event)
         copy_text(s_wifi_ssid_buffer, sizeof(s_wifi_ssid_buffer), s_wifi_saved_ssid);
     }
     if (s_wifi_ssid_buffer[0] == '\0') {
+        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_ERROR);
         set_wifi_setup_status("Enter WiFi name", true);
         return;
     }
@@ -2007,9 +2038,11 @@ static void on_wifi_setup_connect(lv_event_t *event)
         accepted = s_config.wifi_setup_cb(s_wifi_ssid_buffer, password, s_config.user_ctx);
     }
     if (!accepted) {
+        play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_ERROR);
         set_wifi_setup_status("Could not save WiFi settings", true);
         return;
     }
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM);
 
     copy_text(s_wifi_saved_ssid, sizeof(s_wifi_saved_ssid), s_wifi_ssid_buffer);
     s_wifi_has_credentials = true;
@@ -2665,6 +2698,10 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     snprintf(volume_text, sizeof(volume_text), "%u%%",
              (unsigned)config->settings->sound_volume);
     set_label_text_if_changed(s_sound_volume_value, volume_text);
+
+    lv_obj_t *test_sound = make_action_button(volume_row, "Test", 54);
+    lv_obj_set_height(test_sound, 30);
+    lv_obj_add_event_cb(test_sound, on_test_sound_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *ui_sound_row = make_switch_row(sound_page, "UI sounds", &s_ui_sounds_switch);
     lv_obj_set_style_margin_top(ui_sound_row, 4, 0);

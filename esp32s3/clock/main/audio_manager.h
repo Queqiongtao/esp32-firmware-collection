@@ -14,6 +14,9 @@ typedef enum {
     AUDIO_SOUND_ALARM_CHIME,
     AUDIO_SOUND_ALARM_BEEP,
     AUDIO_SOUND_ALARM_MELODY,
+    AUDIO_SOUND_WAKE,
+    AUDIO_SOUND_SLEEP,
+    AUDIO_SOUND_TEST,
 } audio_manager_sound_t;
 
 esp_err_t audio_manager_init(void);

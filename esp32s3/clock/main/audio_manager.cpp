@@ -31,17 +31,31 @@ struct Note {
 };
 
 constexpr Note kClick[] = {
-    {1400, 24, 60},
+    {1400, 80, 85},
 };
 
 constexpr Note kConfirm[] = {
-    {880, 60, 58},
-    {1320, 90, 58},
+    {880, 80, 80},
+    {1320, 140, 80},
 };
 
 constexpr Note kError[] = {
-    {220, 110, 62},
-    {180, 150, 62},
+    {220, 140, 80},
+    {180, 180, 80},
+};
+
+constexpr Note kWake[] = {
+    {880, 120, 75},
+    {1320, 220, 75},
+};
+
+constexpr Note kSleep[] = {
+    {1320, 110, 70},
+    {880, 220, 70},
+};
+
+constexpr Note kTestTone[] = {
+    {1000, 1000, 80},
 };
 
 constexpr Note kChime[] = {
@@ -117,6 +131,7 @@ volatile bool s_volume_dirty = false;
 volatile bool s_playing = false;
 volatile bool s_noise_playing = false;
 volatile bool s_stop_requested = false;
+volatile uint8_t s_active_volume = 0;
 bool s_codec_open = false;
 bool s_active_alarm = false;
 Command s_pending = {};
@@ -174,7 +189,10 @@ bool write_samples(size_t frames)
     }
 
     if (s_volume_dirty) {
-        const int volume = s_active_alarm ? std::max<int>(s_volume, kAlarmMinVolume) : s_volume;
+        const int volume = s_active_volume != 0
+                               ? s_active_volume
+                               : (s_active_alarm ? std::max<int>(s_volume, kAlarmMinVolume)
+                                                 : s_volume);
         esp_codec_dev_set_out_vol(s_codec, clamp_volume(volume));
         s_volume_dirty = false;
     }
@@ -219,6 +237,19 @@ void fill_silence(size_t frames)
     std::memset(s_samples, 0, frames * sizeof(int16_t));
 }
 
+bool write_silence(uint32_t frames)
+{
+    while (frames > 0) {
+        const size_t chunk = std::min<size_t>(kFramesPerChunk, frames);
+        fill_silence(chunk);
+        if (!write_samples(chunk)) {
+            return false;
+        }
+        frames -= (uint32_t)chunk;
+    }
+    return true;
+}
+
 void fill_note(size_t frames,
                uint16_t frequency,
                uint32_t note_frame,
@@ -251,17 +282,37 @@ void fill_note(size_t frames,
     }
 }
 
-bool play_notes(const Note *notes, size_t count, bool loop, bool alarm)
+bool play_notes(const Note *notes,
+                size_t count,
+                bool loop,
+                bool alarm,
+                uint8_t volume_override = 0)
 {
-    const int codec_volume = alarm ? std::max<int>(s_volume, kAlarmMinVolume) : s_volume;
+    const bool was_open = s_codec_open;
+    const int codec_volume = volume_override != 0
+                                 ? volume_override
+                                 : (alarm ? std::max<int>(s_volume, kAlarmMinVolume) : s_volume);
     if (!ensure_codec(codec_volume)) {
         return false;
     }
 
     s_active_alarm = alarm;
+    s_active_volume = volume_override;
     s_volume_dirty = true;
     s_playing = true;
     s_noise_playing = false;
+    ESP_LOGI(TAG,
+             "play notes: count=%u loop=%d alarm=%d volume=%u",
+             (unsigned)count,
+             loop ? 1 : 0,
+             alarm ? 1 : 0,
+             (unsigned)codec_volume);
+
+    if (!was_open) {
+        if (!write_silence(frame_count(150))) {
+            return false;
+        }
+    }
 
     const uint64_t start_us = esp_timer_get_time();
     do {
@@ -324,14 +375,22 @@ bool play_notes(const Note *notes, size_t count, bool loop, bool alarm)
 
 bool play_noise(bool brown, uint32_t duration_ms)
 {
+    const bool was_open = s_codec_open;
     if (!ensure_codec(s_volume)) {
         return false;
     }
 
     s_active_alarm = false;
+    s_active_volume = 0;
     s_volume_dirty = true;
     s_playing = true;
     s_noise_playing = true;
+
+    if (!was_open) {
+        if (!write_silence(frame_count(150))) {
+            return false;
+        }
+    }
 
     if (duration_ms == 0) {
         duration_ms = 60000;
@@ -421,9 +480,20 @@ void audio_task(void *arg)
         }
 
         s_stop_requested = false;
+        ESP_LOGI(TAG, "command type=%u sound=%u", (unsigned)command.type, command.sound);
         switch (command.type) {
         case CommandType::Play:
-            if (command.sound == AUDIO_SOUND_CLICK) {
+            if (command.sound == AUDIO_SOUND_TEST) {
+                play_notes(kTestTone,
+                           sizeof(kTestTone) / sizeof(kTestTone[0]),
+                           false,
+                           false,
+                           80);
+            } else if (command.sound == AUDIO_SOUND_WAKE) {
+                play_notes(kWake, sizeof(kWake) / sizeof(kWake[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_SLEEP) {
+                play_notes(kSleep, sizeof(kSleep) / sizeof(kSleep[0]), false, false);
+            } else if (command.sound == AUDIO_SOUND_CLICK) {
                 play_notes(kClick, sizeof(kClick) / sizeof(kClick[0]), false, false);
             } else if (command.sound == AUDIO_SOUND_CONFIRM) {
                 play_notes(kConfirm, sizeof(kConfirm) / sizeof(kConfirm[0]), false, false);
@@ -461,6 +531,15 @@ void audio_task(void *arg)
         s_playing = false;
         s_noise_playing = false;
         s_active_alarm = false;
+        s_active_volume = 0;
+
+        // Keep the codec/PA open briefly so short UI sounds can finish in the
+        // I2S DMA buffer before the output is disabled.
+        if (xQueueReceive(s_queue, &command, pdMS_TO_TICKS(5000)) == pdTRUE) {
+            have_command = true;
+            continue;
+        }
+        ESP_LOGI(TAG, "codec idle close");
         close_codec();
     }
 }
