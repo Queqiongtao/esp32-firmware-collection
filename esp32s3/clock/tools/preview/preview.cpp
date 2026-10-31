@@ -36,7 +36,6 @@ const clock_theme_t *const kThemes[] = {
     &g_clock_theme_minimal,
     &g_clock_theme_segment,
     &g_clock_theme_analog,
-    &g_clock_theme_outline_analog,
     &g_clock_theme_m5_classic,
     &g_clock_theme_m5_simple,
     &g_clock_theme_m5_big_number,
@@ -199,19 +198,25 @@ void render_menu(const std::filesystem::path &out_dir)
         bool wifi_connected;
         bool wifi_scan;
         bool power_detail;
+        int sound_overlay;
     };
     static constexpr MenuPage kMenuPages[] = {
-        {"brightness", 0, false, -1, false, false, false},
-        {"sleep", 1, false, -1, false, false, false},
-        {"battery_detail", 1, false, -1, false, false, true},
-        {"motion_off", 2, false, -1, false, false, false},
-        {"motion_on", 2, true, -1, false, false, false},
-        {"wifi", 3, false, -1, false, false, false},
-        {"wifi_connected", 3, false, -1, true, false, false},
-        {"wifi_setup", 3, false, 0, false, false, false},
-        {"wifi_scan", 3, false, 0, false, true, false},
-        {"wifi_setup_ssid", 3, false, 1, false, false, false},
-        {"wifi_setup_password", 3, false, 2, false, false, false},
+        {"brightness", 0, false, -1, false, false, false, 0},
+        {"sleep", 1, false, -1, false, false, false, 0},
+        {"battery_detail", 1, false, -1, false, false, true, 0},
+        {"motion_off", 2, false, -1, false, false, false, 0},
+        {"motion_on", 2, true, -1, false, false, false, 0},
+        {"wifi", 3, false, -1, false, false, false, 0},
+        {"wifi_connected", 3, false, -1, true, false, false, 0},
+        {"wifi_setup", 3, false, 0, false, false, false, 0},
+        {"wifi_scan", 3, false, 0, false, true, false, 0},
+        {"wifi_setup_ssid", 3, false, 1, false, false, false, 0},
+        {"wifi_setup_password", 3, false, 2, false, false, false, 0},
+        {"sound", 4, false, -1, false, false, false, 0},
+        {"alarm_list", 4, false, -1, false, false, false, 1},
+        {"alarm_edit", 4, false, -1, false, false, false, 4},
+        {"timer", 4, false, -1, false, false, false, 2},
+        {"sleep_noise", 4, false, -1, false, false, false, 3},
     };
 
     for (const MenuPage &page : kMenuPages) {
@@ -226,6 +231,13 @@ void render_menu(const std::filesystem::path &out_dir)
         settings.wifi_enabled = false;
         settings.ntp_enabled = true;
         settings.theme_index = 0;
+        settings.sound_enabled = true;
+        settings.sound_volume = 30;
+        settings.ui_sounds = true;
+        settings.hourly_chime = false;
+        settings.alarms[0] = {true, 7, 30, 0x3E, 0};
+        settings.alarms[1] = {true, 9, 0, 0, 2};
+        settings.alarms[2] = {false, 22, 15, 0x41, 1};
 
         clock_settings_menu_config_t config = {};
         config.settings = &settings;
@@ -252,6 +264,17 @@ void render_menu(const std::filesystem::path &out_dir)
         }
         if (page.power_detail) {
             clock_settings_menu_open_power_detail();
+        }
+        if (page.sound_overlay == 1) {
+            clock_settings_menu_open_alarm_list();
+        } else if (page.sound_overlay == 4) {
+            clock_settings_menu_open_alarm_editor(0);
+        } else if (page.sound_overlay == 2) {
+            clock_settings_menu_update_timer_status(true, false, false, false, 23 * 60 + 45);
+            clock_settings_menu_open_timer();
+        } else if (page.sound_overlay == 3) {
+            clock_settings_menu_update_sleep_status(true, true);
+            clock_settings_menu_open_sleep();
         }
         if (page.wifi_connected) {
             clock_settings_menu_wifi_status_t status = {};

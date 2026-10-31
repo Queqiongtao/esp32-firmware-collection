@@ -29,7 +29,6 @@ add_executable(preview
     ${MAIN_DIR}/clock_theme_minimal.cpp
     ${MAIN_DIR}/clock_theme_segment.cpp
     ${MAIN_DIR}/clock_theme_analog.cpp
-    ${MAIN_DIR}/clock_theme_outline_analog.cpp
     ${MAIN_DIR}/clock_theme_m5_classic.cpp
     ${MAIN_DIR}/clock_theme_m5_simple.cpp
     ${MAIN_DIR}/clock_theme_m5_big_number.cpp

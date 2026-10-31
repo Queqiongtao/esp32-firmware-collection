@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include "audio_manager.h"
 #include "bsp/esp-bsp.h"
 #include "button_gpio.h"
 #include "clock_settings.h"
@@ -17,6 +18,7 @@
 #include "clock_touch_gesture.h"
 #include "clock_theme.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_io_expander.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -42,7 +44,6 @@ static const clock_theme_t *const s_themes[] = {
     &g_clock_theme_minimal,
     &g_clock_theme_segment,
     &g_clock_theme_analog,
-    &g_clock_theme_outline_analog,
     &g_clock_theme_m5_classic,
     &g_clock_theme_m5_simple,
     &g_clock_theme_m5_big_number,
@@ -164,6 +165,33 @@ static int s_brightness_fade_to = 0;
 static int s_brightness_current_percent = 0;
 static bool s_brightness_current_valid = false;
 
+enum class AlertKind : uint8_t {
+    None,
+    Alarm,
+    Timer,
+};
+
+static lv_timer_t *s_audio_event_timer = NULL;
+static lv_obj_t *s_alert_overlay = NULL;
+static AlertKind s_alert_kind = AlertKind::None;
+static uint64_t s_alert_started_ms = 0;
+static int s_alarm_active_index = -1;
+static int s_alarm_snooze_index = -1;
+static uint64_t s_alarm_snooze_until_ms = 0;
+static int s_last_alarm_minute_key = -1;
+static unsigned s_last_chime_hour = 100;
+static bool s_timer_running = false;
+static bool s_timer_paused = false;
+static bool s_timer_pomodoro = false;
+static bool s_timer_break = false;
+static uint32_t s_timer_total_ms = 0;
+static uint32_t s_timer_remaining_ms = 0;
+static uint64_t s_timer_end_ms = 0;
+static uint32_t s_timer_selected_minutes = 25;
+static bool s_sleep_noise_active = false;
+static uint64_t s_sleep_noise_end_ms = 0;
+static bool s_vbus_present = false;
+
 static void keep_touch_layer_foreground(void);
 static void close_settings_menu(void);
 static void close_settings_menu_immediately(void);
@@ -180,6 +208,14 @@ static void update_brightness_fade(lv_timer_t *timer);
 static void update_settings_menu_timeout(lv_timer_t *timer);
 static void update_network_status(lv_timer_t *timer);
 static void update_power_status(lv_timer_t *timer);
+static void update_audio_events(lv_timer_t *timer);
+static void show_alarm_overlay(void);
+static void show_timer_done_overlay(void);
+static void close_alert_overlay(void);
+static void trigger_alarm(int index);
+static void snooze_alarm(void);
+static void stop_alarm(void);
+static void stop_timer(void);
 static void cancel_theme_transition(void);
 static void apply_clock_rotation(float angle_deg);
 static void apply_auto_rotate_setting(bool enabled);
@@ -463,7 +499,9 @@ static void reset_current_theme(void);
 
 static void keep_touch_layer_foreground(void)
 {
-    if (s_settings_menu != NULL) {
+    if (s_alert_overlay != NULL) {
+        lv_obj_move_foreground(s_alert_overlay);
+    } else if (s_settings_menu != NULL) {
         clock_settings_menu_move_foreground();
     } else {
         clock_touch_gesture_move_foreground();
@@ -969,6 +1007,468 @@ static void on_menu_ntp_sync(void *user_ctx)
     s_ntp_manual_sync_until_ms = lv_tick_get() + 30000;
 }
 
+
+static void on_menu_sound_enabled(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.sound_enabled = enabled;
+    if (!enabled && s_alarm_active_index < 0) {
+        audio_manager_stop();
+        s_sleep_noise_active = false;
+        s_sleep_noise_end_ms = 0;
+    }
+    schedule_settings_save();
+    ESP_LOGI(TAG, "Sound is %s", enabled ? "on" : "off");
+}
+
+static void on_menu_volume(uint8_t volume, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.sound_volume = volume;
+    audio_manager_set_volume(volume);
+    schedule_settings_save();
+}
+
+static void on_menu_ui_sounds(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.ui_sounds = enabled;
+    schedule_settings_save();
+}
+
+static void on_menu_chime(bool enabled, void *user_ctx)
+{
+    (void)user_ctx;
+    s_settings.hourly_chime = enabled;
+    schedule_settings_save();
+}
+
+static void on_menu_test_sound(uint8_t sound, void *user_ctx)
+{
+    (void)sound;
+    (void)user_ctx;
+    if (s_settings.sound_enabled && !audio_manager_is_noise_playing()) {
+        audio_manager_play(AUDIO_SOUND_CONFIRM, false);
+    }
+}
+
+static void on_menu_alarm(uint8_t index, const clock_alarm_t *alarm, void *user_ctx)
+{
+    (void)user_ctx;
+    if (index >= CLOCK_ALARM_COUNT || alarm == nullptr) {
+        return;
+    }
+    s_settings.alarms[index] = *alarm;
+    schedule_settings_save();
+    ESP_LOGI(TAG,
+             "Alarm %u: %02u:%02u enabled=%d weekdays=0x%02x sound=%u",
+             (unsigned)(index + 1),
+             alarm->hour,
+             alarm->minute,
+             alarm->enabled ? 1 : 0,
+             alarm->weekdays,
+             alarm->sound);
+}
+
+static void on_menu_ui_sound(clock_settings_menu_ui_sound_t sound, void *user_ctx)
+{
+    (void)user_ctx;
+    if (!s_settings.sound_enabled || !s_settings.ui_sounds ||
+        s_alarm_active_index >= 0 || audio_manager_is_noise_playing()) {
+        return;
+    }
+    audio_manager_play((audio_manager_sound_t)sound, false);
+}
+
+static lv_obj_t *create_alert_shell(const char *title, const char *big_text, const char *detail)
+{
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, 466, 466);
+    lv_obj_center(overlay);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_radius(overlay, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, 0);
+
+    lv_obj_t *heading = lv_label_create(overlay);
+    lv_label_set_text(heading, title);
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(heading, lv_color_hex(0xF5F3FF), 0);
+    lv_obj_align(heading, LV_ALIGN_TOP_MID, 0, 32);
+
+    if (big_text != nullptr) {
+        lv_obj_t *big = lv_label_create(overlay);
+        lv_label_set_text(big, big_text);
+        lv_obj_set_style_text_font(big, &lv_font_montserrat_44, 0);
+        lv_obj_set_style_text_color(big, lv_color_hex(0xF5F3FF), 0);
+        lv_obj_align(big, LV_ALIGN_TOP_MID, 0, 92);
+    }
+
+    if (detail != nullptr) {
+        lv_obj_t *detail_label = lv_label_create(overlay);
+        lv_label_set_text(detail_label, detail);
+        lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(detail_label, lv_color_hex(0x8B86A3), 0);
+        lv_obj_align(detail_label, LV_ALIGN_TOP_MID, 0, 168);
+    }
+
+    s_alert_overlay = overlay;
+    lv_obj_move_foreground(overlay);
+    return overlay;
+}
+
+static lv_obj_t *create_alert_button(lv_obj_t *overlay,
+                                     const char *text,
+                                     int32_t x,
+                                     int32_t y,
+                                     lv_event_cb_t callback)
+{
+    lv_obj_t *button = lv_button_create(overlay);
+    lv_obj_set_size(button, 160, 48);
+    lv_obj_align(button, LV_ALIGN_TOP_MID, x, y);
+    lv_obj_set_style_radius(button, 24, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x241B3A), 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x2E2348), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(button, 1, 0);
+    lv_obj_set_style_border_color(button, lv_color_hex(0x5EEAD4), 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *label = lv_label_create(button);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x5EEAD4), 0);
+    lv_obj_center(label);
+    return button;
+}
+
+static void close_alert_overlay(void)
+{
+    if (s_alert_overlay != nullptr) {
+        lv_obj_delete(s_alert_overlay);
+    }
+    s_alert_overlay = nullptr;
+    s_alert_kind = AlertKind::None;
+    clock_touch_gesture_set_enabled(true);
+    keep_touch_layer_foreground();
+}
+
+static void show_alarm_overlay(void)
+{
+    if (s_alarm_active_index < 0 || s_alarm_active_index >= CLOCK_ALARM_COUNT) {
+        return;
+    }
+    if (s_alert_overlay != nullptr) {
+        close_alert_overlay();
+    }
+    wake_screen_if_sleeping();
+    if (s_settings_menu != nullptr) {
+        close_settings_menu_immediately();
+    }
+
+    char time_text[16] = {};
+    const clock_alarm_t &alarm = s_settings.alarms[s_alarm_active_index];
+    snprintf(time_text, sizeof(time_text), "%02u:%02u", alarm.hour, alarm.minute);
+    char detail[32] = {};
+    snprintf(detail, sizeof(detail), "Alarm %u", (unsigned)(s_alarm_active_index + 1));
+    create_alert_shell("ALARM", time_text, detail);
+    create_alert_button(s_alert_overlay, "Snooze 5m", -86, 250,
+                        [](lv_event_t *event) {
+                            (void)event;
+                            snooze_alarm();
+                        });
+    create_alert_button(s_alert_overlay, "Stop", 86, 250,
+                        [](lv_event_t *event) {
+                            (void)event;
+                            stop_alarm();
+                        });
+    s_alert_kind = AlertKind::Alarm;
+    s_alert_started_ms = esp_timer_get_time() / 1000;
+    clock_touch_gesture_set_enabled(false);
+    lv_obj_move_foreground(s_alert_overlay);
+}
+
+static void show_timer_done_overlay(void)
+{
+    if (s_alarm_active_index >= 0) {
+        return;
+    }
+    if (s_alert_overlay != nullptr) {
+        close_alert_overlay();
+    }
+    wake_screen_if_sleeping();
+    if (s_settings_menu != nullptr) {
+        close_settings_menu_immediately();
+    }
+    create_alert_shell("TIMER", "00:00", "Time is up");
+    create_alert_button(s_alert_overlay, "OK", 0, 250,
+                        [](lv_event_t *event) {
+                            (void)event;
+                            close_alert_overlay();
+                            note_user_activity();
+                        });
+    s_alert_kind = AlertKind::Timer;
+    s_alert_started_ms = esp_timer_get_time() / 1000;
+    clock_touch_gesture_set_enabled(false);
+    lv_obj_move_foreground(s_alert_overlay);
+}
+
+static void trigger_alarm(int index)
+{
+    if (index < 0 || index >= CLOCK_ALARM_COUNT) {
+        return;
+    }
+    s_alarm_active_index = index;
+    s_alarm_snooze_index = -1;
+    s_alarm_snooze_until_ms = 0;
+    show_alarm_overlay();
+    // The master sound switch controls UI/chime/timer/noise. Alarms keep
+    // their own ring path so a muted UI does not silently skip an alarm.
+    audio_manager_play_alarm(s_settings.alarms[index].sound);
+    ESP_LOGI(TAG, "Alarm %d triggered", index + 1);
+}
+
+static void snooze_alarm(void)
+{
+    if (s_alarm_active_index < 0) {
+        return;
+    }
+    s_alarm_snooze_index = s_alarm_active_index;
+    s_alarm_snooze_until_ms = esp_timer_get_time() / 1000 + 5ULL * 60ULL * 1000ULL;
+    s_alarm_active_index = -1;
+    audio_manager_stop();
+    close_alert_overlay();
+    note_user_activity();
+    ESP_LOGI(TAG, "Alarm snoozed for 5 minutes");
+}
+
+static void stop_alarm(void)
+{
+    if (s_alarm_active_index >= 0) {
+        const int index = s_alarm_active_index;
+        if (s_settings.alarms[index].weekdays == 0) {
+            s_settings.alarms[index].enabled = false;
+            schedule_settings_save();
+        }
+    }
+    s_alarm_active_index = -1;
+    s_alarm_snooze_index = -1;
+    s_alarm_snooze_until_ms = 0;
+    audio_manager_stop();
+    close_alert_overlay();
+    note_user_activity();
+}
+
+static void stop_timer(void)
+{
+    s_timer_running = false;
+    s_timer_paused = false;
+    s_timer_remaining_ms = 0;
+    s_timer_end_ms = 0;
+    if (s_alert_kind == AlertKind::Timer) {
+        close_alert_overlay();
+    }
+    if (s_alarm_active_index < 0 && !s_sleep_noise_active) {
+        audio_manager_stop();
+    }
+    clock_settings_menu_update_timer_status(false, false, s_timer_pomodoro, false, 0);
+}
+
+static void on_menu_timer(clock_settings_menu_timer_action_t action,
+                          uint32_t minutes,
+                          bool pomodoro,
+                          void *user_ctx)
+{
+    (void)user_ctx;
+    const uint64_t now_ms = esp_timer_get_time() / 1000;
+    if (action == CLOCK_SETTINGS_MENU_TIMER_STOP) {
+        stop_timer();
+        return;
+    }
+    if (action == CLOCK_SETTINGS_MENU_TIMER_PAUSE) {
+        if (s_timer_running && !s_timer_paused) {
+            const uint64_t remaining = s_timer_end_ms > now_ms ? s_timer_end_ms - now_ms : 0;
+            s_timer_remaining_ms = (uint32_t)remaining;
+            s_timer_paused = true;
+        }
+        clock_settings_menu_update_timer_status(s_timer_running, s_timer_paused,
+                                                s_timer_pomodoro, s_timer_break,
+                                                (s_timer_remaining_ms + 999) / 1000);
+        return;
+    }
+
+    if (s_timer_paused && s_timer_remaining_ms > 0) {
+        s_timer_end_ms = now_ms + s_timer_remaining_ms;
+        s_timer_paused = false;
+        s_timer_running = true;
+    } else {
+        s_timer_selected_minutes = minutes;
+        s_timer_pomodoro = pomodoro;
+        s_timer_break = false;
+        s_timer_total_ms = (pomodoro ? 25U : minutes) * 60U * 1000U;
+        s_timer_remaining_ms = s_timer_total_ms;
+        s_timer_end_ms = now_ms + s_timer_total_ms;
+        s_timer_running = true;
+        s_timer_paused = false;
+    }
+    clock_settings_menu_update_timer_status(s_timer_running, s_timer_paused,
+                                            s_timer_pomodoro, s_timer_break,
+                                            (s_timer_remaining_ms + 999) / 1000);
+}
+
+static void on_menu_sleep_noise(bool brown, uint32_t minutes, bool start, void *user_ctx)
+{
+    (void)user_ctx;
+    if (!start) {
+        s_sleep_noise_active = false;
+        s_sleep_noise_end_ms = 0;
+        if (s_alarm_active_index < 0) {
+            audio_manager_stop();
+        }
+        clock_settings_menu_update_sleep_status(false, s_vbus_present);
+        return;
+    }
+
+    if (!s_settings.sound_enabled || !s_vbus_present) {
+        clock_settings_menu_update_sleep_status(false, s_vbus_present);
+        return;
+    }
+
+    const uint64_t now_ms = esp_timer_get_time() / 1000;
+    s_sleep_noise_active = true;
+    s_sleep_noise_end_ms = now_ms + (uint64_t)minutes * 60ULL * 1000ULL;
+    audio_manager_start_noise(brown, minutes * 60U * 1000U);
+    clock_settings_menu_update_sleep_status(true, s_vbus_present);
+}
+
+static void check_alarms(const struct tm &timeinfo)
+{
+    const uint64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (s_alarm_active_index >= 0) {
+        if ((uint32_t)(now_ms - s_alert_started_ms) >= 60000U) {
+            stop_alarm();
+        }
+        return;
+    }
+
+    if (s_alarm_snooze_index >= 0) {
+        if (now_ms >= s_alarm_snooze_until_ms) {
+            const int index = s_alarm_snooze_index;
+            s_alarm_snooze_index = -1;
+            s_alarm_snooze_until_ms = 0;
+            trigger_alarm(index);
+        }
+        return;
+    }
+
+    const int minute_key = timeinfo.tm_hour * 60 + timeinfo.tm_min;
+    if (s_last_alarm_minute_key == minute_key) {
+        return;
+    }
+
+    for (int i = 0; i < CLOCK_ALARM_COUNT; ++i) {
+        const clock_alarm_t &alarm = s_settings.alarms[i];
+        if (!alarm.enabled || alarm.hour != timeinfo.tm_hour || alarm.minute != timeinfo.tm_min) {
+            continue;
+        }
+        if (alarm.weekdays != 0 && (alarm.weekdays & (1U << timeinfo.tm_wday)) == 0) {
+            continue;
+        }
+        s_last_alarm_minute_key = minute_key;
+        trigger_alarm(i);
+        return;
+    }
+}
+
+static void update_timer_event(const struct tm &timeinfo)
+{
+    (void)timeinfo;
+    const uint64_t now_ms = esp_timer_get_time() / 1000;
+
+    if (s_timer_running && !s_timer_paused) {
+        if (now_ms >= s_timer_end_ms) {
+            if (s_timer_pomodoro) {
+                s_timer_break = !s_timer_break;
+                const uint32_t minutes = s_timer_break ? 5U : 25U;
+                s_timer_total_ms = minutes * 60U * 1000U;
+                s_timer_end_ms = now_ms + s_timer_total_ms;
+                s_timer_remaining_ms = s_timer_total_ms;
+                if (s_alarm_active_index < 0 && s_settings.sound_enabled) {
+                    audio_manager_play(AUDIO_SOUND_CHIME, false);
+                }
+            } else {
+                s_timer_running = false;
+                s_timer_paused = false;
+                s_timer_remaining_ms = 0;
+                s_timer_end_ms = 0;
+                if (s_alarm_active_index < 0) {
+                    if (s_settings.sound_enabled) {
+                        audio_manager_play(AUDIO_SOUND_TIMER_DONE, false);
+                    }
+                    show_timer_done_overlay();
+                }
+            }
+        } else {
+            s_timer_remaining_ms = (uint32_t)(s_timer_end_ms - now_ms);
+        }
+    }
+
+    clock_settings_menu_update_timer_status(s_timer_running,
+                                            s_timer_paused,
+                                            s_timer_pomodoro,
+                                            s_timer_break,
+                                            (s_timer_remaining_ms + 999U) / 1000U);
+}
+
+static void update_chime_event(const struct tm &timeinfo)
+{
+    if (!s_settings.sound_enabled || !s_settings.hourly_chime ||
+        s_alarm_active_index >= 0 || s_screen_sleeping) {
+        return;
+    }
+    if (timeinfo.tm_min != 0 || timeinfo.tm_sec >= 5) {
+        return;
+    }
+    if (timeinfo.tm_hour >= 22 || timeinfo.tm_hour < 8) {
+        s_last_chime_hour = (unsigned)timeinfo.tm_hour;
+        return;
+    }
+    if (s_last_chime_hour == (unsigned)timeinfo.tm_hour) {
+        return;
+    }
+    s_last_chime_hour = (unsigned)timeinfo.tm_hour;
+    audio_manager_play(AUDIO_SOUND_CHIME, false);
+}
+
+static void update_audio_events(lv_timer_t *timer)
+{
+    (void)timer;
+
+    time_t now = 0;
+    struct tm timeinfo = {};
+    time(&now);
+    localtime_r(&now, &timeinfo);
+
+    check_alarms(timeinfo);
+    update_timer_event(timeinfo);
+    update_chime_event(timeinfo);
+
+    const uint64_t now_ms = esp_timer_get_time() / 1000;
+    if (s_sleep_noise_active &&
+        (!s_vbus_present || now_ms >= s_sleep_noise_end_ms ||
+         !audio_manager_is_noise_playing())) {
+        s_sleep_noise_active = false;
+        s_sleep_noise_end_ms = 0;
+        if (s_alarm_active_index < 0) {
+            audio_manager_stop();
+        }
+    }
+    clock_settings_menu_update_sleep_status(s_sleep_noise_active, s_vbus_present);
+}
+
 static void on_menu_close(void *user_ctx)
 {
     (void)user_ctx;
@@ -999,6 +1499,15 @@ static void open_settings_menu(void)
         .wifi_scan_cb = on_menu_wifi_scan,
         .ntp_cb = on_menu_ntp,
         .ntp_sync_cb = on_menu_ntp_sync,
+        .sound_enabled_cb = on_menu_sound_enabled,
+        .volume_cb = on_menu_volume,
+        .ui_sounds_cb = on_menu_ui_sounds,
+        .chime_cb = on_menu_chime,
+        .test_sound_cb = on_menu_test_sound,
+        .alarm_cb = on_menu_alarm,
+        .timer_cb = on_menu_timer,
+        .sleep_noise_cb = on_menu_sleep_noise,
+        .ui_sound_cb = on_menu_ui_sound,
         .close_cb = on_menu_close,
         .activity_cb = on_menu_activity,
         .user_ctx = NULL,
@@ -1107,12 +1616,22 @@ static void update_power_status(lv_timer_t *timer)
     (void)timer;
 
     power_manager_update();
-    if (s_settings_menu == NULL) {
-        return;
-    }
 
     power_status_t power = {};
     power_manager_get_status(&power);
+    s_vbus_present = power.vbus_present;
+    if (s_sleep_noise_active && !s_vbus_present) {
+        s_sleep_noise_active = false;
+        s_sleep_noise_end_ms = 0;
+        if (s_alarm_active_index < 0) {
+            audio_manager_stop();
+        }
+        clock_settings_menu_update_sleep_status(false, false);
+    }
+
+    if (s_settings_menu == NULL) {
+        return;
+    }
 
     clock_settings_menu_power_status_t status = {};
     status.initialized = power.initialized;
@@ -1245,6 +1764,15 @@ static void process_pending_input_actions(void)
     s_menu_toggle_pending = false;
 
     if (pwr_single_click) {
+        if (s_alert_kind == AlertKind::Alarm) {
+            snooze_alarm();
+            return;
+        }
+        if (s_alert_kind == AlertKind::Timer) {
+            close_alert_overlay();
+            note_user_activity();
+            return;
+        }
         toggle_screen_sleep_from_pwr();
         return;
     }
@@ -1338,7 +1866,8 @@ static void update_auto_sleep(lv_timer_t *timer)
 {
     (void)timer;
 
-    if (s_screen_sleeping || s_settings.sleep_timeout_sec == 0 || s_last_activity_ms == 0) {
+    if (s_screen_sleeping || s_alert_overlay != NULL ||
+        s_settings.sleep_timeout_sec == 0 || s_last_activity_ms == 0) {
         return;
     }
 
@@ -1650,6 +2179,7 @@ static void create_clock_ui(void)
     lv_timer_create(update_settings_menu_timeout, 1000, NULL);
     s_wifi_status_timer = lv_timer_create(update_network_status, 500, NULL);
     s_power_status_timer = lv_timer_create(update_power_status, 2000, NULL);
+    s_audio_event_timer = lv_timer_create(update_audio_events, 1000, NULL);
     s_input_timer = lv_timer_create(update_inputs, CLOCK_INPUT_TIMER_MS, NULL);
 
     s_theme_transition_timer =
@@ -1792,6 +2322,23 @@ extern "C" void app_main(void)
     const esp_err_t power_err = power_manager_init();
     if (power_err != ESP_OK) {
         ESP_LOGW(TAG, "Power manager init failed: %s", esp_err_to_name(power_err));
+    }
+
+    const esp_err_t audio_err = audio_manager_init();
+    if (audio_err == ESP_OK) {
+        audio_manager_set_volume(s_settings.sound_volume);
+        const esp_err_t audio_prepare_err = audio_manager_prepare();
+        if (audio_prepare_err != ESP_OK) {
+            ESP_LOGW(TAG, "Audio codec prepare failed: %s", esp_err_to_name(audio_prepare_err));
+        }
+        ESP_LOGI(TAG,
+                 "audio ready: sound=%s volume=%u ui=%s chime=%s",
+                 s_settings.sound_enabled ? "on" : "off",
+                 (unsigned)s_settings.sound_volume,
+                 s_settings.ui_sounds ? "on" : "off",
+                 s_settings.hourly_chime ? "on" : "off");
+    } else {
+        ESP_LOGW(TAG, "Audio manager init failed: %s", esp_err_to_name(audio_err));
     }
 
     esp_err_t wifi_err = wifi_manager_init();

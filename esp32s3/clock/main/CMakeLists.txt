@@ -1,5 +1,6 @@
 set(MAIN_SRCS
     "main.cpp"
+    "audio_manager.cpp"
     "clock_settings.cpp"
     "clock_settings_menu.cpp"
     "clock_touch_gesture.cpp"
@@ -15,7 +16,6 @@ set(MAIN_SRCS
     "lv_font_seg_96.c"
     "lv_font_seg_36.c"
     "clock_theme_analog.cpp"
-    "clock_theme_outline_analog.cpp"
     "clock_theme_m5_classic.cpp"
     "clock_theme_m5_simple.cpp"
     "clock_theme_m5_big_number.cpp"

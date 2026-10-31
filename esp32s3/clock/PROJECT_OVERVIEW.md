@@ -13,7 +13,7 @@
 - 触摸屏左右滑动切换主题，长按打开设置菜单。
 - 当前主题索引通过 NVS 恢复，重启后保持上次主题。
 - 主题切换使用约 160 ms 的缩放淡出/淡入过渡；过渡期间的连续手势会累计步进。
-- 设置菜单默认亮度页，支持亮度、息屏、自动旋转、WiFi 配网和 NTP 自动对时；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭。
+- 设置菜单默认亮度页，支持亮度、息屏、自动旋转、WiFi 配网、NTP 自动对时、声音、闹钟、倒计时和睡眠白噪音；按 Done 关闭，菜单内 1 分钟无操作自动关闭，点内容外区域不再关闭，息屏时自动关闭。
 - WiFi 凭据可通过设置菜单的屏幕键盘输入，也可扫描附近 AP 后点选 SSID；凭据保存到 NVS，连接成功后自动启动 SNTP，对时结果写回 PCF85063。
 - 手动/自动息屏和亮屏使用约 200 ms 亮度渐变；用于唤醒的触摸/按键不会同时执行切换或菜单操作。
 - PCF85063 外部 RTC 同步系统时间。
@@ -26,7 +26,6 @@
   - `minimal`（黑曜石极简）
   - `segment`（琥珀仪表 / Amber Deck）
   - `analog`（机械计时）
-  - `outline_analog`（线框轨道）
   - `m5_classic`（经典机械）
   - `m5_simple`（薄荷珊瑚）
   - `m5_big_number`（冰火大数字）
@@ -43,6 +42,7 @@
 - IMU：QMI8658
 - 触摸：CST9217
 - 电源管理：AXP2101，支持 3.7 V 单节锂电池充电和电池监测
+- 音频：ES8311 编解码器 + GPIO46 功放，I2S 输出；代码合成音效/闹钟/白噪音
 - WiFi：ESP32-S3 内置 2.4 GHz
 - 主题切换按键：GPIO0，低电平有效
 
@@ -56,7 +56,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 2. 校验主题索引；非法值回退到 `minimal`。
 3. 调用 `rtc_time_sync_from_external_rtc()` 从 PCF85063 同步系统时间。
 4. 初始化 AXP2101，关闭 TS 温度检测，配置充电参数并读取电池状态。
-5. 初始化 WiFi 管理器和 SNTP；如果上次 WiFi 开关为开启且已有凭据，启动时自动连接。没有凭据时会把 `wifi_enabled` 回退为关闭。
+5. 初始化音频管理器和 WiFi 管理器、SNTP；如果上次 WiFi 开关为开启且已有凭据，启动时自动连接。没有凭据时会把 `wifi_enabled` 回退为关闭。
 6. 调用 `bsp_display_start()` 启动显示和 LVGL，并按保存的亮度初始化面板。
 7. 在 LVGL 显示锁保护下调用 `create_clock_ui()` 创建当前主题和 snapshot 图片对象。
 8. 注册 GPIO0 单击回调，用于切换主题。
@@ -72,6 +72,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 - `update_brightness_fade()`：16 ms 周期，仅在亮度渐变期间运行；息屏 220 ms、亮屏 240 ms。
 - `update_network_status()`：每 500 ms 读取 WiFi 状态，按需启停 SNTP、把 NTP 同步结果写回 RTC，并刷新设置菜单中的网络状态。
 - `update_power_status()`：每 2000 ms 读取 AXP2101 的电池电压、E-Gauge 电量和充电状态；E-Gauge 返回 0 或无效值时按电压曲线估算，并刷新 Power 页。
+- `update_audio_events()`：每 1000 ms 检查 3 个闹钟、Snooze、整点报时、Timer/Pomodoro 和睡眠白噪音；闹钟响铃时亮屏并显示 Snooze/Stop 弹层。
 
 菜单打开、屏幕息屏或自动旋转关闭时，时钟旋转和 IMU 采样会暂停；息屏还会关闭菜单、取消主题过渡并暂停渲染。恢复后立即同步当前时间与姿态。亮度渐变使用 LVGL timer 执行，避免与面板 QSPI IO 竞争。IMU 任务不会直接操作 LVGL，只设置共享目标角，并通知 LVGL timer 唤醒旋转处理。设置菜单固定在屏幕坐标系，不随设备姿态旋转。
 
@@ -82,11 +83,10 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 1. `minimal`
 2. `segment`
 3. `analog`
-4. `outline_analog`
-5. `m5_classic`
-6. `m5_simple`
-7. `m5_big_number`
-8. `m5_number_flow`
+4. `m5_classic`
+5. `m5_simple`
+6. `m5_big_number`
+7. `m5_number_flow`
 
 支持的触发方式：
 
@@ -95,7 +95,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 实际切换动作在 `update_inputs()` 的 LVGL timer 中启动。切换时 snapshot 图片先在 70 ms 内从 scale 256、opacity 255 过渡到 scale 244、opacity 0；中点销毁旧主题、创建新主题并强制刷新 snapshot；随后在 90 ms 内从 scale 244、opacity 0 回到 scale 256、opacity 255。过渡期间的新请求通过 `s_theme_switch_pending_step` 累计，快速连滑不会丢步。
 
-主题切换完成后会把索引写入 NVS `clock_settings` 命名空间的 `theme_id` 键，并通过延迟定时器合并保存。该索引是 `s_themes` 数组下标；增删或重排主题会改变已有保存值的映射，需要同步迁移或接受重新映射。
+主题切换完成后会把索引写入 NVS `clock_settings` 命名空间的 `theme_id` 键，并通过延迟定时器合并保存。该索引是 `s_themes` 数组下标；移除 outline 后使用 `theme_map` 做一次性迁移：旧索引 3 回退到 analog，旧索引 4–7 前移为 3–6，迁移后写入 `theme_map=1`。
 
 需要注意：
 
@@ -113,11 +113,12 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 2. Power：可点击的电池卡片显示百分比、电压和充电/放电状态；点击进入 Battery 详情弹层，查看大号电量、USB 状态和充电配置。E-Gauge 无效时百分比带 `~` 前缀，详情页显示 `Estimated | 4.2 V / 400 mA`。下方保留息屏超时选项。
 3. Motion：Auto Rotate 开关，默认关闭；关闭时时钟固定正向并暂停 IMU 采样。
 4. WiFi：WiFi 开关、Setup 配网按钮、Auto NTP 开关、Sync now 按钮和两行状态信息。连接后状态行显示 SSID，详情行显示 IP、RSSI 和 NTP 状态；失败时详情行显示 Network not found、Wrong password 等原因。
+5. Sound：总开关、音量、UI 音效、整点报时，以及 Alarms/Timer/Sleep 三个弹层。Alarms 支持 3 个闹钟、星期重复、声音选择和 Snooze/Stop；Timer 支持 5/15/25/45 分钟和 Pomodoro 25/5；Sleep 支持 White/Brown 与 15/30/60 分钟，仅 USB 供电可用。
    - 点击 Setup 打开配网摘要页，显示 WiFi Name 和 Password 两个大条目，并提供 Scan networks 按钮扫描附近 AP；点选 SSID 后直接进入密码编辑，隐藏网络仍可手动输入。
    - 单字段编辑页使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
    - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back 都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
 
-菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；4 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
+菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；5 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi/Sound。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
 息屏入口包括：
 
@@ -246,8 +247,9 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 ## 关键目录
 
 - `main/main.cpp`：应用入口、主题注册与过渡、LVGL snapshot、旋转弹簧、亮度渐变、按钮和 IMU 回调接入。
-- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引）。
-- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi、WiFi 配网摘要/扫描列表/编辑弹层和 NTP 控制）。
+- `main/clock_settings.cpp` / `main/clock_settings.h`：NVS 设置读写（亮度、息屏超时、自动旋转、WiFi 开关、NTP 开关、主题索引、声音/音量/报时和 3 个闹钟）。
+- `main/clock_settings_menu.cpp` / `main/clock_settings_menu.h`：设置菜单 UI（亮度/息屏/自动旋转/WiFi/Sound、WiFi 配网摘要/扫描列表/编辑弹层、Alarm/Timer/Sleep 弹层和 NTP 控制）。
+- `main/audio_manager.cpp` / `main/audio_manager.h`：ES8311/PA、音频任务、音效/闹钟/白噪音和音量控制。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
@@ -294,7 +296,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - snapshot 正常路径复用一张 466 x 466 RGB565 draw buffer，约 424 KB；只有尺寸异常时才会回退到临时分配。主题过渡只改图片 scale/opacity，不额外分配整屏 buffer。
 - M5 Classic canvas 刻度也会占用一张 466 x 466 RGB565 draw buffer。
 - 主题根容器应保持 466 x 466，并避免在主题内部再做整屏旋转。
-- 主题索引保存的是 `s_themes` 数组下标；增删或重排主题时需考虑 NVS 中 `theme_id` 的兼容性。
+- 主题索引保存的是 `s_themes` 数组下标；移除 outline 后通过 `theme_map` 迁移旧索引，旧索引 3 回退到 analog，旧索引 4–7 前移为 3–6。
 - 自动旋转保存于 NVS `clock_settings` 命名空间的 `auto_rotate` 键，缺省为关闭；旧固件升级后没有该键时首次启动保持关闭。
 - 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
 - WiFi 凭据保存在 NVS `wifi_creds` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据，只修改 SSID 时会沿用已保存密码。ESP-IDF NVS 的命名空间和键名最长 15 个字符，`wifi_creds` 已按该限制命名。
@@ -302,6 +304,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
 - WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
 - AXP2101 配置为 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止；TS 引脚温度检测关闭，电池低于约 5% 时由 AXP2101 低压保护关机。初始化会显式使能 E-Gauge（REG18h bit3），但本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0；此时按 3300 mV(0%) 到 4200 mV(100%) 的分段电压曲线估算电量，充电时先减去 70 mV 补偿，UI 用 `~` 和 `Estimated` 标识。PWR 按键在 EXIO4 上高电平有效，开机时用于上电的那次释放会被忽略，避免开机后立即息屏。
+- 声音设置保存在 `clock_settings` 命名空间：`sound_on`、`sound_vol`、`ui_sound`、`chime_on`，3 个闹钟保存在 `alarm_cfg` blob 中。睡眠白噪音只在 USB 供电时运行，拔掉 USB 会停止。
 - WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络）。
 - `Scan networks` 在 LVGL 事件中同步调用 `esp_wifi_scan_start()`；扫描期间界面停在 `Scanning...`，完成后最多显示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描后恢复关闭；隐藏网络仍可手动输入。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
@@ -323,13 +326,14 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 断电重启后是否恢复上次主题。
 - 触摸左右滑动是否能切换主题；静止约 2 秒是否能打开设置菜单，移动超过 16 px 后是否不再触发长按。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
-- 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
+- 7 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
 - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正。
 - WiFi 页状态是否与开关一致，连接后是否显示 IP/RSSI，失败时是否显示原因；Auto NTP 和 Sync now 是否正常。
+- Sound 页音量、UI 音效、整点报时和试听是否正常；3 个闹钟的时间/星期/开关、响铃、Snooze/Stop 和亮屏是否正常；Timer/Pomodoro 和结束提示音是否正常；睡眠白噪音是否只在 USB 下启动、拔掉 USB 是否停止。
 - WiFi 配网摘要页是否显示当前 SSID/密码状态，Scan networks 是否能列出附近 AP；SSID/密码编辑页是否一次只编辑一个字段、6 列键盘是否便于触摸、按键气泡/大小写/符号层/焦点高亮/密码显示隐藏是否正常；同步成功后 PCF85063 时间是否更新，断电重启后是否按保存的开关和凭据自动连接。
 - Brightness 胶囊进度条拖动是否跟手，拖动时页面是否不会误滚动。
 - 菜单打开/关闭的淡入缩放动画是否流畅，关闭后是否没有残留遮罩或菜单对象。
-- 底部沿浅弧排列的 4 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。
+- 底部沿浅弧排列的 5 个图标 + 文字 Tab 是否可以直接切换到对应页面，当前 Tab 高亮是否正确，顶部中央 Done 是否可点击关闭，菜单内容是否全部在圆屏内。
 - 手动/自动息屏和亮屏渐变是否正常；用于唤醒的触摸/按键是否不会同时触发切换或菜单。
 - Power 页电池卡片是否显示百分比、电压和充电状态，点击是否打开 Battery 详情弹层；E-Gauge 为 0 时是否显示 `~` 估算电量和 `Estimated` 提示；仅电池长按 PWR 是否能开机且开机后不会立即息屏；USB/电池切换和充电是否正常。
 - 屏幕姿态变化时，自动旋转开启后时钟 snapshot 是否平滑旋转；关闭后是否保持正向。

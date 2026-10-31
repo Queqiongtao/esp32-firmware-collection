@@ -45,12 +45,12 @@
 | `out/round/*.png` | **默认查看**：圆形遮罩 + 亮灰玻璃边缘，圆外为中灰 |
 | `out/raw/*.png` | 未遮罩方图，仅用于调试构图 |
 | `out/ppm/*.ppm` | 原始渲染（466 × 466 RGB565 转 RGB888） |
-| `out/contact_native.png` | 4 个原生主题圆屏对比图 |
+| `out/contact_native.png` | 3 个原生主题圆屏对比图 |
 | `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
-| `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
+| `out/contact_all.png` | 全部 7 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 11 个菜单页面/详情弹层圆屏对比图 |
+| `out/menu/contact_menu.png` | 16 个菜单页面/详情弹层圆屏对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围与安全区越界提示 |
 

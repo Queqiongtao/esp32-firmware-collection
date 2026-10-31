@@ -160,7 +160,7 @@ def main() -> None:
     m5 = [item for item in sheet_items if item[0].startswith("m5_")]
 
     if native:
-        contact_sheet(native, 2, input_dir / "contact_native.png")
+        contact_sheet(native, 3, input_dir / "contact_native.png")
     if m5:
         contact_sheet(m5, 2, input_dir / "contact_m5.png")
     if sheet_items:
