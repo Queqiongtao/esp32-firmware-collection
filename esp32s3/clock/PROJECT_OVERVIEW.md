@@ -202,12 +202,14 @@ typedef struct {
 - `main/m5_assets/fonts/`
 - `main/m5_watch_assets.h`
 
-迁移目标是默认进入主题后的显示效果、布局、颜色、字体和关键动画尽量与 M5 原项目一致。当前实现保留原始图片和字体资源，并在本工程 LVGL 主题接口下适配：
+迁移目标是默认进入主题后的显示效果、布局、颜色、字体和关键动画尽量与 M5 原项目一致。当前实现保留原始图片资源；M5 字体使用原始 TTF 重新生成为 4bpp，不改变字号和布局，以改善大字号下 2bpp 字体的软边。
 
 - `Classic`（经典机械）使用 canvas 绘制 466 x 466 刻度，并使用原始三根指针图片；本工程提高了星期对比度并调整日期胶囊尺寸。
-- `Simple`（薄荷珊瑚）使用原始字体和 10 套主题色表；默认 C1 薄荷珊瑚配色，包含珊瑚大点、薄荷小点、薄荷日期胶囊和珊瑚糖果秒点，秒点平滑运动并在整秒轻微弹跳。
+- `Simple`（薄荷珊瑚）使用原始字号的 Commissioner 字体和 10 套主题色表；默认 C1 薄荷珊瑚配色，包含珊瑚大点、薄荷小点、薄荷日期胶囊和珊瑚糖果秒点，秒点平滑运动并在整秒轻微弹跳。
 - `BigNumber`（冰火大数字）使用原始数字图片和 4 套 palette；本工程补充日期，并用上排冰蓝、下排珊瑚的冷暖分色区分小时与分钟。
 - `NumberFlow`（数字流）在本工程内实现两位数字滚动效果，替代 M5 依赖库中的 `NumberFlow` 控件；使用 80px Commissioner 数字字体、H/M/S 标识和日期，秒位使用珊瑚色强调。
+
+M5 字体字号说明：`m5_number_flow` 使用 80px Commissioner 数字和 28px 日期，上游对应的是 64px 数字和 24px 日期；`m5_simple` 的 108px 和 `m5_classic` 的 28/24px 与上游一致。字体生成脚本为 `tools/fonts/generate_m5_fonts.sh`，详细说明见 `tools/fonts/README.md`。
 
 注意：M5 原项目中 WatchFace 内部触摸点击可切换 palette、display mode 或秒点显示状态。当前工程采用 snapshot 旋转架构，主题对象常态隐藏，触摸事件没有直接接入这些内部交互。本工程目前以默认显示效果一致为目标，主题切换由 GPIO0 或触摸滑动完成。
 
@@ -251,7 +253,8 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
-- `main/m5_assets/`：M5 WatchFace 图片和字体资源。
+- `main/m5_assets/`：M5 WatchFace 图片和字体资源；字体为 4bpp，生成方法见 `tools/fonts/README.md`。
+- `tools/fonts/`：M5 字体重新生成脚本和说明。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，以及从系统时间写回 RTC。
 - `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接、NVS 凭据、AP 扫描和断线重连。
 - `main/ntp_time_sync.cpp` / `main/ntp_time_sync.h`：SNTP 启停、同步状态和手动对时。
@@ -334,7 +337,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 自动旋转关闭时，触摸滑动切换主题的坐标映射是否正常。
 - 所有主题是否能正常显示，没有文本重叠、黑屏或异常闪烁。
 - 只调整主题视觉时，先运行 `./tools/preview/run.sh` 检查构图和圆屏裁切；预览通过不代表上板通过，亮度、Gamma、旋转和过渡仍需上板确认。
-- M5 四个主题的默认布局、颜色、字体、图片和动画是否与原项目预期一致。
+- M5 四个主题的默认布局、颜色、字体、图片和动画是否与原项目预期一致；M5 字体是否为 4bpp，108px/80px 数字边缘是否清晰。
 - Simple 秒点是否平滑运动并在整秒轻微弹跳，且弹跳过程不会触发整屏 snapshot。
 - NumberFlow 秒位是否滚动变化，而不是静态跳变。
 - 串口是否出现 snapshot 分配、NVS 读写或 I2C 错误。

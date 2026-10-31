@@ -74,6 +74,7 @@ Build output:
 - The rotation pipeline reuses one RGB565 snapshot buffer and refreshes it only when visible theme content changes. Theme transitions only change image scale and opacity, so they do not allocate another full-screen buffer.
 - The theme index is stored as `theme_id` in the NVS `clock_settings` namespace. It maps to the `s_themes` array order, so adding or reordering themes remaps saved values.
 - Auto-rotate is stored as `auto_rotate` in the same NVS namespace. It defaults to off, and existing devices without the key stay off after upgrading.
+- M5 WatchFace fonts are regenerated at 4bpp from the upstream Commissioner and Maple Mono TTFs; the original 2bpp assets look soft at 108 px and 80 px. `m5_number_flow` intentionally uses 80 px digits and a 28 px date instead of the upstream 64/24. Regenerate with `./tools/fonts/generate_m5_fonts.sh`; see `tools/fonts/README.md`.
 - The Power page battery card opens a Battery detail overlay with large percentage, voltage, USB state and charge configuration. AXP2101 uses the shared I2C bus at address `0x34`. TS pin temperature measurement is disabled, and charging is configured for 50 mA precharge, 400 mA constant current, 25 mA termination and 4.2 V target. The E-Gauge is explicitly enabled (REG18h bit3), but register `0xA4` may stay at 0 on this board; in that case the firmware estimates the percentage from a 3300–4200 mV curve (with 70 mV charging compensation), marks the value with `~`, and shows `Estimated | 4.2 V / 400 mA` in the detail overlay. EXIO4 is active-high for PWR; the first release after battery power-on is ignored to avoid immediately sleeping the screen.
 - The WiFi enable flag is stored as `wifi` and NTP auto-sync as `ntp` in the `clock_settings` namespace; `ntp` defaults to on for devices upgrading without the key. If WiFi is enabled on boot and credentials exist, the device connects automatically and retries every 5 seconds after a disconnect. The WiFi page reports `WiFi off` whenever the switch is off, even if saved credentials exist.
 
@@ -91,6 +92,8 @@ Build output:
 - `main/clock_theme.h`: theme interface
 - `main/clock_theme_minimal.cpp`
 - `main/lv_font_clock_144.c`: 144 px clock font used by the minimal theme
+- `main/m5_assets/fonts/`: Commissioner and Maple Mono fonts regenerated at 4bpp
+- `tools/fonts/`: M5 font regeneration script and notes
 - `main/clock_theme_segment.cpp`
 - `main/clock_theme_analog.cpp`
 - `main/clock_theme_outline_analog.cpp`

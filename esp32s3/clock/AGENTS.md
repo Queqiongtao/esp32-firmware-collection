@@ -27,7 +27,7 @@
 - `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_outline_analog.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_*.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，按 Classic、Simple、BigNumber、NumberFlow 分为四个文件。
 - `main/lv_font_*.c`：主题位图字体资源；新增字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
-- `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源。
+- `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源；M5 字体已用原始 TTF 重新生成为 4bpp（见 `tools/fonts/README.md`），`m5_number_flow` 的 80px 数字和 28px 日期是当前设计，不是上游的 64/24。
 - `main/rtc_time_sync.cpp`：PCF85063 RTC 同步，RTC 无效时使用固件编译时间兜底；NTP 同步后由主循环调用 `rtc_time_sync_write_from_system()` 写回 RTC。
 - `main/imu_demo.cpp`：QMI8658 加速度采样和时钟旋转角计算。
 - `main/wifi_manager.cpp` / `main/wifi_manager.h`：WiFi STA 连接状态机、NVS 凭据读写、AP 扫描和断线重连。
@@ -111,6 +111,7 @@
   - 断电重启后是否恢复上次主题。
   - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
   - 8 个主题的切换过渡是否正常；旋转过程中切换是否不残留旧主题。
+  - M5 主题字体是否为 4bpp，`m5_simple` 108px 和 `m5_number_flow` 80px 数字边缘是否清晰；重新生成字体后先跑预览，再上板确认，生成方法见 `tools/fonts/README.md`。
   - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页开关是否默认关闭，关闭后时钟是否立即回正；WiFi 页状态是否与开关一致，能否显示 IP/RSSI/失败原因。
   - WiFi 配网摘要页是否显示当前 SSID/密码状态，Scan networks 是否能列出附近 AP 并在点选后进入密码页；SSID/密码编辑页是否一次只编辑一个字段、6 列键盘是否足够大、按键气泡/大小写/符号层/焦点/密码显示隐藏是否正常；保存凭据并连接、Auto NTP 和 Sync now 是否可用；串口不应再出现 `ESP_ERR_NVS_KEY_TOO_LONG`。
   - WiFi 连接成功后 NTP 是否自动同步，Sync now 是否能立即触发同步，同步后 PCF85063 时间是否更新；断电重启后 WiFi 是否按保存的开关和凭据自动连接。
