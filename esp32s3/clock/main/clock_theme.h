@@ -29,6 +29,7 @@ extern const clock_theme_t g_clock_theme_m5_classic;
 extern const clock_theme_t g_clock_theme_m5_simple;
 extern const clock_theme_t g_clock_theme_m5_big_number;
 extern const clock_theme_t g_clock_theme_m5_number_flow;
+extern const clock_theme_t g_clock_theme_dot_matrix;
 
 #ifdef __cplusplus
 }

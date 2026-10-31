@@ -1,6 +1,6 @@
 # 主题优化计划
 
-> 目标：把 7 个时钟主题做得更好看、布局更合理、更吸睛。
+> 目标：把 8 个时钟主题做得更好看、布局更合理、更吸睛。
 > 约束：各主题独立风格，不要求视觉统一；补齐日期；M5 四主题保留原识别度、逐主题优化；小步交付。
 > 文档位置：`esp32s3/clock/doc/theme-optimization-plan.md`（本文件为唯一事实来源）。
 
@@ -12,8 +12,8 @@
 |------|------|------|
 | 移除 mooncat 主题 | ✅ 已完成 | commit `5512779` |
 | AGENTS.md 禁止未授权提交 | ✅ 已完成 | commit `1de0e6e`（全仓库 11 个文件） |
-| 7 个主题现状诊断 | ✅ 已完成 | 几何核算 + 视觉问题清单 |
-| PC 预览工具 | ✅ 已完成 | `tools/preview/`，可渲染 7 主题 PNG |
+| 8 个主题现状诊断 | ✅ 已完成 | 几何核算 + 视觉问题清单 |
+| PC 预览工具 | ✅ 已完成 | `tools/preview/`，可渲染 8 主题 PNG |
 | 预览工具文档同步 | ✅ 已完成 | 本文件 + AGENTS.md + PROJECT_OVERVIEW.md + README.md |
 | minimal 重设计 | ✅ 已完成（待上板确认） | 144px 主时间 + 双环 + 8 色轮换 |
 | segment 重设计 | ✅ 已完成（待上板确认） | 琥珀仪表（Amber Deck）：琥珀数字 + 珊瑚强调，最大半径 221.4 |
@@ -56,9 +56,9 @@ tools/preview/
 | `out/round/*.png` | **默认查看**：单主题圆屏图，圆外中灰 + 亮灰玻璃边缘 |
 | `out/raw/*.png` | 未遮罩方图，仅调试构图用 |
 | `out/ppm/*.ppm` | 原始渲染 PPM |
-| `out/contact_native.png` | 3 个原生主题圆屏对比图 |
+| `out/contact_native.png` | 4 个原生主题圆屏对比图 |
 | `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
-| `out/contact_all.png` | 7 主题圆屏总览 |
+| `out/contact_all.png` | 8 主题圆屏总览 |
 | `out/menu/*.png` | 设置菜单页面圆屏图 |
 | `out/menu/raw/*.png` | 设置菜单方图 |
 | `out/menu/contact_menu.png` | 菜单页面对比图 |
@@ -119,6 +119,7 @@ tools/preview/
 | 5 | m5_simple | 薄荷珊瑚 | 12 圆点 + 薄荷日期胶囊 + 糖果秒点 |
 | 6 | m5_big_number | 冰火大数字 | 2×2 大数字 + 冷暖分色 |
 | 7 | m5_number_flow | 数字流 | 三块面板 + 数字逐位滚动 |
+| 8 | dot_matrix | 点阵像素 | 59×20 彩色方块 + 仅 HH:MM |
 
 ### 1. minimal（✅ 已完成，待上板确认）
 
@@ -229,7 +230,7 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - `clock_theme_m5_simple.cpp`：Simple
 - `clock_theme_m5_big_number.cpp`：BigNumber
 - `clock_theme_m5_number_flow.cpp`：NumberFlow
-- 每个文件独立持有本主题的 palette、静态控件、helper 和生命周期回调，与三个原生主题保持一致
+- 每个文件独立持有本主题的 palette、静态控件、helper 和生命周期回调，与四个原生主题保持一致
 - `main/CMakeLists.txt`、`tools/preview/CMakeLists.txt` 同步改为四个源文件
 - 重构前后 24 张 M5 预览 PPM（4 主题 × 6 个时刻）逐字节一致
 - `./dev.sh build` 通过，`esp-clock.bin` = 0x15c2d0
@@ -296,6 +297,24 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 - M5 四主题默认样式已完成，下一步进入整体上板验证
 - 已确认保留 M5 原始识别度，按主题做定点优化，不整体重设计
 
+### 5. dot_matrix（✅ 已完成，已确认）
+
+**概念：点阵像素**
+
+- 59 列 × 20 行彩色方块，单格 6×6 px，间距 1 px，面板约 412×139 px
+- 未点亮区域完全隐藏，不绘制背景网格；纯黑背景
+- 字形改为 Paytone One 采样：12×20 点阵，按 120 阈值从 200px 光栅降采样，不再使用手绘 6×10 放大字
+- 字形来源：Paytone One（SIL Open Font License 1.1）；固件只嵌入 12×20 二值掩码，不包含 TTF 文件
+- 时间格式 `HH:MM`，每个数字约 18–19 行有效像素，保留上下各 1 行呼吸空间
+- 左右数字组完全对称：数字间距 1 列，冒号左右各留 3 列（约 21 px）
+- 冒号为上下两个 3×3 方块，位于第 4–6 行和第 13–15 行，不再闪烁
+- 10 色糖果马赛克：珊瑚粉 `#FF6B8A`、玫瑰 `#FF9EB5`、蜜桃 `#FFB38A`、奶油黄 `#FFD36E`、奶油白 `#FFF1D6`、薄荷 `#8BE3C0`、天蓝 `#5FC9F8`、长春花蓝 `#8FB5FF`、薰衣草紫 `#B79CFF`、橘红 `#FF8A5B`
+- 每个数字内部多色混合；按行优先选择颜色，并避开左、上相邻格的同色，减少色块重复
+- 无日期、无秒数、无扫描动画；只在分钟变化时重绘 canvas
+- 主题追加到 `s_themes` 末尾，作为第 8 个主题，避免打乱旧 NVS `theme_id`
+- 预览 `10:08:35`、`23:59:35` 最大半径均为 201.5，位于圆屏半径 233 内，不再触发安全区提示
+- `./dev.sh build` 通过；`esp-clock.bin` = 0x245380，6 MB 分区剩余 62%
+
 ---
 
 ## 五、执行顺序
@@ -310,7 +329,8 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
   - [x] 4.2.2 `m5_classic`：星期对比度与日期胶囊
   - [x] 4.2.3 `m5_number_flow`：80px 字体、H/M/S 标识、逐位滚动、珊瑚秒位
   - [x] 4.2.4 `m5_simple`：12 圆点糖果化、日期胶囊、秒点弹跳
-- [ ] 5. 整体上板验证（GPIO0、滑动、自动旋转开关、菜单）
+- [x] 5. dot_matrix 点阵像素主题：59×20、6×6 单格、Paytone One 字形、10 色糖果配色、冒号左右留白
+- [ ] 6. 整体上板验证（GPIO0、滑动、自动旋转开关、菜单）
 
 每轮流程：改代码 → `./dev.sh build` → `./tools/preview/run.sh` → 出图确认 → 下一个。
 
@@ -331,6 +351,10 @@ npx lv_font_conv --font /usr/share/fonts/truetype/ubuntu/Ubuntu-M.ttf \
 |------|------|
 | 2026-10-20 | 移除 mooncat 主题 |
 | 2026-10-31 | 移除线框轨道主题，主题数变为 7；NVS 使用 theme_map 迁移旧索引 |
+| 2026-10-31 | 新增 dot_matrix 点阵像素主题，追加为第 8 个主题；59×20、6×6 单格多彩方块、仅 HH:MM、无背景网格和动画 |
+| 2026-10-31 | dot_matrix 字形改为 Lato Black 12×20 点阵采样，配色扩展为 10 色糖果马赛克 |
+| 2026-11-01 | dot_matrix 字形改为 Paytone One 12×20 点阵采样，保留 10 色糖果马赛克 |
+| 2026-11-01 | dot_matrix 最终选定 Paytone One 字形，完成上板验证，准备提交 |
 | 2026-10-20 | 全仓库 AGENTS.md 增加"禁止未授权直接提交" |
 | 2026-10-20 | 主题优化：各主题独立风格，追求好看吸睛，不要求统一 |
 | 2026-10-20 | 先做 PC 预览工具 |

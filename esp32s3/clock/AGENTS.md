@@ -25,7 +25,7 @@
 
 - `main/main.cpp`：应用入口、主题切换与过渡、LVGL snapshot、旋转弹簧、亮度渐变、GPIO0 按钮/触摸手势/电源键接入、设置菜单、WiFi/NTP 状态轮询、音频事件/闹钟/倒计时、自动息屏。
 - `main/clock_theme.h`：时钟主题接口。
-- `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`：本工程原有时钟主题。
+- `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_dot_matrix.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_*.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，按 Classic、Simple、BigNumber、NumberFlow 分为四个文件。
 - `main/lv_font_*.c`：主题位图字体资源；新增字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
 - `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源；M5 字体已用原始 TTF 重新生成为 4bpp（见 `tools/fonts/README.md`），`m5_number_flow` 的 80px 数字和 28px 日期是当前设计，不是上游的 64/24。
@@ -113,7 +113,7 @@
 - 交互改动建议上板检查：
   - 断电重启后是否恢复上次主题。
   - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
-  - 7 个主题的切换过渡是否正常；旋转过程中切换是否不残留旧主题。
+  - 8 个主题的切换过渡是否正常；旋转过程中切换是否不残留旧主题。
   - M5 主题字体是否为 4bpp，`m5_simple` 108px 和 `m5_number_flow` 80px 数字边缘是否清晰；重新生成字体后先跑预览，再上板确认，生成方法见 `tools/fonts/README.md`。
   - Sound 页音量、UI 音效、整点报时和 Audio test 弹层是否正常（白噪音播放时 UI 音效会暂时静音）；各音效音色是否可区分。休眠和熄屏是否有轻提示音，休眠后触摸/PWR 唤醒是否有轻提示音，唤醒后第一次切主题是否有声；点底部 Tab 是否只有一声、滑动切页是否只有一声；3 个闹钟的时间/星期/开关、响铃、Snooze/Stop 和亮屏是否正常；Timer/Pomodoro 和结束提示音是否正常；睡眠白噪音是否只在 USB 下启动、拔掉 USB 是否停止。
   - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页开关是否默认关闭，关闭后时钟是否立即回正；WiFi 页状态是否与开关一致，能否显示 IP/RSSI/失败原因。

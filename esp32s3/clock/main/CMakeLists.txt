@@ -20,6 +20,7 @@ set(MAIN_SRCS
     "clock_theme_m5_simple.cpp"
     "clock_theme_m5_big_number.cpp"
     "clock_theme_m5_number_flow.cpp"
+    "clock_theme_dot_matrix.cpp"
     "m5_assets/images/watch_face/classic/classic_hour_hand.c"
     "m5_assets/images/watch_face/classic/classic_minute_hand.c"
     "m5_assets/images/watch_face/classic/classic_second_hand.c"

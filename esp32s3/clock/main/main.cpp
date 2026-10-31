@@ -48,6 +48,7 @@ static const clock_theme_t *const s_themes[] = {
     &g_clock_theme_m5_simple,
     &g_clock_theme_m5_big_number,
     &g_clock_theme_m5_number_flow,
+    &g_clock_theme_dot_matrix,
 };
 static constexpr size_t s_theme_count = sizeof(s_themes) / sizeof(s_themes[0]);
 static size_t s_current_theme_index = 0;

@@ -40,6 +40,7 @@ const clock_theme_t *const kThemes[] = {
     &g_clock_theme_m5_simple,
     &g_clock_theme_m5_big_number,
     &g_clock_theme_m5_number_flow,
+    &g_clock_theme_dot_matrix,
 };
 
 void display_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)

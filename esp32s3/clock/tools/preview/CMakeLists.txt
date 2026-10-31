@@ -33,6 +33,7 @@ add_executable(preview
     ${MAIN_DIR}/clock_theme_m5_simple.cpp
     ${MAIN_DIR}/clock_theme_m5_big_number.cpp
     ${MAIN_DIR}/clock_theme_m5_number_flow.cpp
+    ${MAIN_DIR}/clock_theme_dot_matrix.cpp
     ${MAIN_DIR}/clock_settings_menu.cpp
     ${MAIN_DIR}/lv_font_clock_96.c
     ${MAIN_DIR}/lv_font_clock_144.c

@@ -9,7 +9,7 @@ See [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md) for the detailed Chinese project 
 ## Features
 
 - 466 x 466 AMOLED clock UI with switchable themes
-- Switchable themes: minimal, segment, analog, and four M5 WatchFace themes
+- Switchable themes: minimal, segment, analog, dot matrix, and four M5 WatchFace themes
 - Current theme index is persisted in NVS and restored on boot
 - Theme changes use a short scale/fade transition; rapid swipes are queued instead of dropped
 - Settings menu opens on the brightness page and closes via the top-center Done button or after 1 minute without menu activity; the WiFi page supports on-screen SSID/password entry, nearby AP scanning and NTP time sync
@@ -100,6 +100,7 @@ Build output:
 - `tools/fonts/`: M5 font regeneration script and notes
 - `main/clock_theme_segment.cpp`
 - `main/clock_theme_analog.cpp`
+- `main/clock_theme_dot_matrix.cpp`: 59×20 dot-matrix clock with 6 px tiles, Paytone One 12×20 glyphs and a 10-color candy palette; shows only HH:MM, with generous colon spacing and no background grid, date or scan animation
 - `components/qmi8658/`: QMI8658 I2C driver
 - `components/pcf85063/`: PCF85063 I2C driver
 - `components/ui_physics/`: angle spring smoothing

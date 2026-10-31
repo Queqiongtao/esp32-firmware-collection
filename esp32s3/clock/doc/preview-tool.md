@@ -25,7 +25,7 @@
 | 方面 | preview | ESP32 固件 |
 |------|---------|-----------|
 | 程序入口 | `preview.cpp` 的 `main()` | `main.cpp` 的 `app_main()` |
-| 参与编译的代码 | 7 个主题、设置菜单、字体/图片资源和 LVGL | 还包括设置、触摸手势、RTC、IMU、菜单、主题过渡等 |
+| 参与编译的代码 | 8 个主题、设置菜单、字体/图片资源和 LVGL | 还包括设置、触摸手势、RTC、IMU、菜单、主题过渡等 |
 | 时间来源 | 固定日期 2026-10-20 UTC；默认 10:08:35 和 23:59:35 | PCF85063 RTC + 系统本地时间（`CST-8`），持续走时 |
 | 主题调用方式 | 每个主题执行一次 `build → reset → update → tick(+5s) → tick(+6s)` 后截图 | `update()` 每 1000 ms 调用一次；`tick()` 每 33 ms 调用；仅在内容变化且旋转停稳时刷新截图 |
 | LVGL 配置 | 独立的 `tools/preview/lv_conf.h`；`LV_OS_NONE`、单线程、CLIB、Montserrat 12~40 子集、未启用压缩字体 | `sdkconfig`；FreeRTOS、CLIB、Montserrat 8~44、压缩字体、`LV_FONT_FMT_TXT_LARGE`、对象样式缓存、2 个软件绘制单元等 |
@@ -71,7 +71,7 @@ preview 不能验证：
 
 1. 从 `../../managed_components/lvgl__lvgl` 引入 LVGL，如果目录不存在会直接报错，提示先运行一次 `./dev.sh build` 拉取组件。
 2. 使用 `tools/preview/lv_conf.h` 作为主机端 LVGL 配置。
-3. 显式编译 7 个主题源码、`main/clock_settings_menu.cpp` 和顶层字体。
+3. 显式编译 8 个主题源码、`main/clock_settings_menu.cpp` 和顶层字体。
 4. 用 `file(GLOB ...)` 自动收集 `main/m5_assets/fonts/*.c` 和 `main/m5_assets/images/watch_face/*/*.c`。
 5. 通过 `tools/preview/stubs/esp_err.h` 提供主机端 `esp_err_t` 占位定义。
 6. 生成 `tools/preview/build/preview` 可执行文件。
@@ -100,7 +100,7 @@ preview 不能验证：
   - 圆半径 233（466 / 2）。
   - 圆外填中灰 `(38, 38, 38)`，避免和黑色主题背景混在一起。
   - 圆边画 2 px 亮灰 `(122, 122, 122)`，模拟玻璃边缘。
-- 生成对比图：原生主题 3 列、M5 主题 2 列、全部主题 4 列。
+- 生成对比图：原生主题 4 列、M5 主题 2 列、全部主题 4 列。
 - 把 `out/menu_ppm/*.ppm` 转成 `out/menu/*.png`（圆屏遮罩）和 `out/menu/raw/*.png`（方图），并生成 `out/menu/contact_menu.png` 2 列对比图和 `out/menu/report.txt` 半径报告。
 - 统计非黑像素的包围盒和最大半径，写入 `out/report.txt`：
   - 非黑判定为 `r + g + b > 24`。
@@ -117,9 +117,9 @@ preview 不能验证：
 | `out/round/*.png` | 默认查看：圆形遮罩 + 玻璃边缘 |
 | `out/raw/*.png` | 未遮罩方图，调试构图用 |
 | `out/ppm/*.ppm` | 原始渲染，466 × 466 RGB565 转 RGB888 |
-| `out/contact_native.png` | 3 个原生主题圆屏对比图 |
+| `out/contact_native.png` | 4 个原生主题圆屏对比图 |
 | `out/contact_m5.png` | 4 个 M5 主题圆屏对比图 |
-| `out/contact_all.png` | 全部 7 个主题圆屏对比图 |
+| `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
 | `out/menu/contact_menu.png` | 17 个菜单页面/详情弹层对比图 |

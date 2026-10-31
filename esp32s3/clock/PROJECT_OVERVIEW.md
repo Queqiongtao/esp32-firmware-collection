@@ -30,6 +30,7 @@
   - `m5_simple`（薄荷珊瑚）
   - `m5_big_number`（冰火大数字）
   - `m5_number_flow`（数字流）
+  - `dot_matrix`（点阵像素）
 
 ## 硬件平台
 
@@ -87,6 +88,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 5. `m5_simple`
 6. `m5_big_number`
 7. `m5_number_flow`
+8. `dot_matrix`
 
 支持的触发方式：
 
@@ -253,6 +255,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
+- `main/clock_theme_dot_matrix.cpp`：59×20、6×6 单格彩色点阵像素时钟，Paytone One 12×20 字形、10 色糖果配色，只显示 `HH:MM`；冒号左右留白，无背景网格、日期和扫描动画。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源；字体为 4bpp，生成方法见 `tools/fonts/README.md`。
@@ -326,7 +329,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 断电重启后是否恢复上次主题。
 - 触摸左右滑动是否能切换主题；静止约 2 秒是否能打开设置菜单，移动超过 16 px 后是否不再触发长按。
 - 连续快速滑动是否不丢步、不误开设置菜单；快速轻扫是否能触发切换。
-- 7 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
+- 8 个主题的切换过渡是否正常；旋转过程中切换是否残留旧主题。
 - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页的 Auto Rotate 是否默认关闭，关闭后时钟是否立即回正。
 - WiFi 页状态是否与开关一致，连接后是否显示 IP/RSSI，失败时是否显示原因；Auto NTP 和 Sync now 是否正常。
 - Sound 页音量、UI 音效、整点报时和 Test 试听是否正常（白噪音播放时 UI 音效会暂时静音）；点底部 Tab 是否只有一声、滑动切页是否只有一声；3 个闹钟的时间/星期/开关、响铃、Snooze/Stop 和亮屏是否正常；Timer/Pomodoro 和结束提示音是否正常；睡眠白噪音是否只在 USB 下启动、拔掉 USB 是否停止。
