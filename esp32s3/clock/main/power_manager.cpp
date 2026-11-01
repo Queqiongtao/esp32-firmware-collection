@@ -141,6 +141,9 @@ esp_err_t power_manager_init(void)
     s_pmu.enableVbusVoltageMeasure();
     s_pmu.enableSystemVoltageMeasure();
     s_pmu.enableTemperatureMeasure();
+    if (!s_pmu.enableIRQ(XPOWERS_AXP2101_PKEY_POSITIVE_IRQ)) {
+        ESP_LOGW(TAG, "Enable PKEY IRQ failed");
+    }
     s_pmu.clearIrqStatus();
 
     s_pmu_ready = true;
@@ -200,6 +203,21 @@ void power_manager_update(void)
                  next.battery_mv,
                  next.charging ? 1 : 0);
     }
+}
+
+bool power_manager_take_pwr_key_press(void)
+{
+    if (!s_pmu_ready) {
+        return false;
+    }
+
+    s_pmu.getIrqStatus();
+    if (!s_pmu.isPekeyPositiveIrq()) {
+        return false;
+    }
+
+    s_pmu.clearIrqStatus();
+    return true;
 }
 
 void power_manager_get_status(power_status_t *status)

@@ -59,12 +59,16 @@ static constexpr int32_t CLOCK_DISPLAY_SIZE = 466;
 
 static constexpr uint32_t PWR_BUTTON_POLL_TIMER_MS = 30;
 static constexpr uint32_t PWR_BUTTON_DEBOUNCE_MS = 50;
-static constexpr uint32_t PWR_BUTTON_SINGLE_CLICK_MAX_MS = 800;
+static constexpr uint32_t PWR_BUTTON_SINGLE_CLICK_MAX_MS = 1500;
 static constexpr uint32_t CLOCK_INPUT_TIMER_MS = 15;
 static constexpr uint32_t CLOCK_SETTINGS_SAVE_DELAY_MS = 500;
 static constexpr uint32_t CLOCK_MENU_TIMEOUT_MS = 60 * 1000;
 static constexpr uint32_t PWR_BUTTON_PIN_MASK = IO_EXPANDER_PIN_NUM_4;
 static constexpr uint8_t PWR_BUTTON_ACTIVE_LEVEL = 1;
+static constexpr uint32_t PWR_BUTTON_AXP_POLL_MS = 100;
+static constexpr uint32_t PWR_BUTTON_ACTION_COOLDOWN_MS = 300;
+static constexpr uint32_t PWR_BUTTON_AXP_BOOT_GRACE_MS = 2000;
+static constexpr uint32_t PWR_BUTTON_AXP_EXIO_SUPPRESS_MS = 3000;
 
 static constexpr uint32_t CLOCK_ROTATION_TIMER_MS = 16;
 static constexpr uint32_t CLOCK_THEME_ANIMATION_TIMER_MS = 33;
@@ -144,6 +148,12 @@ static bool s_pwr_button_candidate_pressed = false;
 static uint32_t s_pwr_button_candidate_since_ms = 0;
 static uint32_t s_pwr_button_press_start_ms = 0;
 static uint32_t s_pwr_button_last_poll_ms = 0;
+static uint32_t s_pwr_axp_last_poll_ms = 0;
+static uint32_t s_pwr_axp_ignore_until_ms = 0;
+static uint32_t s_pwr_last_action_ms = 0;
+static uint32_t s_pwr_axp_handled_ms = 0;
+static bool s_pwr_axp_handled_press = false;
+static uint32_t s_pwr_read_errors = 0;
 
 enum class ThemeTransitionPhase : uint8_t {
     Idle,
@@ -1972,6 +1982,20 @@ static void update_auto_sleep(lv_timer_t *timer)
     }
 }
 
+static bool queue_pwr_single_click(uint32_t now_ms)
+{
+    if (s_pwr_single_click_pending) {
+        return false;
+    }
+    if (s_pwr_last_action_ms != 0 &&
+        (uint32_t)(now_ms - s_pwr_last_action_ms) < PWR_BUTTON_ACTION_COOLDOWN_MS) {
+        return false;
+    }
+    s_pwr_single_click_pending = true;
+    s_pwr_last_action_ms = now_ms;
+    return true;
+}
+
 static void update_pwr_button(lv_timer_t *timer)
 {
     (void)timer;
@@ -1983,7 +2007,17 @@ static void update_pwr_button(lv_timer_t *timer)
     uint32_t level_mask = 0;
     esp_err_t err = esp_io_expander_get_level(s_pwr_io_expander, PWR_BUTTON_PIN_MASK, &level_mask);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "PWR button read failed: %s", esp_err_to_name(err));
+        s_pwr_read_errors++;
+        static uint32_t last_error_log_ms = 0;
+        const uint32_t now_ms = lv_tick_get();
+        if (last_error_log_ms == 0 ||
+            (uint32_t)(now_ms - last_error_log_ms) >= 5000) {
+            last_error_log_ms = now_ms;
+            ESP_LOGW(TAG,
+                     "PWR button read failed: %s (errors=%u)",
+                     esp_err_to_name(err),
+                     (unsigned)s_pwr_read_errors);
+        }
         return;
     }
 
@@ -2003,7 +2037,7 @@ static void update_pwr_button(lv_timer_t *timer)
     s_pwr_button_stable_pressed = raw_pressed;
     if (s_pwr_button_stable_pressed) {
         s_pwr_button_press_start_ms = now_ms;
-        ESP_LOGI(TAG, "PWR button pressed");
+        ESP_LOGI(TAG, "PWR button pressed (EXIO4)");
         return;
     }
 
@@ -2014,10 +2048,44 @@ static void update_pwr_button(lv_timer_t *timer)
         return;
     }
 
+    if (s_pwr_axp_handled_press &&
+        (uint32_t)(now_ms - s_pwr_axp_handled_ms) <= PWR_BUTTON_AXP_EXIO_SUPPRESS_MS) {
+        s_pwr_axp_handled_press = false;
+        ESP_LOGI(TAG, "PWR EXIO4 release ignored after AXP press");
+        return;
+    }
+    s_pwr_axp_handled_press = false;
+
     const uint32_t press_ms = now_ms - s_pwr_button_press_start_ms;
     ESP_LOGI(TAG, "PWR button released after %u ms", (unsigned)press_ms);
-    if (press_ms <= PWR_BUTTON_SINGLE_CLICK_MAX_MS) {
-        s_pwr_single_click_pending = true;
+    if (press_ms <= PWR_BUTTON_SINGLE_CLICK_MAX_MS &&
+        queue_pwr_single_click(now_ms)) {
+        ESP_LOGI(TAG, "PWR single click queued");
+    }
+}
+
+static void update_pwr_key_axp(uint32_t now_ms)
+{
+    if ((uint32_t)(now_ms - s_pwr_axp_last_poll_ms) < PWR_BUTTON_AXP_POLL_MS) {
+        return;
+    }
+    s_pwr_axp_last_poll_ms = now_ms;
+
+    const bool pressed = power_manager_take_pwr_key_press();
+    if (s_pwr_axp_ignore_until_ms != 0 &&
+        (int32_t)(now_ms - s_pwr_axp_ignore_until_ms) < 0) {
+        return;
+    }
+    if (!pressed) {
+        return;
+    }
+
+    s_pwr_axp_handled_press = true;
+    s_pwr_axp_handled_ms = now_ms;
+    if (queue_pwr_single_click(now_ms)) {
+        ESP_LOGI(TAG, "PWR button AXP press");
+    } else {
+        ESP_LOGI(TAG, "PWR button AXP press ignored (duplicate)");
     }
 }
 
@@ -2025,6 +2093,8 @@ static void update_inputs(lv_timer_t *timer)
 {
     (void)timer;
 
+    const uint32_t now_ms = lv_tick_get();
+    update_pwr_key_axp(now_ms);
     process_pending_input_actions();
 
     if (s_theme_switch_pending_step != 0 &&
@@ -2032,7 +2102,6 @@ static void update_inputs(lv_timer_t *timer)
         start_theme_transition_out();
     }
 
-    const uint32_t now_ms = lv_tick_get();
     if ((uint32_t)(now_ms - s_pwr_button_last_poll_ms) >= PWR_BUTTON_POLL_TIMER_MS) {
         s_pwr_button_last_poll_ms = now_ms;
         update_pwr_button(NULL);
@@ -2346,6 +2415,10 @@ static void clock_button_init(void)
 
 static void pwr_button_init(void)
 {
+    const uint32_t now_ms = lv_tick_get();
+    s_pwr_axp_last_poll_ms = now_ms;
+    s_pwr_axp_ignore_until_ms = now_ms + PWR_BUTTON_AXP_BOOT_GRACE_MS;
+
     s_pwr_io_expander = bsp_io_expander_init();
     if (s_pwr_io_expander == NULL) {
         ESP_LOGW(TAG, "PWR button IO expander init failed");
@@ -2366,7 +2439,6 @@ static void pwr_button_init(void)
     }
 
     const bool pressed = ((level_mask & PWR_BUTTON_PIN_MASK) != 0) != (PWR_BUTTON_ACTIVE_LEVEL == 0);
-    const uint32_t now_ms = lv_tick_get();
     s_pwr_button_stable_pressed = pressed;
     s_pwr_button_ignore_release = pressed;
     s_pwr_button_candidate_pressed = pressed;

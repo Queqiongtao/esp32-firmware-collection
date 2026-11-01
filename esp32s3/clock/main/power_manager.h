@@ -26,6 +26,7 @@ typedef struct {
 esp_err_t power_manager_init(void);
 void power_manager_update(void);
 void power_manager_get_status(power_status_t *status);
+bool power_manager_take_pwr_key_press(void);
 esp_err_t power_manager_shutdown(void);
 
 #ifdef __cplusplus

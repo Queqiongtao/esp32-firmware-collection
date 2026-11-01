@@ -68,7 +68,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 - `update_clock()`：每 1000 ms 更新主题时间；仅在根主题内容变化且旋转已停稳时刷新 snapshot。
 - `update_theme_animation()`：每 33 ms 调用当前主题的 `tick()`；覆盖层动画不触发 snapshot，根主题动画才按需刷新。
 - `update_clock_rotation()`：自动旋转开启时，仅在旋转弹簧运动时以 16 ms 周期运行，停稳后自动暂停。
-- `update_inputs()`：每 15 ms 处理按键、菜单切换和旋转定时器唤醒，并按 30 ms 周期轮询电源键。
+- `update_inputs()`：每 15 ms 处理按键、菜单切换和旋转定时器唤醒；按 30 ms 周期轮询 EXIO4 电源键，并按 100 ms 轮询 AXP2101 PKEY 正沿作为电池供电兜底。
 - `update_theme_transition()`：16 ms 周期，仅在主题过渡期间运行；淡出 70 ms，中点切换主题并强制刷新 snapshot，再淡入 90 ms。
 - `update_brightness_fade()`：16 ms 周期，仅在亮度渐变期间运行；息屏 220 ms、亮屏 240 ms。
 - `update_network_status()`：每 500 ms 读取 WiFi 状态，按需启停 SNTP、把 NTP 同步结果写回 RTC，并刷新设置菜单中的网络状态。
@@ -124,7 +124,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
 
 息屏入口包括：
 
-- 侧边电源键单击手动息屏/亮屏。
+- 侧边电源键单击手动息屏/亮屏；EXIO4 为主路径，AXP2101 PKEY 正沿为电池供电兜底。
 - 无操作超过设置中的超时时间后自动息屏。
 - 触摸、GPIO0 或电源键可唤醒；用于唤醒的触摸或按键不会同时切换主题或触发菜单项。
 
@@ -306,7 +306,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - WiFi 开关存于 `clock_settings` 命名空间的 `wifi` 键，NTP 自动对时存于 `ntp` 键且缺省开启；旧固件升级后没有 `ntp` 键时首次启动为开启。
 - SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
 - WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
-- AXP2101 配置为 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止；TS 引脚温度检测关闭，电池低于约 5% 时由 AXP2101 低压保护关机。初始化会显式使能 E-Gauge（REG18h bit3），但本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0；此时按 3300 mV(0%) 到 4200 mV(100%) 的分段电压曲线估算电量，充电时先减去 70 mV 补偿，UI 用 `~` 和 `Estimated` 标识。PWR 按键在 EXIO4 上高电平有效，开机时用于上电的那次释放会被忽略，避免开机后立即息屏。
+- AXP2101 配置为 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止；TS 引脚温度检测关闭，电池低于约 5% 时由 AXP2101 低压保护关机。初始化会显式使能 E-Gauge（REG18h bit3），但本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0；此时按 3300 mV(0%) 到 4200 mV(100%) 的分段电压曲线估算电量，充电时先减去 70 mV 补偿，UI 用 `~` 和 `Estimated` 标识。PWR 按键在 EXIO4 上高电平有效；固件同时轮询 AXP2101 PKEY 正沿中断，电池供电下 EXIO4/TCA9554 读取不稳定时仍可息屏/唤醒。两路事件做去重，开机时用于上电的那次释放会被忽略，避免开机后立即息屏。
 - 声音设置保存在 `clock_settings` 命名空间：`sound_on`、`sound_vol`、`ui_sound`、`chime_on`，3 个闹钟保存在 `alarm_cfg` blob 中。睡眠白噪音只在 USB 供电时运行，拔掉 USB 会停止。
 - WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络）。
 - `Scan networks` 在 LVGL 事件中同步调用 `esp_wifi_scan_start()`；扫描期间界面停在 `Scanning...`，完成后最多显示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描后恢复关闭；隐藏网络仍可手动输入。
