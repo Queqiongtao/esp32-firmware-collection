@@ -77,6 +77,7 @@
 - 不要把 `PROJECT_CONTEXT.md` 作为上下文来源；该文件已弃用。
 - 默认使用中文与用户沟通，包括进度说明、最终总结、验证结果和 Git 提交信息；除非用户明确要求使用其他语言。
 - Git 提交信息使用中文，除非用户明确要求使用其他语言。本工程提交信息前缀固定使用 `S3-clock: `，格式示例：`S3-clock: 优化表盘旋转跟手性`。
+- Git 提交信息如包含多行，首行（标题）必须概括整个提交的主要内容，正文再分条说明具体改动。
 - 未经用户明确要求，不要执行 `git commit` 或 `git push`；只完成代码修改、构建验证和结果汇报，等用户确认后再提交。
 - 新增主题时实现 `clock_theme_t` 接口，并在 `main/main.cpp` 的主题数组和 `tools/preview/preview.cpp` 的 `kThemes` 中同步注册；两处列表不会自动同步。新增顶层字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`，M5 字体/图片在预览侧由 GLOB 自动纳入，但设备端仍需显式添加。
 - 涉及 LVGL API 的代码必须在 LVGL 线程或显示锁保护下执行。
