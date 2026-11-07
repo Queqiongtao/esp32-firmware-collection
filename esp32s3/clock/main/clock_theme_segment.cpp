@@ -150,9 +150,9 @@ static bool segment_update(const struct tm *timeinfo)
              timeinfo->tm_mday,
              kMonthAbbr[timeinfo->tm_mon % 12]);
 
-    lv_label_set_text(s_time_fg, time_text);
-    lv_label_set_text(s_seconds_fg, sec_text);
-    lv_label_set_text(s_date_fg, date_text);
+    clock_theme_set_label_text(s_time_fg, time_text);
+    clock_theme_set_label_text(s_seconds_fg, sec_text);
+    clock_theme_set_label_text(s_date_fg, date_text);
     lv_obj_set_width(s_progress_fill, (PROGRESS_WIDTH * timeinfo->tm_sec) / 60);
     return true;
 }

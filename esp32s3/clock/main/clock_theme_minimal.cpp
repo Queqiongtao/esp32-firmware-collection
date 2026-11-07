@@ -198,9 +198,9 @@ static bool minimal_update(const struct tm *timeinfo)
              timeinfo->tm_mday,
              kMonthAbbr[timeinfo->tm_mon % 12]);
 
-    lv_label_set_text(s_time_label, time_text);
-    lv_label_set_text(s_seconds_label, sec_text);
-    lv_label_set_text(s_date_label, date_text);
+    clock_theme_set_label_text(s_time_label, time_text);
+    clock_theme_set_label_text(s_seconds_label, sec_text);
+    clock_theme_set_label_text(s_date_label, date_text);
     lv_arc_set_value(s_seconds_arc, timeinfo->tm_sec);
 
     const uint32_t accent_hex = kAccentPalette[timeinfo->tm_min % kAccentCount];

@@ -16,6 +16,7 @@ esp_err_t ntp_time_sync_sync_now(void);
 bool ntp_time_sync_is_running(void);
 bool ntp_time_sync_is_synced(void);
 bool ntp_time_sync_is_syncing(void);
+void ntp_time_sync_update(void);
 time_t ntp_time_sync_last_sync_time(void);
 bool ntp_time_sync_take_rtc_write_pending(void);
 

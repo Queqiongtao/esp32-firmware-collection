@@ -235,9 +235,9 @@ static bool m5_classic_update(const struct tm *timeinfo)
     replace_zero_with_o(time_text);
     replace_zero_with_o(date_text);
 
-    lv_label_set_text(s_m5_classic_time, time_text);
-    lv_label_set_text(s_m5_classic_weekday, kWeekdayAbbr[timeinfo->tm_wday % 7]);
-    lv_label_set_text(s_m5_classic_date, date_text);
+    clock_theme_set_label_text(s_m5_classic_time, time_text);
+    clock_theme_set_label_text(s_m5_classic_weekday, kWeekdayAbbr[timeinfo->tm_wday % 7]);
+    clock_theme_set_label_text(s_m5_classic_date, date_text);
 
     const double second_angle = (double)timeinfo->tm_sec * 6.0 - 90.0;
     const double minute_angle = ((double)timeinfo->tm_min + (double)timeinfo->tm_sec / 60.0) * 6.0 - 90.0;

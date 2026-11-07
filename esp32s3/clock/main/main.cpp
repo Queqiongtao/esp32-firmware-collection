@@ -84,9 +84,9 @@ static constexpr uint32_t CLOCK_ROTATION_PERF_LOG_MS = 1000;
 static constexpr float CLOCK_ROTATION_MAX_DT_S = 0.05f;
 static constexpr float CLOCK_ROTATION_INVALIDATE_MOVING_EPSILON_DEG = 1.5f;
 static constexpr float CLOCK_ROTATION_INVALIDATE_SETTLED_EPSILON_DEG = 2.0f;
-static constexpr float CLOCK_ROTATION_START_EPSILON_DEG = 15.0f;
 static constexpr float CLOCK_ROTATION_TARGET_EPSILON_DEG = 3.0f;
 static constexpr float CLOCK_ROTATION_SETTLED_CORRECTION_EPSILON_DEG = 2.0f;
+static constexpr uint32_t CLOCK_ALERT_AUTO_CLOSE_MS = 60 * 1000;
 static constexpr spring_angle_config_t CLOCK_ROTATION_SPRING_CONFIG = {
     .stiffness = 180.0f,
     .damping = 24.0f,
@@ -433,7 +433,12 @@ static void refresh_clock_snapshot(void)
         ESP_LOGW(TAG, "Failed to refresh clock snapshot");
         s_clock_snapshot_dirty = true;
         s_clock_rotation_applied_valid = false;
-        apply_clock_rotation(spring_angle_get_current(&s_clock_rotation_spring));
+        // Do not leave a blank screen behind when both the reusable buffer and
+        // the fallback allocation fail. Show the live theme tree instead.
+        lv_obj_add_flag(s_clock_snapshot_image, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(s_current_theme_root, LV_OBJ_FLAG_HIDDEN);
+        set_current_theme_overlay_visible(true);
+        apply_clock_rotation(0.0f);
         keep_touch_layer_foreground();
         return;
     }
@@ -1444,7 +1449,7 @@ static void check_alarms(const struct tm &timeinfo)
     const uint64_t now_ms = esp_timer_get_time() / 1000;
 
     if (s_alarm_active_index >= 0) {
-        if ((uint32_t)(now_ms - s_alert_started_ms) >= 60000U) {
+        if ((uint32_t)(now_ms - s_alert_started_ms) >= CLOCK_ALERT_AUTO_CLOSE_MS) {
             stop_alarm();
         }
         return;
@@ -1525,7 +1530,7 @@ static void update_chime_event(const struct tm &timeinfo)
         s_alarm_active_index >= 0 || s_screen_sleeping) {
         return;
     }
-    if (timeinfo.tm_min != 0 || timeinfo.tm_sec >= 5) {
+    if (timeinfo.tm_min != 0) {
         return;
     }
     if (timeinfo.tm_hour >= 22 || timeinfo.tm_hour < 8) {
@@ -1553,6 +1558,12 @@ static void update_audio_events(lv_timer_t *timer)
     update_chime_event(timeinfo);
 
     const uint64_t now_ms = esp_timer_get_time() / 1000;
+    if (s_alert_kind == AlertKind::Timer && s_alert_overlay != nullptr &&
+        (uint32_t)(now_ms - s_alert_started_ms) >= CLOCK_ALERT_AUTO_CLOSE_MS) {
+        // A finished timer must not keep the screen awake forever.
+        close_alert_overlay();
+    }
+
     if (s_sleep_noise_active &&
         (!s_vbus_present || now_ms >= s_sleep_noise_end_ms ||
          !audio_manager_is_noise_playing())) {
@@ -1750,6 +1761,8 @@ static void update_network_status(lv_timer_t *timer)
 {
     (void)timer;
 
+    ntp_time_sync_update();
+
     wifi_manager_status_t wifi = {};
     wifi_manager_get_status(&wifi);
     const bool connected = wifi.state == WIFI_MANAGER_CONNECTED;
@@ -1805,10 +1818,10 @@ static void update_network_status(lv_timer_t *timer)
         }
 
         char ntp[24] = {};
-        if (!s_settings.ntp_enabled) {
-            snprintf(ntp, sizeof(ntp), "NTP off");
-        } else if (ntp_time_sync_is_syncing()) {
+        if (ntp_time_sync_is_syncing()) {
             snprintf(ntp, sizeof(ntp), "Syncing time...");
+        } else if (!s_settings.ntp_enabled && !manual_ntp_active) {
+            snprintf(ntp, sizeof(ntp), "NTP off");
         } else {
             const time_t last_sync = ntp_time_sync_last_sync_time();
             if (last_sync > 0) {
@@ -2129,6 +2142,7 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
     if (!s_clock_rotation_submitted_target_valid) {
         s_clock_rotation_submitted_target_deg = normalized_angle_deg;
         s_clock_rotation_submitted_target_valid = true;
+        s_clock_rotation_started = true;
         s_clock_rotation_target_deg = normalized_angle_deg;
         s_clock_rotation_target_dirty = true;
         portEXIT_CRITICAL(&s_clock_rotation_lock);
@@ -2138,24 +2152,19 @@ static void on_imu_clock_angle(float angle_deg, void *user_ctx)
     const float target_delta_deg =
         fabsf(spring_angle_shortest_delta(normalized_angle_deg,
                                           s_clock_rotation_submitted_target_deg));
-    const bool rotation_settled = !s_clock_rotation_started &&
-                                  spring_angle_is_settled(&s_clock_rotation_spring);
-    const float update_epsilon_deg = s_clock_rotation_started
-                                         ? CLOCK_ROTATION_TARGET_EPSILON_DEG
-                                         : rotation_settled
-                                               ? CLOCK_ROTATION_SETTLED_CORRECTION_EPSILON_DEG
-                                               : CLOCK_ROTATION_START_EPSILON_DEG;
+    // Keep the last accepted target as the reference. Do not re-anchor to
+    // every filtered sample here: at 100 Hz a slow tilt would otherwise never
+    // accumulate enough error to be applied.
+    const float update_epsilon_deg =
+        s_clock_rotation_started
+            ? CLOCK_ROTATION_TARGET_EPSILON_DEG
+            : CLOCK_ROTATION_SETTLED_CORRECTION_EPSILON_DEG;
     if (target_delta_deg < update_epsilon_deg) {
-        if (rotation_settled) {
-            s_clock_rotation_submitted_target_deg = normalized_angle_deg;
-        }
         portEXIT_CRITICAL(&s_clock_rotation_lock);
         return;
     }
 
-    if (s_clock_rotation_started || target_delta_deg >= CLOCK_ROTATION_START_EPSILON_DEG) {
-        s_clock_rotation_started = true;
-    }
+    s_clock_rotation_started = true;
     s_clock_rotation_submitted_target_deg = normalized_angle_deg;
     s_clock_rotation_target_deg = normalized_angle_deg;
     s_clock_rotation_target_dirty = true;

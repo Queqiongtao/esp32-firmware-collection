@@ -2,10 +2,12 @@
 
 #include "esp_log.h"
 #include "esp_sntp.h"
+#include "esp_timer.h"
 #include "portmacro.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "NtpTimeSync";
+static constexpr uint64_t NTP_SYNC_TIMEOUT_US = 45ULL * 1000ULL * 1000ULL;
 static constexpr const char *NTP_SERVERS[] = {
     "ntp.aliyun.com",
     "ntp.tencent.com",
@@ -20,6 +22,7 @@ static bool s_initialized = false;
 static bool s_running = false;
 static bool s_synced = false;
 static bool s_syncing = false;
+static uint64_t s_sync_started_us = 0;
 static bool s_rtc_write_pending = false;
 static time_t s_last_sync_time = 0;
 
@@ -31,6 +34,7 @@ static void on_time_synced(struct timeval *tv)
     portENTER_CRITICAL(&s_lock);
     s_synced = true;
     s_syncing = false;
+    s_sync_started_us = 0;
     s_last_sync_time = now;
     // The callback runs in the lwIP/SNTP task. Defer the I2C RTC write to the
     // LVGL timer so it does not block the TCP/IP stack and stays serialized
@@ -72,9 +76,11 @@ esp_err_t ntp_time_sync_start(void)
     }
 
     esp_sntp_init();
+    const uint64_t started_us = (uint64_t)esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     s_running = true;
     s_syncing = true;
+    s_sync_started_us = started_us;
     portEXIT_CRITICAL(&s_lock);
     ESP_LOGI(TAG, "SNTP started, primary=%s", NTP_SERVERS[0]);
     return ESP_OK;
@@ -86,6 +92,7 @@ void ntp_time_sync_stop(void)
     const bool running = s_running;
     s_running = false;
     s_syncing = false;
+    s_sync_started_us = 0;
     portEXIT_CRITICAL(&s_lock);
 
     if (running) {
@@ -109,8 +116,10 @@ esp_err_t ntp_time_sync_sync_now(void)
         return ntp_time_sync_start();
     }
 
+    const uint64_t started_us = (uint64_t)esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     s_syncing = true;
+    s_sync_started_us = started_us;
     portEXIT_CRITICAL(&s_lock);
 
     if (!esp_sntp_restart()) {
@@ -147,6 +156,26 @@ bool ntp_time_sync_is_syncing(void)
     const bool syncing = s_syncing;
     portEXIT_CRITICAL(&s_lock);
     return syncing;
+}
+
+void ntp_time_sync_update(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    bool timed_out = false;
+
+    portENTER_CRITICAL(&s_lock);
+    if (s_syncing && s_sync_started_us != 0 &&
+        (uint64_t)(now_us - (int64_t)s_sync_started_us) >= NTP_SYNC_TIMEOUT_US) {
+        s_syncing = false;
+        s_sync_started_us = 0;
+        timed_out = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    if (timed_out) {
+        ESP_LOGW(TAG, "SNTP sync timed out after %u s",
+                 (unsigned)(NTP_SYNC_TIMEOUT_US / 1000000ULL));
+    }
 }
 
 time_t ntp_time_sync_last_sync_time(void)

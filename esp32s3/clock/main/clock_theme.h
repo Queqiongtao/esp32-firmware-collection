@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string.h>
 #include <time.h>
 
 #include "lvgl.h"
@@ -21,6 +22,22 @@ typedef struct {
     void (*set_overlay_visible)(bool visible);
     void (*set_rotation)(float angle_deg);
 } clock_theme_t;
+
+// Common helper: avoid freeing and reallocating a label string when its text
+// did not change. Themes update once per second, while dates/weekdays change
+// much less often.
+static inline bool clock_theme_set_label_text(lv_obj_t *label, const char *text)
+{
+    if (label == NULL || text == NULL) {
+        return false;
+    }
+    const char *current = lv_label_get_text(label);
+    if (current != NULL && strcmp(current, text) == 0) {
+        return false;
+    }
+    lv_label_set_text(label, text);
+    return true;
+}
 
 extern const clock_theme_t g_clock_theme_minimal;
 extern const clock_theme_t g_clock_theme_segment;

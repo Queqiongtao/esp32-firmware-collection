@@ -283,8 +283,8 @@ static bool analog_update(const struct tm *timeinfo)
     char day_text[4] = {};
     snprintf(weekday_text, sizeof(weekday_text), "%s", kWeekdayAbbr[timeinfo->tm_wday % 7]);
     snprintf(day_text, sizeof(day_text), "%02d", timeinfo->tm_mday);
-    lv_label_set_text(s_date_weekday, weekday_text);
-    lv_label_set_text(s_date_day, day_text);
+    clock_theme_set_label_text(s_date_weekday, weekday_text);
+    clock_theme_set_label_text(s_date_day, day_text);
     return true;
 }
 
