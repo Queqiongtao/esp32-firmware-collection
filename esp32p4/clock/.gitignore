@@ -1,0 +1,5 @@
+build/
+tools/preview/out/
+sdkconfig
+sdkconfig.old
+managed_components/

@@ -20,6 +20,7 @@ esp32-firmware-collection/
 │   ├── waveshare_amoled_1_8/
 │   └── blink/
 ├── esp32p4/
+│   ├── clock/                 P4 800×800 圆屏时钟（ESP32-C6 Hosted WiFi）
 │   ├── JC1060P470/
 │   ├── PrintSphere/           PrintSphere v1.6.2 的 JC1060P470 迁移
 │   ├── mipi_dsi/
@@ -30,6 +31,8 @@ esp32-firmware-collection/
 `companion_display` 使用 WebSocket + JPEG + UDP 的 Companion Display v3，将公共协议、PC 客户端和 S3/P4 设备固件放在同一产品目录。两个固件保持独立构建，设备差异通过协议协商。`wireless_display` 是不兼容的 WDP/WebRTC 新协议，两者不共享版本号或实现。
 
 `esp32p4/PrintSphere` 是 PrintSphere `v1.6.2` 到 JC1060P470（ESP32-P4 + ESP32-C6）的固定快照迁移，使用 ESP-IDF `6.0.1` 和原生 1024x600 横屏 UI。当前已通过编译和链接验证，真机状态及后续门禁见其 [迁移总计划](esp32p4/PrintSphere/docs/plans/00_master_plan.md)。
+
+`esp32p4/clock` 是从 `esp32s3/clock` 移植的 800×800 圆屏时钟，目标板为 Waveshare ESP32-P4-WIFI6-Touch-LCD-3.4C，使用 P4 内部 RTC、板载 ESP32-C6 Hosted WiFi 和 800×800 原生 UI。工程说明见 [README](esp32p4/clock/README.md)。
 
 | Companion Display 设备 | 网络 | 默认协商尺寸 | TCP / UDP 完整帧上限 |
 | --- | --- | --- | --- |
@@ -50,6 +53,9 @@ cd ../esp32p4
 ./dev.sh build
 
 cd ../../../esp32p4/PrintSphere
+./dev.sh build
+
+cd ../clock
 ./dev.sh build
 ```
 
