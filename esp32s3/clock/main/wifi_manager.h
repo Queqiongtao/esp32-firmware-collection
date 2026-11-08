@@ -26,6 +26,7 @@ typedef struct {
     uint8_t disconnect_reason;
     char ssid[33];
     char ip[16];
+    uint32_t retry_in_ms;
 } wifi_manager_status_t;
 
 typedef struct {

@@ -1835,13 +1835,29 @@ static void update_network_status(lv_timer_t *timer)
         snprintf(detail, sizeof(detail), "%s | %s", network, ntp);
         break;
     }
-    case WIFI_MANAGER_FAILED:
-        snprintf(state, sizeof(state), "Connection failed");
-        snprintf(detail,
-                 sizeof(detail),
-                 "%s | Retrying",
-                 wifi_reason_text(wifi.disconnect_reason));
+    case WIFI_MANAGER_FAILED: {
+        char retry[20] = {};
+        if (wifi.retry_in_ms > 0) {
+            const uint32_t seconds = (wifi.retry_in_ms + 999U) / 1000U;
+            if (seconds >= 60U) {
+                snprintf(retry, sizeof(retry), "%u min", (seconds + 59U) / 60U);
+            } else {
+                snprintf(retry, sizeof(retry), "%u s", seconds);
+            }
+            snprintf(detail,
+                     sizeof(detail),
+                     "%s | Retry in %s",
+                     wifi_reason_text(wifi.disconnect_reason),
+                     retry);
+        } else {
+            snprintf(detail,
+                     sizeof(detail),
+                     "%s | Retrying",
+                     wifi_reason_text(wifi.disconnect_reason));
+        }
+        snprintf(state, sizeof(state), "Reconnecting...");
         break;
+    }
     default:
         snprintf(state, sizeof(state), "WiFi unknown");
         break;

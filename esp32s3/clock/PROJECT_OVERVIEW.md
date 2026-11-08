@@ -305,10 +305,10 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - WiFi 凭据保存在 NVS `wifi_creds` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据，只修改 SSID 时会沿用已保存密码。ESP-IDF NVS 的命名空间和键名最长 15 个字符，`wifi_creds` 已按该限制命名。
 - WiFi 开关存于 `clock_settings` 命名空间的 `wifi` 键，NTP 自动对时存于 `ntp` 键且缺省开启；旧固件升级后没有 `ntp` 键时首次启动为开启。
 - SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
-- WiFi 断线后每 5 秒重试；NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
+- WiFi 断线后按 30 秒、2 分钟、5 分钟、10 分钟、20 分钟、之后每 60 分钟退避重试；30 秒和 2 分钟档保持射频开启，5 分钟及以上档关闭射频；鉴权失败从 5 分钟档开始。连续在线 60 秒、重新切换 WiFi 开关或重新保存凭据会重置退避；不设重试次数上限。NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
 - AXP2101 配置为 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止；TS 引脚温度检测关闭，电池低于约 5% 时由 AXP2101 低压保护关机。初始化会显式使能 E-Gauge（REG18h bit3），但本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0；此时按 3300 mV(0%) 到 4200 mV(100%) 的分段电压曲线估算电量，充电时先减去 70 mV 补偿，UI 用 `~` 和 `Estimated` 标识。PWR 按键在 EXIO4 上高电平有效；固件同时轮询 AXP2101 PKEY 正沿中断，电池供电下 EXIO4/TCA9554 读取不稳定时仍可息屏/唤醒。两路事件做去重，开机时用于上电的那次释放会被忽略，避免开机后立即息屏。
 - 声音设置保存在 `clock_settings` 命名空间：`sound_on`、`sound_vol`、`ui_sound`、`chime_on`，3 个闹钟保存在 `alarm_cfg` blob 中。睡眠白噪音只在 USB 供电时运行，拔掉 USB 会停止。
-- WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络）。
+- WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络），并显示下一次重试倒计时。
 - `Scan networks` 在 LVGL 事件中同步调用 `esp_wifi_scan_start()`；扫描期间界面停在 `Scanning...`，完成后最多显示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描后恢复关闭；隐藏网络仍可手动输入。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。

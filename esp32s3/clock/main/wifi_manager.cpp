@@ -21,20 +21,49 @@ static constexpr const char *WIFI_NVS_KEY_SSID = "ssid";
 static constexpr const char *WIFI_NVS_KEY_PASSWORD = "pass";
 static constexpr size_t WIFI_SSID_MAX_LEN = 32;
 static constexpr size_t WIFI_PASSWORD_MAX_LEN = 64;
-static constexpr uint64_t WIFI_RETRY_DELAY_US = 5ULL * 1000ULL * 1000ULL;
+
+// 30 s, 2 min, 5 min, 10 min, 20 min, then 60 min forever.
+static constexpr uint64_t WIFI_RETRY_DELAYS_US[] = {
+    30ULL * 1000ULL * 1000ULL,
+    120ULL * 1000ULL * 1000ULL,
+    300ULL * 1000ULL * 1000ULL,
+    600ULL * 1000ULL * 1000ULL,
+    1200ULL * 1000ULL * 1000ULL,
+    3600ULL * 1000ULL * 1000ULL,
+};
+static constexpr uint8_t WIFI_RETRY_DELAY_COUNT =
+    static_cast<uint8_t>(sizeof(WIFI_RETRY_DELAYS_US) / sizeof(WIFI_RETRY_DELAYS_US[0]));
+static constexpr uint8_t WIFI_AUTH_RETRY_START_INDEX = 2; // 5 minutes
+static constexpr uint64_t WIFI_RETRY_RADIO_OFF_DELAY_US = 300ULL * 1000ULL * 1000ULL;
+static constexpr uint64_t WIFI_STABLE_CONNECTION_US = 60ULL * 1000ULL * 1000ULL;
+static constexpr uint64_t WIFI_SCAN_RETRY_DEFER_US = 1ULL * 1000ULL * 1000ULL;
 
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static wifi_manager_state_t s_state = WIFI_MANAGER_OFF;
 static bool s_enabled = false;
 static bool s_has_credentials = false;
 static bool s_initialized = false;
-static bool s_started = false;
+static volatile bool s_started = false;
+static volatile bool s_scan_in_progress = false;
 static char s_ssid[WIFI_SSID_MAX_LEN + 1] = {};
 static char s_password[WIFI_PASSWORD_MAX_LEN + 1] = {};
 static char s_ip[16] = {};
 static uint8_t s_disconnect_reason = 0;
 static esp_netif_t *s_netif = nullptr;
 static esp_timer_handle_t s_retry_timer = nullptr;
+
+enum class RetryPhase : uint8_t {
+    Idle,
+    StopRadio,
+    Wait,
+};
+
+static uint8_t s_retry_index = 0;
+static uint64_t s_retry_delay_us = 0;
+static uint64_t s_retry_due_us = 0;
+static uint64_t s_connected_since_us = 0;
+static bool s_reset_retry_on_connect = false;
+static RetryPhase s_retry_phase = RetryPhase::Idle;
 
 static void copy_string(char *dest, size_t dest_size, const char *src)
 {
@@ -116,34 +145,165 @@ static void stop_retry_timer(void)
     }
 }
 
-static void retry_timer_cb(void *arg)
+static void set_retry_phase(RetryPhase phase, uint64_t delay_us, uint64_t due_us)
 {
-    (void)arg;
-    if (!wifi_manager_is_enabled() || !wifi_manager_has_credentials()) {
-        return;
-    }
-
     portENTER_CRITICAL(&s_lock);
-    const bool already_connected = s_state == WIFI_MANAGER_CONNECTED;
+    s_retry_phase = phase;
+    s_retry_delay_us = delay_us;
+    s_retry_due_us = due_us;
     portEXIT_CRITICAL(&s_lock);
-    if (already_connected) {
+}
+
+static RetryPhase get_retry_phase(uint64_t *delay_us, uint64_t *due_us)
+{
+    portENTER_CRITICAL(&s_lock);
+    const RetryPhase phase = s_retry_phase;
+    if (delay_us != nullptr) {
+        *delay_us = s_retry_delay_us;
+    }
+    if (due_us != nullptr) {
+        *due_us = s_retry_due_us;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    return phase;
+}
+
+static bool is_retry_scheduled(void)
+{
+    return get_retry_phase(nullptr, nullptr) != RetryPhase::Idle;
+}
+
+static void cancel_retry(void)
+{
+    stop_retry_timer();
+    set_retry_phase(RetryPhase::Idle, 0, 0);
+}
+
+static void reset_retry_counters(bool reset_on_connect)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_retry_index = 0;
+    s_connected_since_us = 0;
+    s_reset_retry_on_connect = reset_on_connect;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static wifi_manager_state_t get_state(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    const wifi_manager_state_t state = s_state;
+    portEXIT_CRITICAL(&s_lock);
+    return state;
+}
+
+static bool is_auth_failure_reason(uint8_t reason)
+{
+    return reason == WIFI_REASON_AUTH_FAIL ||
+           reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+           reason == WIFI_REASON_HANDSHAKE_TIMEOUT;
+}
+
+static void stop_wifi_radio(void)
+{
+    if (!s_started) {
         return;
     }
 
-    set_state(WIFI_MANAGER_CONNECTING);
-    const esp_err_t err = esp_wifi_connect();
-    if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
-        ESP_LOGW(TAG, "WiFi retry failed: %s", esp_err_to_name(err));
+    esp_wifi_disconnect();
+    const esp_err_t err = esp_wifi_stop();
+    if (err == ESP_OK || err == ESP_ERR_WIFI_NOT_STARTED) {
+        s_started = false;
+        ESP_LOGI(TAG, "WiFi radio stopped");
+    } else {
+        ESP_LOGW(TAG, "WiFi stop failed: %s", esp_err_to_name(err));
     }
 }
 
-static void schedule_retry(void)
+static esp_err_t start_and_connect(void);
+
+static void retry_timer_cb(void *arg)
 {
-    if (s_retry_timer == nullptr) {
+    (void)arg;
+
+    if (!wifi_manager_is_enabled() || !wifi_manager_has_credentials()) {
+        cancel_retry();
+        set_state(WIFI_MANAGER_OFF);
+        return;
+    }
+
+    if (s_scan_in_progress) {
+        if (s_retry_timer != nullptr) {
+            esp_timer_start_once(s_retry_timer, WIFI_SCAN_RETRY_DEFER_US);
+        }
+        return;
+    }
+
+    uint64_t delay_us = 0;
+    const RetryPhase phase = get_retry_phase(&delay_us, nullptr);
+    if (phase == RetryPhase::StopRadio) {
+        stop_wifi_radio();
+        if (!wifi_manager_is_enabled()) {
+            cancel_retry();
+            set_state(WIFI_MANAGER_OFF);
+            return;
+        }
+        if (get_retry_phase(nullptr, nullptr) != RetryPhase::StopRadio) {
+            // A user action changed the retry policy while the radio stopped.
+            return;
+        }
+        const uint64_t due_us = (uint64_t)esp_timer_get_time() + delay_us;
+        set_retry_phase(RetryPhase::Wait, delay_us, due_us);
+        esp_timer_start_once(s_retry_timer, delay_us);
+        return;
+    }
+
+    if (phase == RetryPhase::Wait) {
+        cancel_retry();
+        if (!wifi_manager_is_enabled() || !wifi_manager_has_credentials()) {
+            set_state(WIFI_MANAGER_OFF);
+            return;
+        }
+        start_and_connect();
+    }
+}
+
+static void schedule_retry(bool auth_failure)
+{
+    if (s_retry_timer == nullptr || is_retry_scheduled()) {
         return;
     }
     esp_timer_stop(s_retry_timer);
-    esp_timer_start_once(s_retry_timer, WIFI_RETRY_DELAY_US);
+
+    portENTER_CRITICAL(&s_lock);
+    if (auth_failure && s_retry_index < WIFI_AUTH_RETRY_START_INDEX) {
+        s_retry_index = WIFI_AUTH_RETRY_START_INDEX;
+    }
+    uint8_t index = s_retry_index;
+    if (index >= WIFI_RETRY_DELAY_COUNT) {
+        index = WIFI_RETRY_DELAY_COUNT - 1;
+    }
+    const uint64_t delay_us = WIFI_RETRY_DELAYS_US[index];
+    if (s_retry_index < WIFI_RETRY_DELAY_COUNT - 1) {
+        ++s_retry_index;
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    set_state(WIFI_MANAGER_FAILED);
+    if (delay_us >= WIFI_RETRY_RADIO_OFF_DELAY_US) {
+        set_retry_phase(RetryPhase::StopRadio, delay_us, 0);
+        esp_timer_start_once(s_retry_timer, 1000);
+    } else {
+        const uint64_t due_us = (uint64_t)esp_timer_get_time() + delay_us;
+        set_retry_phase(RetryPhase::Wait, delay_us, due_us);
+        esp_timer_start_once(s_retry_timer, delay_us);
+    }
+
+    ESP_LOGI(TAG,
+             "WiFi retry in %u s (index=%u, radio=%s, auth=%d)",
+             (unsigned)(delay_us / 1000000ULL),
+             (unsigned)index,
+             delay_us >= WIFI_RETRY_RADIO_OFF_DELAY_US ? "off" : "on",
+             auth_failure ? 1 : 0);
 }
 
 static esp_err_t start_and_connect(void)
@@ -152,14 +312,18 @@ static esp_err_t start_and_connect(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    stop_retry_timer();
+    cancel_retry();
     set_disconnect_reason(0);
+    portENTER_CRITICAL(&s_lock);
+    s_connected_since_us = 0;
+    portEXIT_CRITICAL(&s_lock);
 
     if (!s_started) {
         esp_err_t err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
             ESP_LOGW(TAG, "WiFi start failed: %s", esp_err_to_name(err));
             set_state(WIFI_MANAGER_FAILED);
+            schedule_retry(false);
             return err;
         }
         s_started = true;
@@ -183,16 +347,20 @@ static esp_err_t start_and_connect(void)
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi set config failed: %s", esp_err_to_name(err));
         set_state(WIFI_MANAGER_FAILED);
+        schedule_retry(false);
         return err;
     }
 
-    esp_wifi_disconnect();
+    if (get_state() == WIFI_MANAGER_CONNECTED) {
+        esp_wifi_disconnect();
+    }
+
     set_state(WIFI_MANAGER_CONNECTING);
     err = esp_wifi_connect();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "WiFi connect failed: %s", esp_err_to_name(err));
         set_state(WIFI_MANAGER_FAILED);
-        schedule_retry();
+        schedule_retry(false);
         return err;
     }
     return ESP_OK;
@@ -207,6 +375,9 @@ static void wifi_event_handler(void *arg,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         set_disconnect_reason(0);
+        if (s_scan_in_progress) {
+            return;
+        }
         if (wifi_manager_is_enabled() && wifi_manager_has_credentials()) {
             set_state(WIFI_MANAGER_CONNECTING);
         } else {
@@ -222,16 +393,32 @@ static void wifi_event_handler(void *arg,
             set_disconnect_reason(event->reason);
         }
         if (!wifi_manager_is_enabled()) {
+            cancel_retry();
             set_state(WIFI_MANAGER_OFF);
             return;
         }
-        set_state(WIFI_MANAGER_FAILED);
-        if (wifi_manager_has_credentials()) {
-            ESP_LOGI(TAG,
-                     "WiFi disconnected (reason=%u), retry in 5 seconds",
-                     event != nullptr ? event->reason : 0);
-            schedule_retry();
+        if (is_retry_scheduled()) {
+            // Ignore duplicate disconnect events and the disconnect generated
+            // while intentionally stopping the radio for a long backoff.
+            return;
         }
+
+        const uint64_t now_us = (uint64_t)esp_timer_get_time();
+        bool stable_connection = false;
+        portENTER_CRITICAL(&s_lock);
+        if (s_connected_since_us != 0) {
+            stable_connection =
+                (now_us - s_connected_since_us) >= WIFI_STABLE_CONNECTION_US;
+            s_connected_since_us = 0;
+        }
+        if (stable_connection) {
+            s_retry_index = 0;
+        }
+        portEXIT_CRITICAL(&s_lock);
+
+        const bool auth_failure =
+            event != nullptr && is_auth_failure_reason(event->reason);
+        schedule_retry(auth_failure);
         return;
     }
 
@@ -245,7 +432,16 @@ static void wifi_event_handler(void *arg,
         set_ip(ip);
         set_disconnect_reason(0);
         set_state(WIFI_MANAGER_CONNECTED);
-        stop_retry_timer();
+        cancel_retry();
+
+        portENTER_CRITICAL(&s_lock);
+        s_connected_since_us = (uint64_t)esp_timer_get_time();
+        if (s_reset_retry_on_connect) {
+            s_retry_index = 0;
+            s_reset_retry_on_connect = false;
+        }
+        portEXIT_CRITICAL(&s_lock);
+
         ESP_LOGI(TAG, "WiFi connected, ip=%s", ip);
     }
 }
@@ -384,6 +580,8 @@ esp_err_t wifi_manager_init(void)
     }
 
     s_initialized = true;
+    cancel_retry();
+    reset_retry_counters(false);
     set_disconnect_reason(0);
     set_state(WIFI_MANAGER_OFF);
     return ESP_OK;
@@ -402,12 +600,9 @@ esp_err_t wifi_manager_set_enabled(bool enabled)
         portENTER_CRITICAL(&s_lock);
         s_enabled = false;
         portEXIT_CRITICAL(&s_lock);
-        stop_retry_timer();
-        esp_wifi_disconnect();
-        if (s_started) {
-            esp_wifi_stop();
-            s_started = false;
-        }
+        cancel_retry();
+        reset_retry_counters(false);
+        stop_wifi_radio();
         set_ip(nullptr);
         set_disconnect_reason(0);
         set_state(WIFI_MANAGER_OFF);
@@ -421,6 +616,8 @@ esp_err_t wifi_manager_set_enabled(bool enabled)
     portENTER_CRITICAL(&s_lock);
     s_enabled = true;
     portEXIT_CRITICAL(&s_lock);
+    cancel_retry();
+    reset_retry_counters(true);
     return start_and_connect();
 }
 
@@ -451,6 +648,11 @@ esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size
     if (err != ESP_OK) {
         return err;
     }
+
+    struct ScanInProgressGuard {
+        ScanInProgressGuard() { s_scan_in_progress = true; }
+        ~ScanInProgressGuard() { s_scan_in_progress = false; }
+    } scan_guard;
 
     bool started_here = false;
     if (!s_started) {
@@ -513,10 +715,16 @@ esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size
         }
     }
 
-    if (started_here && !s_enabled) {
-        esp_wifi_stop();
-        s_started = false;
-        set_state(WIFI_MANAGER_OFF);
+    if (started_here) {
+        stop_wifi_radio();
+        if (!wifi_manager_is_enabled()) {
+            set_state(WIFI_MANAGER_OFF);
+        } else if (get_state() != WIFI_MANAGER_CONNECTED &&
+                   !is_retry_scheduled()) {
+            // The temporary radio session for scanning is over; resume the
+            // normal backoff instead of leaving WiFi running.
+            schedule_retry(false);
+        }
     }
 
     ESP_LOGI(TAG, "WiFi scan found %u networks", (unsigned)*count);
@@ -558,6 +766,8 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password)
     s_enabled = true;
     portEXIT_CRITICAL(&s_lock);
     set_disconnect_reason(0);
+    cancel_retry();
+    reset_retry_counters(true);
 
     return start_and_connect();
 }
@@ -589,6 +799,7 @@ void wifi_manager_get_status(wifi_manager_status_t *status)
         return;
     }
 
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     status->state = s_state;
     status->enabled = s_enabled;
@@ -596,6 +807,12 @@ void wifi_manager_get_status(wifi_manager_status_t *status)
     status->disconnect_reason = s_disconnect_reason;
     status->rssi_valid = false;
     status->rssi = 0;
+    status->retry_in_ms = 0;
+    if (s_state == WIFI_MANAGER_FAILED && s_retry_due_us > now_us) {
+        const uint64_t remaining_ms = (s_retry_due_us - now_us) / 1000ULL;
+        status->retry_in_ms =
+            remaining_ms > UINT32_MAX ? UINT32_MAX : (uint32_t)remaining_ms;
+    }
     copy_string(status->ssid, sizeof(status->ssid), s_ssid);
     copy_string(status->ip, sizeof(status->ip), s_ip);
     portEXIT_CRITICAL(&s_lock);
