@@ -1,8 +1,10 @@
 set(MAIN_SRCS
     "main.cpp"
+    "clock_alert_scheduler.cpp"
     "audio_manager.cpp"
     "clock_settings.cpp"
     "clock_settings_menu.cpp"
+    "clock_theme_previews.c"
     "clock_touch_gesture.cpp"
     "rtc_time_sync.cpp"
     "imu_demo.cpp"

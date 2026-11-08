@@ -120,7 +120,7 @@ PCF85063、QMI8658 和触摸控制器共用 BSP I2C 总线。`bsp_i2c_get_handle
    - 单字段编辑页使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，输入框使用薄荷绿焦点边框，密码页支持显示/隐藏。
    - 摘要页的 Connect 保存凭据并开始连接，保存失败时保持弹层并显示错误；Cancel 关闭弹层。编辑页的 Done/Back 都会保留当前输入并返回摘要。配网弹层打开期间暂停菜单的 1 分钟自动关闭计时。
 
-菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。WiFi 配网弹层打开时不会触发菜单超时关闭。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；5 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi/Sound。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
+菜单默认停在 Brightness 页；按顶部中央 Done 关闭，菜单内 1 分钟无操作会自动关闭；点击菜单内容外的黑色区域不再关闭。屏幕息屏时菜单会自动关闭，避免唤醒后首触误操作。配网及详情弹层同样遵循 1 分钟无操作关闭规则。菜单固定在屏幕坐标系，不跟随设备姿态旋转。菜单打开时内容淡入缩放，关闭时内容先淡出、再短暂淡出黑色背景露出表盘；5 个图标 + 文字 Tab 沿底部浅弧排列，可直接切换 Display/Power/Motion/WiFi/Sound。菜单使用圆屏安全布局、纯黑背景；底部当前 Tab 为桃红，页面图标和亮度进度为薄荷绿，Done/选择态为琥珀色，深紫仅用于轨道和细边框。
 
 息屏入口包括：
 
@@ -225,9 +225,9 @@ M5 字体字号说明：`m5_number_flow` 使用 80px Commissioner 数字和 28px
 - RTC 时间合法时写入系统时间。
 - RTC 不可用或时间非法时解析 `__DATE__` 和 `__TIME__`，用固件编译时间初始化系统时间。
 - 如果使用编译时间兜底，会尝试把编译时间写回 PCF85063。
-- WiFi 连接成功后，`main/ntp_time_sync.cpp` 启动 SNTP，服务器依次为 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`；默认每小时自动更新时间。
+- WiFi 连接成功后，`main/ntp_time_sync.cpp` 启动 SNTP，服务器依次为 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`；默认每 2 小时自动更新时间，WiFi 在 2 小时内重连时不会重复对时。
 - NTP 同步回调只记录同步时间和待写标志，真正的 PCF85063 写入由 `update_network_status()` 在 LVGL timer 中执行，避免阻塞 lwIP 任务。
-- WiFi 页的 Sync now 可手动触发同步；即使 Auto NTP 关闭，手动同步也会保持 SNTP 运行最多 30 秒以完成本次对时；单次同步超过 45 秒未完成时不再显示 `Syncing time...`。
+- WiFi 页的 Sync now 可手动触发同步；即使 Auto NTP 关闭，手动同步也会保持 SNTP 运行最多 30 秒以完成本次对时；单次同步超过 45 秒未完成时停止本次 SNTP，并按 5 分钟、15 分钟、30 分钟、之后每 60 分钟退避重试；WiFi 断开时取消待执行的 NTP 重试。
 
 系统时区在 `app_main()` 中设置为 `CST-8`。
 
@@ -304,12 +304,12 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 主题预览列表硬编码在 `tools/preview/preview.cpp` 的 `kThemes` 中；新增或重排主题时需同步 `main/main.cpp` 的 `s_themes`，否则预览和固件会不一致。
 - WiFi 凭据保存在 NVS `wifi_creds` 命名空间的 `ssid` 和 `pass` 键中，当前为明文存储；设置菜单的 Setup 弹层可覆盖已有凭据，只修改 SSID 时会沿用已保存密码。ESP-IDF NVS 的命名空间和键名最长 15 个字符，`wifi_creds` 已按该限制命名。
 - WiFi 开关存于 `clock_settings` 命名空间的 `wifi` 键，NTP 自动对时存于 `ntp` 键且缺省开启；旧固件升级后没有 `ntp` 键时首次启动为开启。
-- SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，自动更新间隔为 1 小时。
+- SNTP 配置 3 台服务器：`ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org`。lwIP 在超时、DNS 解析失败或收到 KoD 时会尝试下一台；`CONFIG_LWIP_SNTP_MAX_SERVERS=3`，正常同步间隔为 2 小时，距离上次成功同步不足 2 小时时 WiFi 重连不重复对时。
 - WiFi 断线后按 30 秒、2 分钟、5 分钟、10 分钟、20 分钟、之后每 60 分钟退避重试；30 秒和 2 分钟档保持射频开启，5 分钟及以上档关闭射频；鉴权失败从 5 分钟档开始。连续在线 60 秒、重新切换 WiFi 开关或重新保存凭据会重置退避；不设重试次数上限。NTP 同步成功或手动同步后会把系统本地时间写回 PCF85063。
 - AXP2101 配置为 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止；TS 引脚温度检测关闭，电池低于约 5% 时由 AXP2101 低压保护关机。初始化会显式使能 E-Gauge（REG18h bit3），但本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0；此时按 3300 mV(0%) 到 4200 mV(100%) 的分段电压曲线估算电量，充电时先减去 70 mV 补偿，UI 用 `~` 和 `Estimated` 标识。PWR 按键在 EXIO4 上高电平有效；固件同时轮询 AXP2101 PKEY 正沿中断，电池供电下 EXIO4/TCA9554 读取不稳定时仍可息屏/唤醒。两路事件做去重，开机时用于上电的那次释放会被忽略，避免开机后立即息屏。
 - 声音设置保存在 `clock_settings` 命名空间：`sound_on`、`sound_vol`、`ui_sound`、`chime_on`，3 个闹钟保存在 `alarm_cfg` blob 中。睡眠白噪音只在 USB 供电时运行，拔掉 USB 会停止。
 - WiFi 页状态与 `wifi_manager` 状态保持一致：关闭时显示 `WiFi off`，不再因为存在历史凭据显示 `WiFi ready`；连接失败会带上常见原因（如密码错误、找不到网络），并显示下一次重试倒计时。
-- `Scan networks` 在 LVGL 事件中同步调用 `esp_wifi_scan_start()`；扫描期间界面停在 `Scanning...`，完成后最多显示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描后恢复关闭；隐藏网络仍可手动输入。
+- `Scan networks` 非阻塞启动扫描，`WIFI_EVENT_SCAN_DONE` 只发布完成状态；LVGL 定时器读取结果，最多显示 8 个 AP，并区分扫描中、无结果和失败。扫描中可以返回、关闭菜单或息屏，重复请求不会重复启动。WiFi 原本关闭时会临时启动 STA，完成或 15 秒超时后恢复关闭；隐藏网络仍可手动输入。
 - 亮度渐变和主题过渡都使用 LVGL timer；不要改成 FreeRTOS timer，避免与面板 QSPI IO 竞争。
 - 如果修改 RTC、IMU 或触摸相关逻辑，要注意三者共用 BSP I2C 总线。
 - `PROJECT_CONTEXT.md` 已弃用，不应作为当前工程事实来源。
@@ -350,3 +350,9 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - 串口是否出现 snapshot 分配、NVS 读写或 I2C 错误。
 
 纯文档变更不需要构建，但需要检查路径、命令、主题名称和模块描述是否与源码一致。
+
+## 2026-11 体验优化
+
+Display 页新增 Watch faces 两页选择器，提供八个圆形静态小预览与候选高亮；点击仅选中，Apply 后关闭菜单并切换，Back 或关闭菜单放弃未应用选择，仍使用原有 NVS 主题索引。八个表盘自身的本轮视觉调整已回退，小预览同步恢复。Sound 页保留固定标题和底部 Tab，内容区域独立滚动；主操作按钮至少 44 px，辅助文字至少 14 px。闹钟分钟支持逐分钟调整与长按连续调整。
+
+`clock_alert_scheduler` 按日期和槽位去重，持续收集并发闹钟，按槽位依次提醒；各槽位独立支持 5 分钟 Snooze。倒计时在响铃期间结束时保留完成事件，闹钟释放后补发一次。校时跳过的历史闹钟不补响，同一日期已触发槽位不因回拨重复响铃；用户显式修改时间、星期或开关会重新启用该槽位的调度。整点报时也按日期与小时去重。主机测试、资源更新方法和真机验收见 [体验优化记录](doc/experience-optimization.md)。

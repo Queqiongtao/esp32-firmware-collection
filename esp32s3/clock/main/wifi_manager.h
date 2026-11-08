@@ -41,7 +41,19 @@ bool wifi_manager_is_enabled(void);
 bool wifi_manager_has_credentials(void);
 // password == NULL keeps the currently saved password.
 esp_err_t wifi_manager_connect(const char *ssid, const char *password);
-esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size_t *count);
+typedef enum {
+    WIFI_MANAGER_SCAN_IDLE,
+    WIFI_MANAGER_SCAN_BUSY,
+    WIFI_MANAGER_SCAN_DONE,
+    WIFI_MANAGER_SCAN_ERROR,
+} wifi_manager_scan_state_t;
+
+// Non-blocking. Results are copied into caller-owned storage on the LVGL thread.
+esp_err_t wifi_manager_scan_start(void);
+wifi_manager_scan_state_t wifi_manager_scan_results(wifi_manager_ap_t *results,
+                                                    size_t max_results,
+                                                    size_t *count,
+                                                    esp_err_t *error);
 esp_err_t wifi_manager_forget(void);
 void wifi_manager_get_status(wifi_manager_status_t *status);
 

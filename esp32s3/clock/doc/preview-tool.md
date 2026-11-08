@@ -122,7 +122,7 @@ preview 不能验证：
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 17 个菜单页面/详情弹层对比图 |
+| `out/menu/contact_menu.png` | 24 个菜单页面/详情弹层对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围、最大半径和越界提示 |
 

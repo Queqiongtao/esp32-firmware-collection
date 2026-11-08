@@ -25,6 +25,9 @@
 #include "clock_settings.h"
 #include "clock_settings_menu.h"
 #include "clock_theme.h"
+#include "clock_theme_previews.h"
+
+int clock_preview_test(const clock_theme_t *const *themes, size_t count);
 
 namespace {
 
@@ -166,11 +169,23 @@ void render_theme(const clock_theme_t *theme,
     lv_obj_clean(screen);
 }
 
-uint32_t preview_scan_cb(clock_settings_menu_wifi_ap_t *results,
-                         uint32_t max_results,
+static int preview_scan_mode = 0;
+esp_err_t preview_scan_cb(void *) { return ESP_OK; }
+void preview_theme_cb(uint32_t, void *) {}
+
+clock_settings_menu_scan_state_t preview_scan_poll_cb(clock_settings_menu_wifi_ap_t *results,
+                         uint32_t max_results, uint32_t *result_count, esp_err_t *error,
                          void *user_ctx)
 {
     (void)user_ctx;
+    *result_count = 0;
+    *error = ESP_OK;
+    if (preview_scan_mode == 1) return CLOCK_SETTINGS_MENU_SCAN_BUSY;
+    if (preview_scan_mode == 2) return CLOCK_SETTINGS_MENU_SCAN_DONE;
+    if (preview_scan_mode == 3) {
+        *error = ESP_ERR_TIMEOUT;
+        return CLOCK_SETTINGS_MENU_SCAN_ERROR;
+    }
     static const char *const names[] = {
         "QQT",
         "TP-LINK_5G",
@@ -186,7 +201,19 @@ uint32_t preview_scan_cb(clock_settings_menu_wifi_ap_t *results,
         results[i].rssi = rssi[i];
         results[i].secure = true;
     }
-    return limit;
+    *result_count = limit;
+    *error = ESP_OK;
+    return CLOCK_SETTINGS_MENU_SCAN_DONE;
+}
+
+lv_obj_t *find_label(lv_obj_t *root, const char *text)
+{
+    if (lv_obj_check_type(root, &lv_label_class) &&
+        std::strcmp(lv_label_get_text(root), text) == 0) return root;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(root); ++i) {
+        if (auto *found = find_label(lv_obj_get_child(root, i), text)) return found;
+    }
+    return nullptr;
 }
 
 void render_menu(const std::filesystem::path &out_dir)
@@ -200,9 +227,14 @@ void render_menu(const std::filesystem::path &out_dir)
         bool wifi_scan;
         bool power_detail;
         int sound_overlay;
+        int faces = -1;
+        int candidate = -1;
     };
     static constexpr MenuPage kMenuPages[] = {
         {"brightness", 0, false, -1, false, false, false, 0},
+        {"watch_faces_1", 0, false, -1, false, false, false, 0, 0},
+        {"watch_faces_2", 0, false, -1, false, false, false, 0, 1},
+        {"watch_faces_selected", 0, false, -1, false, false, false, 0, 0, 1},
         {"sleep", 1, false, -1, false, false, false, 0},
         {"battery_detail", 1, false, -1, false, false, true, 0},
         {"motion_off", 2, false, -1, false, false, false, 0},
@@ -211,9 +243,13 @@ void render_menu(const std::filesystem::path &out_dir)
         {"wifi_connected", 3, false, -1, true, false, false, 0},
         {"wifi_setup", 3, false, 0, false, false, false, 0},
         {"wifi_scan", 3, false, 0, false, true, false, 0},
+        {"wifi_scanning", 3, false, 0, false, true, false, 0},
+        {"wifi_scan_empty", 3, false, 0, false, true, false, 0},
+        {"wifi_scan_error", 3, false, 0, false, true, false, 0},
         {"wifi_setup_ssid", 3, false, 1, false, false, false, 0},
         {"wifi_setup_password", 3, false, 2, false, false, false, 0},
         {"sound", 4, false, -1, false, false, false, 0},
+        {"sound_actions", 4, false, -1, false, false, false, 0},
         {"alarm_list", 4, false, -1, false, false, false, 1},
         {"alarm_edit", 4, false, -1, false, false, false, 4},
         {"audio_test", 4, false, -1, false, false, false, 5},
@@ -222,6 +258,9 @@ void render_menu(const std::filesystem::path &out_dir)
     };
 
     for (const MenuPage &page : kMenuPages) {
+        preview_scan_mode = std::strcmp(page.name, "wifi_scanning") == 0 ? 1 :
+                            std::strcmp(page.name, "wifi_scan_empty") == 0 ? 2 :
+                            std::strcmp(page.name, "wifi_scan_error") == 0 ? 3 : 0;
         lv_obj_t *screen = lv_screen_active();
         lv_obj_clean(screen);
         prepare_screen();
@@ -243,7 +282,11 @@ void render_menu(const std::filesystem::path &out_dir)
 
         clock_settings_menu_config_t config = {};
         config.settings = &settings;
+        config.themes = g_clock_theme_previews;
+        config.theme_count = 8;
+        config.wifi_scan_poll_cb = preview_scan_poll_cb;
         config.wifi_scan_cb = preview_scan_cb;
+        config.theme_cb = preview_theme_cb;
 
         if (clock_settings_menu_create(screen, &config) == nullptr) {
             std::fprintf(stderr, "menu %s create failed\n", page.name);
@@ -253,6 +296,15 @@ void render_menu(const std::filesystem::path &out_dir)
         // Let the menu entrance animation settle before snapshotting.
         run_lvgl_for(400);
         clock_settings_menu_set_page(page.index);
+        if (page.faces >= 0) {
+            clock_settings_menu_open_watch_faces(page.faces);
+            if (page.candidate >= 0) {
+                auto *label = find_label(screen, g_clock_theme_previews[page.candidate].name);
+                if (label != nullptr) {
+                    lv_obj_send_event(lv_obj_get_parent(label), LV_EVENT_CLICKED, nullptr);
+                }
+            }
+        }
         if (page.index == 1) {
             clock_settings_menu_power_status_t power = {};
             power.initialized = true;
@@ -301,6 +353,11 @@ void render_menu(const std::filesystem::path &out_dir)
         }
         run_lvgl_for(40);
         lv_obj_update_layout(screen);
+        if (std::strcmp(page.name, "sound_actions") == 0) {
+            auto *label = find_label(screen, "Audio test");
+            auto *body = lv_obj_get_parent(lv_obj_get_parent(label));
+            lv_obj_scroll_to_y(body, lv_obj_get_scroll_bottom(body), LV_ANIM_OFF);
+        }
 
         lv_draw_buf_t *snapshot = lv_snapshot_take(screen, LV_COLOR_FORMAT_RGB565);
         if (snapshot == nullptr) {
@@ -325,8 +382,12 @@ int main(int argc, char **argv)
 
     std::vector<std::pair<int, int>> requested_times = {{10, 8}, {23, 59}};
     int second = 35;
+    bool themes_only = false;
 
     for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--themes-only") == 0) {
+            themes_only = true;
+        }
         if (std::strcmp(argv[i], "--time") == 0 && i + 1 < argc) {
             requested_times.clear();
             int hour = 0;
@@ -360,6 +421,9 @@ int main(int argc, char **argv)
                            LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(display, display_flush_cb);
 
+    if (argc == 2 && std::strcmp(argv[1], "--test") == 0) {
+        return clock_preview_test(kThemes, sizeof(kThemes) / sizeof(kThemes[0]));
+    }
     for (const auto &requested : requested_times) {
         char tag[16] = {};
         std::snprintf(tag, sizeof(tag), "%02d-%02d-%02d", requested.first, requested.second, second);
@@ -369,7 +433,7 @@ int main(int argc, char **argv)
         }
     }
 
-    render_menu(menu_dir);
+    if (!themes_only) render_menu(menu_dir);
 
     std::printf("preview finished, output dir: %s\n", out_root.c_str());
     return 0;

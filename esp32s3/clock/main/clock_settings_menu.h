@@ -21,9 +21,23 @@ typedef struct {
     bool secure;
 } clock_settings_menu_wifi_ap_t;
 
-typedef uint32_t (*clock_settings_menu_wifi_scan_cb_t)(clock_settings_menu_wifi_ap_t *results,
-                                                       uint32_t max_results,
-                                                       void *user_ctx);
+typedef enum {
+    CLOCK_SETTINGS_MENU_SCAN_IDLE,
+    CLOCK_SETTINGS_MENU_SCAN_BUSY,
+    CLOCK_SETTINGS_MENU_SCAN_DONE,
+    CLOCK_SETTINGS_MENU_SCAN_ERROR,
+} clock_settings_menu_scan_state_t;
+
+typedef esp_err_t (*clock_settings_menu_wifi_scan_cb_t)(void *user_ctx);
+typedef clock_settings_menu_scan_state_t (*clock_settings_menu_wifi_scan_poll_cb_t)(
+    clock_settings_menu_wifi_ap_t *results, uint32_t max_results,
+    uint32_t *count, esp_err_t *error, void *user_ctx);
+
+typedef struct {
+    const char *name;
+    const lv_image_dsc_t *preview;
+} clock_settings_menu_theme_t;
+typedef void (*clock_settings_menu_theme_cb_t)(uint32_t index, void *user_ctx);
 
 typedef void (*clock_settings_menu_ntp_cb_t)(bool enabled, void *user_ctx);
 typedef void (*clock_settings_menu_ntp_sync_cb_t)(void *user_ctx);
@@ -100,12 +114,16 @@ typedef struct {
 
 typedef struct {
     const clock_settings_t *settings;
+    const clock_settings_menu_theme_t *themes;
+    uint32_t theme_count;
+    clock_settings_menu_theme_cb_t theme_cb;
     clock_settings_menu_brightness_cb_t brightness_cb;
     clock_settings_menu_sleep_cb_t sleep_cb;
     clock_settings_menu_auto_rotate_cb_t auto_rotate_cb;
     clock_settings_menu_wifi_cb_t wifi_cb;
     clock_settings_menu_wifi_setup_cb_t wifi_setup_cb;
     clock_settings_menu_wifi_scan_cb_t wifi_scan_cb;
+    clock_settings_menu_wifi_scan_poll_cb_t wifi_scan_poll_cb;
     clock_settings_menu_ntp_cb_t ntp_cb;
     clock_settings_menu_ntp_sync_cb_t ntp_sync_cb;
     clock_settings_menu_sound_enabled_cb_t sound_enabled_cb;
@@ -125,6 +143,7 @@ typedef struct {
 lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu_config_t *config);
 void clock_settings_menu_move_foreground(void);
 void clock_settings_menu_set_page(uint32_t page_index);
+void clock_settings_menu_open_watch_faces(uint32_t page);
 void clock_settings_menu_open_wifi_setup(void);
 void clock_settings_menu_open_wifi_setup_edit(uint32_t field);
 void clock_settings_menu_start_wifi_scan(void);

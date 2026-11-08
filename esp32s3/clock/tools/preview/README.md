@@ -50,7 +50,7 @@
 | `out/contact_all.png` | 全部 8 个主题圆屏对比图 |
 | `out/menu/*.png` | 设置菜单页面（圆屏遮罩） |
 | `out/menu/raw/*.png` | 设置菜单未遮罩方图 |
-| `out/menu/contact_menu.png` | 17 个菜单页面/详情弹层圆屏对比图 |
+| `out/menu/contact_menu.png` | 24 个菜单页面/详情弹层圆屏对比图 |
 | `out/menu/report.txt` | 菜单内容最大半径与越界提示 |
 | `out/report.txt` | 非黑像素范围与安全区越界提示 |
 
@@ -68,7 +68,7 @@
 
 1. `CMakeLists.txt` 通过 LVGL 自带的 `env_support/cmake/os_desktop.cmake` 把 `managed_components/lvgl__lvgl` 编成主机库。
 2. `lv_conf.h` 是关键配置，需与设备端对齐：RGB565、Montserrat 12~40 子集、SNAPSHOT/SCALE/CANVAS/ARC 等。
-3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后创建设置菜单并渲染 6 个页面，再渲染模拟已连接状态、WiFi 配网摘要页、模拟扫描结果页和 SSID/密码编辑页，共渲染 11 张。
+3. `preview.cpp` 创建 466 × 466 虚拟 display，逐个主题 `build/update/tick` 后用 `lv_snapshot_take(screen)` 取整屏像素；随后渲染 24 个菜单状态，包括表盘选择器及候选选中状态、Sound 页上下部分、异步扫描中/结果/空结果/失败及原有详情弹层。
 4. `render.py` 负责 PPM → PNG、主题圆形遮罩、拼图和菜单 PNG 转换。
 
 ## 与固件的主要差异
@@ -89,3 +89,30 @@
 - 新增主题时，除 `main/main.cpp` 外，还要把主题注册到 `tools/preview/preview.cpp` 的 `kThemes`。
 - 新增顶层字体时，需要同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`；M5 字体和图片在 preview 中由 GLOB 自动纳入，但设备端仍需显式添加。
 - 修改 `main/` 下主题或 `main/clock_settings_menu.cpp` 后重新执行 `run.sh` 即可，无需刷机。
+
+## 交互与提醒逻辑测试
+
+```bash
+cmake -S tools/preview -B tools/preview/build -DCMAKE_BUILD_TYPE=Release
+cmake --build tools/preview/build -j8
+ctest --test-dir tools/preview/build --output-on-failure
+```
+
+在工程根目录运行。`alert_scheduler` 验证日期去重、并发排队、Snooze、校时和待补发倒计时；`menu_and_themes` 验证表盘选择、异步扫描的返回/删除/失败、Sound 页操作、逐分钟编辑、午夜更新及主题反复创建/销毁。该测试使用模拟扫描和主机内存，不验证设备射频、音频或真机动画帧率。
+
+主题视觉修改后，先生成默认 10:08:35 预览，再显式更新设备小预览：
+
+```bash
+./tools/preview/run.sh
+python3 tools/preview/generate_thumbnails.py
+./tools/preview/run.sh
+```
+
+生成器更新已跟踪的 `main/clock_theme_previews.c`；普通预览运行不会改写资源。新增主题须同步维护生成器的 `FACES`、固件主题列表及主机主题列表。
+
+边界时刻可只渲染主题并追加 PPM，保留已有菜单产物：
+
+```bash
+./tools/preview/build/preview --themes-only --time 00:00:00
+python3 tools/preview/render.py
+```

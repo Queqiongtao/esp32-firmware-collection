@@ -106,6 +106,15 @@ static lv_obj_t *s_wifi_summary_view = nullptr;
 static lv_obj_t *s_wifi_edit_view = nullptr;
 static lv_obj_t *s_wifi_scan_view = nullptr;
 static lv_obj_t *s_wifi_scan_list = nullptr;
+static lv_obj_t *s_wifi_rescan_button = nullptr;
+static lv_timer_t *s_wifi_scan_timer = nullptr;
+static bool s_wifi_scan_waiting = false;
+static lv_obj_t *s_faces_overlay = nullptr;
+static uint32_t s_faces_page = 0;
+static uint32_t s_faces_candidate = 0;
+static bool s_faces_submitted = false;
+static lv_obj_t *s_faces_cards[4] = {};
+static lv_obj_t *s_faces_apply = nullptr;
 static lv_obj_t *s_wifi_summary_ssid = nullptr;
 static lv_obj_t *s_wifi_summary_password = nullptr;
 static lv_obj_t *s_wifi_edit_title = nullptr;
@@ -116,6 +125,7 @@ static lv_obj_t *s_wifi_keyboard = nullptr;
 static lv_obj_t *s_wifi_key_popover = nullptr;
 static lv_obj_t *s_wifi_key_popover_label = nullptr;
 static lv_obj_t *s_wifi_setup_status = nullptr;
+static lv_obj_t *s_sound_body = nullptr;
 static lv_obj_t *s_sound_master_switch = nullptr;
 static lv_obj_t *s_sound_volume_slider = nullptr;
 static lv_obj_t *s_sound_volume_value = nullptr;
@@ -140,6 +150,7 @@ static lv_obj_t *s_audio_test_overlay = nullptr;
 static lv_obj_t *s_sleep_type_buttons[2] = {};
 static lv_obj_t *s_sleep_duration_buttons[3] = {};
 static lv_obj_t *s_sleep_status = nullptr;
+static lv_obj_t *s_sleep_start_button = nullptr;
 static uint8_t s_alarm_edit_index = 0;
 static clock_alarm_t s_alarm_edit = {};
 static uint32_t s_timer_selected_minutes = 25;
@@ -191,11 +202,17 @@ static void play_ui_sound(clock_settings_menu_ui_sound_t sound);
 
 static void reset_wifi_setup_pointers(void)
 {
+    if (s_wifi_scan_timer != nullptr) {
+        lv_timer_delete(s_wifi_scan_timer);
+        s_wifi_scan_timer = nullptr;
+    }
+    s_wifi_scan_waiting = false;
     s_wifi_setup_overlay = nullptr;
     s_wifi_summary_view = nullptr;
     s_wifi_edit_view = nullptr;
     s_wifi_scan_view = nullptr;
     s_wifi_scan_list = nullptr;
+    s_wifi_rescan_button = nullptr;
     s_wifi_summary_ssid = nullptr;
     s_wifi_summary_password = nullptr;
     s_wifi_edit_title = nullptr;
@@ -217,6 +234,7 @@ static void reset_wifi_setup_pointers(void)
 
 static void reset_sound_pointers(void)
 {
+    s_sound_body = nullptr;
     s_sound_master_switch = nullptr;
     s_sound_volume_slider = nullptr;
     s_sound_volume_value = nullptr;
@@ -251,11 +269,19 @@ static void reset_sound_pointers(void)
         s_sleep_duration_buttons[i] = nullptr;
     }
     s_sleep_status = nullptr;
+    s_sleep_start_button = nullptr;
 }
 
 static void reset_menu_widget_pointers(void)
 {
     reset_sound_pointers();
+    s_faces_overlay = nullptr;
+    s_faces_apply = nullptr;
+    for (auto &card : s_faces_cards) {
+        card = nullptr;
+    }
+    s_faces_candidate = 0;
+    s_faces_submitted = false;
     s_suppress_scroll_sound_until_ms = 0;
     s_menu_content = nullptr;
     s_menu_wheel = nullptr;
@@ -529,6 +555,9 @@ static void on_page_tab_clicked(lv_event_t *event)
     }
     play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
     set_wheel_scroll_enabled(true);
+    if (s_sound_body != nullptr) {
+        lv_obj_add_flag(s_sound_body, LV_OBJ_FLAG_SCROLLABLE);
+    }
     scroll_to_page(s_menu_wheel, (uint32_t)index, LV_ANIM_ON);
 }
 
@@ -578,12 +607,18 @@ static void on_brightness_pressed(lv_event_t *event)
     notify_activity();
     // Keep slider dragging from turning into a page scroll.
     set_wheel_scroll_enabled(false);
+    if (s_sound_body != nullptr) {
+        lv_obj_clear_flag(s_sound_body, LV_OBJ_FLAG_SCROLLABLE);
+    }
 }
 
 static void on_brightness_released(lv_event_t *event)
 {
     (void)event;
     set_wheel_scroll_enabled(true);
+    if (s_sound_body != nullptr) {
+        lv_obj_add_flag(s_sound_body, LV_OBJ_FLAG_SCROLLABLE);
+    }
 }
 
 static void on_brightness_changed(lv_event_t *event)
@@ -639,6 +674,7 @@ static lv_obj_t *make_setting_page(lv_obj_t *parent)
     lv_obj_t *page = lv_obj_create(parent);
     lv_obj_remove_style_all(page);
     lv_obj_set_size(page, 300, MENU_PAGE_HEIGHT);
+    lv_obj_set_flex_grow(page, 0);
     lv_obj_set_style_margin_bottom(page, MENU_PAGE_GAP, 0);
     lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_OFF);
     lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
@@ -709,12 +745,17 @@ static void style_small_button(lv_obj_t *button)
     lv_obj_set_style_border_color(button, lv_color_hex(MENU_COLOR_ACCENT), 0);
     lv_obj_set_style_border_opa(button, 70, 0);
     lv_obj_set_style_shadow_width(button, 0, 0);
+    lv_obj_set_style_opa(button, LV_OPA_40, LV_STATE_DISABLED);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x153C38), LV_STATE_CHECKED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_CHECKED);
+    lv_obj_set_style_border_color(button, lv_color_hex(MENU_COLOR_ACCENT), LV_STATE_CHECKED);
+    lv_obj_set_style_border_opa(button, LV_OPA_COVER, LV_STATE_CHECKED);
 }
 
 static lv_obj_t *make_small_button(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *button = lv_button_create(parent);
-    lv_obj_set_size(button, 100, 34);
+    lv_obj_set_size(button, 100, 44);
     style_small_button(button);
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
@@ -752,7 +793,10 @@ static void copy_text(char *dest, size_t dest_size, const char *src)
     if (dest == nullptr || dest_size == 0) {
         return;
     }
-    snprintf(dest, dest_size, "%s", src != nullptr ? src : "");
+    const char *text = src != nullptr ? src : "";
+    const size_t length = strnlen(text, dest_size - 1);
+    memcpy(dest, text, length);
+    dest[length] = '\0';
 }
 
 static lv_obj_t *make_action_button(lv_obj_t *parent, const char *text, int32_t width)
@@ -784,7 +828,7 @@ static lv_obj_t *make_summary_row(lv_obj_t *parent,
     lv_obj_set_style_shadow_width(row, 0, 0);
 
     lv_obj_t *caption_label = make_label(row, caption, lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(caption_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(caption_label, &lv_font_montserrat_14, 0);
     lv_obj_align(caption_label, LV_ALIGN_TOP_LEFT, 16, 8);
 
     lv_obj_t *value = make_label(row, "", lv_color_hex(MENU_COLOR_TEXT));
@@ -962,6 +1006,7 @@ static void on_wifi_keyboard_released(lv_event_t *event)
 
 static void show_wifi_summary(void)
 {
+    s_wifi_scan_waiting = false;
     s_wifi_edit_field = 0;
     if (s_wifi_summary_view != nullptr) {
         lv_obj_clear_flag(s_wifi_summary_view, LV_OBJ_FLAG_HIDDEN);
@@ -981,6 +1026,7 @@ static void show_wifi_summary(void)
 
 static void show_wifi_edit(uint8_t field)
 {
+    s_wifi_scan_waiting = false;
     if (s_wifi_input == nullptr || s_wifi_edit_view == nullptr) {
         return;
     }
@@ -1137,26 +1183,29 @@ static void on_wifi_scan_row_clicked(lv_event_t *event)
     show_wifi_edit(1);
 }
 
-static void start_wifi_scan(void)
+static void poll_wifi_scan(lv_timer_t *timer)
 {
-    if (s_config.wifi_scan_cb == nullptr || s_wifi_scan_list == nullptr) {
-        set_wifi_setup_status("Scan not available", true);
+    (void)timer;
+    if (!s_wifi_scan_waiting || s_wifi_scan_list == nullptr || s_menu_closing) {
         return;
     }
-
-    set_wifi_setup_status("Scanning...", false);
-    lv_refr_now(nullptr);
-
-    static clock_settings_menu_wifi_ap_t aps[8];
-    uint32_t count = s_config.wifi_scan_cb(aps, 8, s_config.user_ctx);
-    if (count > 8) {
-        count = 8;
-    }
-    if (count == 0) {
-        set_wifi_setup_status("No networks found", true);
+    clock_settings_menu_wifi_ap_t aps[8] = {};
+    uint32_t count = 0;
+    esp_err_t error = ESP_OK;
+    const auto state = s_config.wifi_scan_poll_cb(aps, 8, &count, &error, s_config.user_ctx);
+    if (state == CLOCK_SETTINGS_MENU_SCAN_BUSY) {
         return;
     }
-
+    s_wifi_scan_waiting = false;
+    if (s_wifi_rescan_button != nullptr) {
+        lv_obj_clear_state(s_wifi_rescan_button, LV_STATE_DISABLED);
+    }
+    if (state != CLOCK_SETTINGS_MENU_SCAN_DONE) {
+        set_wifi_setup_status(error == ESP_ERR_TIMEOUT ? "Scan timed out. Try again" :
+                                                        "Scan failed. Try again", true);
+        return;
+    }
+    count = count > 8 ? 8 : count;
     lv_obj_clean(s_wifi_scan_list);
     for (uint32_t i = 0; i < count; ++i) {
         if (aps[i].ssid[0] == '\0') {
@@ -1182,10 +1231,41 @@ static void start_wifi_scan(void)
         char rssi[16] = {};
         snprintf(rssi, sizeof(rssi), "%d dBm", aps[i].rssi);
         lv_obj_t *rssi_label = make_label(row, rssi, lv_color_hex(MENU_COLOR_MUTED));
-        lv_obj_set_style_text_font(rssi_label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(rssi_label, &lv_font_montserrat_14, 0);
         lv_obj_align(rssi_label, LV_ALIGN_RIGHT_MID, -14, 0);
     }
+    set_wifi_setup_status(count > 0 ? "Select a network" : "No networks found", count == 0);
+    lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, count > 0 ? 366 : 180);
+}
+
+static void start_wifi_scan(void)
+{
+    if (s_wifi_scan_waiting) {
+        return;
+    }
+    if (s_config.wifi_scan_cb == nullptr || s_config.wifi_scan_poll_cb == nullptr ||
+        s_wifi_scan_list == nullptr) {
+        set_wifi_setup_status("Scan not available", true);
+        return;
+    }
     show_wifi_scan();
+    lv_obj_clean(s_wifi_scan_list);
+    memset(s_wifi_scan_ssids, 0, sizeof(s_wifi_scan_ssids));
+    set_wifi_setup_status("Scanning...", false);
+    lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 180);
+    const esp_err_t err = s_config.wifi_scan_cb(s_config.user_ctx);
+    if (err != ESP_OK) {
+        set_wifi_setup_status("Could not start scan. Try again", true);
+        return;
+    }
+    s_wifi_scan_waiting = true;
+    if (s_wifi_rescan_button != nullptr) {
+        lv_obj_add_state(s_wifi_rescan_button, LV_STATE_DISABLED);
+    }
+    if (s_wifi_scan_timer == nullptr) {
+        s_wifi_scan_timer = lv_timer_create(poll_wifi_scan, 100, nullptr);
+    }
+    poll_wifi_scan(nullptr);
 }
 
 static void on_wifi_scan_clicked(lv_event_t *event)
@@ -1285,13 +1365,173 @@ static lv_obj_t *make_close_overlay_button(lv_obj_t *overlay, lv_event_cb_t call
     return button;
 }
 
+static void on_faces_close(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+    lv_obj_delete(s_faces_overlay);
+    s_faces_overlay = nullptr;
+    s_faces_apply = nullptr;
+    for (auto &card : s_faces_cards) {
+        card = nullptr;
+    }
+}
+
+static void update_faces_selection(void)
+{
+    for (uint32_t cell = 0; cell < 4; ++cell) {
+        if (s_faces_cards[cell] != nullptr) {
+            if (s_faces_page * 4 + cell == s_faces_candidate) {
+                lv_obj_add_state(s_faces_cards[cell], LV_STATE_CHECKED);
+            } else {
+                lv_obj_remove_state(s_faces_cards[cell], LV_STATE_CHECKED);
+            }
+        }
+    }
+    if (s_faces_apply != nullptr) {
+        if (s_faces_submitted || s_faces_candidate == s_config.settings->theme_index ||
+            s_config.theme_cb == nullptr) {
+            lv_obj_add_state(s_faces_apply, LV_STATE_DISABLED);
+        } else {
+            lv_obj_remove_state(s_faces_apply, LV_STATE_DISABLED);
+        }
+    }
+}
+
+static void on_face_selected(lv_event_t *event)
+{
+    const uint32_t index = (uintptr_t)lv_event_get_user_data(event);
+    if (index >= s_config.theme_count || s_menu_closing || s_faces_submitted) {
+        return;
+    }
+    notify_activity();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+    s_faces_candidate = index;
+    update_faces_selection();
+}
+
+static void on_faces_apply(lv_event_t *event)
+{
+    (void)event;
+    if (s_faces_overlay == nullptr || s_menu_closing || s_faces_submitted ||
+        s_faces_candidate >= s_config.theme_count ||
+        s_faces_candidate == s_config.settings->theme_index || s_config.theme_cb == nullptr) {
+        return;
+    }
+    notify_activity();
+    s_faces_submitted = true;
+    update_faces_selection();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM);
+    s_config.theme_cb(s_faces_candidate, s_config.user_ctx);
+}
+
+static void on_faces_page(lv_event_t *event)
+{
+    if (s_menu_closing || s_faces_submitted) {
+        return;
+    }
+    notify_activity();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_SWIPE);
+    clock_settings_menu_open_watch_faces((uintptr_t)lv_event_get_user_data(event));
+}
+
+void clock_settings_menu_open_watch_faces(uint32_t page)
+{
+    if (s_menu_root == nullptr || s_menu_closing || s_config.themes == nullptr ||
+        s_config.theme_count == 0) {
+        return;
+    }
+    if (s_faces_overlay != nullptr) {
+        if (s_faces_submitted) {
+            return;
+        }
+        lv_obj_delete(s_faces_overlay);
+    } else {
+        s_faces_candidate = s_config.settings->theme_index < s_config.theme_count
+                                ? s_config.settings->theme_index : 0;
+        s_faces_submitted = false;
+    }
+    s_faces_apply = nullptr;
+    for (auto &card : s_faces_cards) {
+        card = nullptr;
+    }
+    const uint32_t pages = (s_config.theme_count + 3) / 4;
+    s_faces_page = page < pages ? page : pages - 1;
+    s_faces_overlay = make_sound_overlay_shell("Watch faces");
+    char page_text[24];
+    snprintf(page_text, sizeof(page_text), "%u / %u", (unsigned)s_faces_page + 1, (unsigned)pages);
+    lv_obj_t *page_label = make_label(s_faces_overlay, page_text, lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(page_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(page_label, LV_ALIGN_TOP_MID, 0, 60);
+    for (uint32_t cell = 0; cell < 4; ++cell) {
+        const uint32_t index = s_faces_page * 4 + cell;
+        if (index >= s_config.theme_count) {
+            break;
+        }
+        const auto &face = s_config.themes[index];
+        lv_obj_t *card = lv_button_create(s_faces_overlay);
+        s_faces_cards[cell] = card;
+        lv_obj_set_size(card, 140, 126);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        style_small_button(card);
+        lv_obj_align(card, LV_ALIGN_TOP_MID, cell % 2 ? 74 : -74, 88 + (cell / 2) * 134);
+        lv_obj_add_event_cb(card, on_face_selected, LV_EVENT_CLICKED, (void *)(uintptr_t)index);
+        if (face.preview != nullptr) {
+            lv_obj_t *preview_clip = lv_obj_create(card);
+            lv_obj_remove_style_all(preview_clip);
+            lv_obj_set_size(preview_clip, 88, 88);
+            lv_obj_set_style_radius(preview_clip, LV_RADIUS_CIRCLE, 0);
+            lv_obj_set_style_clip_corner(preview_clip, true, 0);
+            lv_obj_clear_flag(preview_clip, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_clear_flag(preview_clip, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_align(preview_clip, LV_ALIGN_TOP_MID, 0, 8);
+            lv_obj_t *preview = lv_image_create(preview_clip);
+            lv_image_set_src(preview, face.preview);
+            lv_obj_center(preview);
+        }
+        lv_obj_t *name = make_label(card, face.name, lv_color_hex(MENU_COLOR_TEXT));
+        lv_obj_set_style_text_font(name, &lv_font_montserrat_16, 0);
+        lv_obj_align(name, LV_ALIGN_BOTTOM_MID, 0, -8);
+    }
+    lv_obj_t *back = make_action_button(s_faces_overlay, LV_SYMBOL_LEFT, 44);
+    lv_obj_align(back, LV_ALIGN_TOP_MID, -122, 368);
+    lv_obj_add_event_cb(back, on_faces_page, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)(s_faces_page > 0 ? s_faces_page - 1 : 0));
+    if (s_faces_page == 0) {
+        lv_obj_add_state(back, LV_STATE_DISABLED);
+    }
+    lv_obj_t *close = make_action_button(s_faces_overlay, "Back", 88);
+    lv_obj_align(close, LV_ALIGN_TOP_MID, -48, 368);
+    lv_obj_add_event_cb(close, on_faces_close, LV_EVENT_CLICKED, nullptr);
+    s_faces_apply = make_action_button(s_faces_overlay, "Apply", 88);
+    lv_obj_align(s_faces_apply, LV_ALIGN_TOP_MID, 48, 368);
+    lv_obj_add_event_cb(s_faces_apply, on_faces_apply, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *next = make_action_button(s_faces_overlay, LV_SYMBOL_RIGHT, 44);
+    lv_obj_align(next, LV_ALIGN_TOP_MID, 122, 368);
+    lv_obj_add_event_cb(next, on_faces_page, LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)(s_faces_page + 1));
+    if (s_faces_page + 1 == pages) {
+        lv_obj_add_state(next, LV_STATE_DISABLED);
+    }
+    update_faces_selection();
+}
+
+static void on_faces_open(lv_event_t *event)
+{
+    (void)event;
+    notify_activity();
+    play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CLICK);
+    clock_settings_menu_open_watch_faces(s_config.settings->theme_index / 4);
+}
+
 static lv_obj_t *make_switch_row(lv_obj_t *parent,
                                  const char *text,
                                  lv_obj_t **switch_out)
 {
     lv_obj_t *row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, 280, 32);
+    lv_obj_set_size(row, 280, 44);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row,
                           LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -1303,7 +1543,7 @@ static lv_obj_t *make_switch_row(lv_obj_t *parent,
     lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
 
     lv_obj_t *sw = lv_switch_create(row);
-    lv_obj_set_size(sw, 64, 30);
+    lv_obj_set_size(sw, 76, 44);
     lv_obj_add_flag(sw, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
     style_switch(sw);
     if (switch_out != nullptr) {
@@ -1360,6 +1600,7 @@ static void close_sleep_overlay(void)
     }
     s_sleep_overlay = nullptr;
     s_sleep_status = nullptr;
+    s_sleep_start_button = nullptr;
     for (size_t i = 0; i < 2; ++i) {
         s_sleep_type_buttons[i] = nullptr;
     }
@@ -1487,9 +1728,20 @@ static void update_sleep_ui(void)
         }
     }
 
+    const bool sound_enabled = s_config.settings != nullptr && s_config.settings->sound_enabled;
+    if (s_sleep_start_button != nullptr) {
+        if (s_sleep_status_usb && sound_enabled) {
+            lv_obj_clear_state(s_sleep_start_button, LV_STATE_DISABLED);
+        } else {
+            lv_obj_add_state(s_sleep_start_button, LV_STATE_DISABLED);
+        }
+    }
     if (s_sleep_status != nullptr) {
         if (!s_sleep_status_usb) {
             set_label_text_if_changed(s_sleep_status, "USB power required");
+            lv_obj_set_style_text_color(s_sleep_status, lv_color_hex(MENU_COLOR_WARM), 0);
+        } else if (!sound_enabled) {
+            set_label_text_if_changed(s_sleep_status, "Turn Sound on to play");
             lv_obj_set_style_text_color(s_sleep_status, lv_color_hex(MENU_COLOR_WARM), 0);
         } else if (s_sleep_status_playing) {
             set_label_text_if_changed(s_sleep_status, "Playing");
@@ -1642,41 +1894,44 @@ static void open_alarm_editor(uint8_t index)
     lv_obj_align(s_alarm_edit_time, LV_ALIGN_TOP_MID, 0, 62);
 
     const char *labels[] = {"H -", "H +", "M -", "M +"};
-    const int deltas[] = {-1, 1, -5, 5};
+    const int deltas[] = {-1, 1, -1, 1};
     for (size_t i = 0; i < 4; ++i) {
         lv_obj_t *button = make_action_button(s_alarm_edit_overlay, labels[i], 74);
         lv_obj_align(button,
                      LV_ALIGN_TOP_MID,
                      (int32_t)(i % 2 == 0 ? -42 : 42),
-                     120 + (int32_t)(i / 2) * 44);
+                     120 + (int32_t)(i / 2) * 48);
         if (i < 2) {
             lv_obj_add_event_cb(button, on_alarm_hour_delta, LV_EVENT_CLICKED,
                                 (void *)(intptr_t)deltas[i]);
+            lv_obj_add_event_cb(button, on_alarm_hour_delta, LV_EVENT_LONG_PRESSED_REPEAT,
+                                (void *)(intptr_t)deltas[i]);
         } else {
             lv_obj_add_event_cb(button, on_alarm_minute_delta, LV_EVENT_CLICKED,
+                                (void *)(intptr_t)deltas[i]);
+            lv_obj_add_event_cb(button, on_alarm_minute_delta, LV_EVENT_LONG_PRESSED_REPEAT,
                                 (void *)(intptr_t)deltas[i]);
         }
     }
 
     static const char *const day_labels[7] = {"S", "M", "T", "W", "T", "F", "S"};
     for (size_t i = 0; i < 7; ++i) {
-        lv_obj_t *button = make_action_button(s_alarm_edit_overlay, day_labels[i], 34);
-        lv_obj_set_height(button, 34);
+        lv_obj_t *button = make_action_button(s_alarm_edit_overlay, day_labels[i], 44);
         lv_obj_align(button,
                      LV_ALIGN_TOP_MID,
-                     -108 + (int32_t)i * 36,
-                     218);
+                     -144 + (int32_t)i * 48,
+                     216);
         lv_obj_add_event_cb(button, on_alarm_weekday_clicked, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
         s_alarm_edit_weekdays[i] = button;
     }
 
     s_alarm_edit_sound = make_action_button(s_alarm_edit_overlay, "Sound: Chime", 190);
-    lv_obj_align(s_alarm_edit_sound, LV_ALIGN_TOP_MID, 0, 260);
+    lv_obj_align(s_alarm_edit_sound, LV_ALIGN_TOP_MID, 0, 268);
     lv_obj_add_event_cb(s_alarm_edit_sound, on_alarm_sound_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *enable_row = make_switch_row(s_alarm_edit_overlay, "Enabled", &s_alarm_edit_enable);
-    lv_obj_align(enable_row, LV_ALIGN_TOP_MID, 0, 300);
+    lv_obj_align(enable_row, LV_ALIGN_TOP_MID, 0, 320);
     if (s_alarm_edit.enabled) {
         lv_obj_add_state(s_alarm_edit_enable, LV_STATE_CHECKED);
     }
@@ -1684,10 +1939,10 @@ static void open_alarm_editor(uint8_t index)
                         nullptr);
 
     lv_obj_t *save = make_action_button(s_alarm_edit_overlay, "Save", 124);
-    lv_obj_align(save, LV_ALIGN_TOP_MID, -68, 340);
+    lv_obj_align(save, LV_ALIGN_TOP_MID, -68, 374);
     lv_obj_add_event_cb(save, on_alarm_save, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *cancel = make_action_button(s_alarm_edit_overlay, "Cancel", 124);
-    lv_obj_align(cancel, LV_ALIGN_TOP_MID, 68, 340);
+    lv_obj_align(cancel, LV_ALIGN_TOP_MID, 68, 374);
     lv_obj_add_event_cb(cancel, on_alarm_editor_close, LV_EVENT_CLICKED, nullptr);
 
     update_alarm_edit_time();
@@ -1766,8 +2021,8 @@ static void open_timer_overlay(void)
 
     lv_obj_t *pomodoro_row = lv_obj_create(s_timer_overlay);
     lv_obj_remove_style_all(pomodoro_row);
-    lv_obj_set_size(pomodoro_row, 240, 32);
-    lv_obj_align(pomodoro_row, LV_ALIGN_TOP_MID, 0, 188);
+    lv_obj_set_size(pomodoro_row, 240, 44);
+    lv_obj_align(pomodoro_row, LV_ALIGN_TOP_MID, 0, 184);
     lv_obj_set_flex_flow(pomodoro_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(pomodoro_row,
                           LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -1778,7 +2033,7 @@ static void open_timer_overlay(void)
                                           lv_color_hex(MENU_COLOR_MUTED));
     lv_obj_set_style_text_font(pomodoro_label, &lv_font_montserrat_14, 0);
     lv_obj_t *pomodoro_switch = lv_switch_create(pomodoro_row);
-    lv_obj_set_size(pomodoro_switch, 60, 28);
+    lv_obj_set_size(pomodoro_switch, 76, 44);
     style_switch(pomodoro_switch);
     if (s_timer_pomodoro_selected) {
         lv_obj_add_state(pomodoro_switch, LV_STATE_CHECKED);
@@ -1787,15 +2042,15 @@ static void open_timer_overlay(void)
                         nullptr);
 
     s_timer_start_button = make_action_button(s_timer_overlay, "Start", 82);
-    lv_obj_align(s_timer_start_button, LV_ALIGN_TOP_MID, -94, 232);
+    lv_obj_align(s_timer_start_button, LV_ALIGN_TOP_MID, -94, 240);
     lv_obj_add_event_cb(s_timer_start_button, on_timer_action, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)CLOCK_SETTINGS_MENU_TIMER_START);
     s_timer_pause_button = make_action_button(s_timer_overlay, "Pause", 82);
-    lv_obj_align(s_timer_pause_button, LV_ALIGN_TOP_MID, 0, 232);
+    lv_obj_align(s_timer_pause_button, LV_ALIGN_TOP_MID, 0, 240);
     lv_obj_add_event_cb(s_timer_pause_button, on_timer_action, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)CLOCK_SETTINGS_MENU_TIMER_PAUSE);
     lv_obj_t *reset = make_action_button(s_timer_overlay, "Reset", 82);
-    lv_obj_align(reset, LV_ALIGN_TOP_MID, 94, 232);
+    lv_obj_align(reset, LV_ALIGN_TOP_MID, 94, 240);
     lv_obj_add_event_cb(reset, on_timer_action, LV_EVENT_CLICKED,
                         (void *)(uintptr_t)CLOCK_SETTINGS_MENU_TIMER_STOP);
 
@@ -1871,6 +2126,7 @@ static void open_sleep_overlay(void)
     }
 
     lv_obj_t *start = make_action_button(s_sleep_overlay, "Start", 118);
+    s_sleep_start_button = start;
     lv_obj_align(start, LV_ALIGN_TOP_MID, -66, 208);
     lv_obj_add_event_cb(start, on_sleep_action, LV_EVENT_CLICKED, (void *)1);
     lv_obj_t *stop = make_action_button(s_sleep_overlay, "Stop", 118);
@@ -1920,11 +2176,11 @@ static void open_audio_test_overlay(void)
     };
     for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
         lv_obj_t *button = make_action_button(s_audio_test_overlay, labels[i], 138);
-        lv_obj_set_height(button, 36);
+        lv_obj_set_height(button, 44);
         lv_obj_align(button,
                      LV_ALIGN_TOP_MID,
                      (i % 2 == 0) ? -78 : 78,
-                     56 + (int32_t)(i / 2) * 40);
+                     56 + (int32_t)(i / 2) * 46);
         lv_obj_add_event_cb(button, on_audio_test_item_clicked, LV_EVENT_CLICKED,
                             (void *)(uintptr_t)i);
     }
@@ -1961,7 +2217,7 @@ static void on_sound_volume_changed(lv_event_t *event)
 
 static void on_sound_volume_released(lv_event_t *event)
 {
-    (void)event;
+    on_brightness_released(event);
     notify_activity();
     play_ui_sound(CLOCK_SETTINGS_MENU_UI_SOUND_CONFIRM);
     if (s_config.test_sound_cb != nullptr) {
@@ -2143,7 +2399,7 @@ static void open_wifi_setup(void)
     lv_obj_align(summary_title, LV_ALIGN_TOP_MID, 0, 36);
 
     lv_obj_t *scan_button = make_small_button(s_wifi_summary_view, "Scan networks");
-    lv_obj_set_size(scan_button, 180, 34);
+    lv_obj_set_size(scan_button, 180, 44);
     lv_obj_align(scan_button, LV_ALIGN_TOP_MID, 0, 62);
     lv_obj_add_event_cb(scan_button, on_wifi_scan_clicked, LV_EVENT_CLICKED, nullptr);
 
@@ -2190,7 +2446,7 @@ static void open_wifi_setup(void)
     lv_obj_clear_flag(edit_row, LV_OBJ_FLAG_SCROLLABLE);
 
     s_wifi_input = lv_textarea_create(edit_row);
-    lv_obj_set_size(s_wifi_input, 276, 40);
+    lv_obj_set_size(s_wifi_input, 276, 44);
     lv_textarea_set_one_line(s_wifi_input, true);
     lv_textarea_set_placeholder_text(s_wifi_input, "WiFi name");
     lv_obj_set_style_text_font(s_wifi_input, &lv_font_montserrat_20, 0);
@@ -2208,7 +2464,7 @@ static void open_wifi_setup(void)
     lv_obj_add_event_cb(s_wifi_input, on_wifi_input_changed, LV_EVENT_VALUE_CHANGED, nullptr);
 
     s_wifi_password_eye = lv_button_create(edit_row);
-    lv_obj_set_size(s_wifi_password_eye, 40, 40);
+    lv_obj_set_size(s_wifi_password_eye, 44, 44);
     lv_obj_set_style_radius(s_wifi_password_eye, 20, 0);
     lv_obj_set_style_bg_color(s_wifi_password_eye, lv_color_hex(MENU_COLOR_SURFACE), 0);
     lv_obj_set_style_bg_color(s_wifi_password_eye,
@@ -2267,7 +2523,7 @@ static void open_wifi_setup(void)
 
     s_wifi_scan_list = lv_obj_create(s_wifi_scan_view);
     lv_obj_remove_style_all(s_wifi_scan_list);
-    lv_obj_set_size(s_wifi_scan_list, 320, 200);
+    lv_obj_set_size(s_wifi_scan_list, 320, 210);
     lv_obj_align(s_wifi_scan_list, LV_ALIGN_TOP_MID, 0, 80);
     lv_obj_set_flex_flow(s_wifi_scan_list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(s_wifi_scan_list,
@@ -2279,13 +2535,18 @@ static void open_wifi_setup(void)
     lv_obj_set_scrollbar_mode(s_wifi_scan_list, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(s_wifi_scan_list, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *manual_button = make_action_button(s_wifi_scan_view, "Manual", 120);
-    lv_obj_align(manual_button, LV_ALIGN_TOP_MID, -65, 316);
+    lv_obj_t *manual_button = make_action_button(s_wifi_scan_view, "Manual", 92);
+    lv_obj_align(manual_button, LV_ALIGN_TOP_MID, -102, 316);
     lv_obj_add_event_cb(manual_button, on_wifi_scan_manual, LV_EVENT_CLICKED, nullptr);
 
-    lv_obj_t *scan_back_button = make_action_button(s_wifi_scan_view, "Back", 100);
-    lv_obj_align(scan_back_button, LV_ALIGN_TOP_MID, 65, 316);
+    lv_obj_t *scan_back_button = make_action_button(s_wifi_scan_view, "Back", 92);
+    lv_obj_align(scan_back_button, LV_ALIGN_TOP_MID, 102, 316);
     lv_obj_add_event_cb(scan_back_button, on_wifi_scan_back, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *rescan = make_action_button(s_wifi_scan_view, "Rescan", 96);
+    s_wifi_rescan_button = rescan;
+    lv_obj_align(rescan, LV_ALIGN_TOP_MID, 0, 316);
+    lv_obj_add_event_cb(rescan, on_wifi_scan_clicked, LV_EVENT_CLICKED, nullptr);
 
     s_wifi_key_popover = lv_obj_create(s_wifi_edit_view);
     lv_obj_remove_style_all(s_wifi_key_popover);
@@ -2307,8 +2568,8 @@ static void open_wifi_setup(void)
 
     s_wifi_setup_status =
         make_label(s_wifi_setup_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(s_wifi_setup_status, &lv_font_montserrat_12, 0);
-    lv_obj_set_width(s_wifi_setup_status, 200);
+    lv_obj_set_style_text_font(s_wifi_setup_status, &lv_font_montserrat_14, 0);
+    lv_obj_set_width(s_wifi_setup_status, 280);
     lv_obj_set_style_text_align(s_wifi_setup_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_wifi_setup_status, LV_LABEL_LONG_DOT);
     lv_obj_align(s_wifi_setup_status, LV_ALIGN_TOP_MID, 0, 426);
@@ -2434,7 +2695,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_pad_all(content, 0, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    // Absorb clicks inside the panel so only taps on the outer circle close the menu.
+    // Only Done or the physical button closes the menu.
     lv_obj_add_flag(content, LV_OBJ_FLAG_CLICKABLE);
 
     lv_obj_t *title = make_label(content, "SETTINGS", lv_color_hex(MENU_COLOR_MUTED));
@@ -2443,7 +2704,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_margin_bottom(title, 4, 0);
 
     lv_obj_t *close_button = lv_button_create(content);
-    lv_obj_set_size(close_button, 96, 36);
+    lv_obj_set_size(close_button, 96, 44);
     lv_obj_set_style_margin_bottom(close_button, 8, 0);
     lv_obj_set_style_radius(close_button, 18, 0);
     lv_obj_set_style_bg_color(close_button, lv_color_hex(MENU_COLOR_WARM), LV_STATE_PRESSED);
@@ -2481,12 +2742,12 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     make_page_header(brightness_page, LV_SYMBOL_EYE_OPEN, "Brightness");
 
     s_brightness_value = make_label(brightness_page, "", lv_color_hex(MENU_COLOR_TEXT));
-    lv_obj_set_style_text_font(s_brightness_value, &lv_font_montserrat_44, 0);
+    lv_obj_set_style_text_font(s_brightness_value, &lv_font_montserrat_36, 0);
     update_brightness_value(config->settings->brightness_percent);
 
     lv_obj_t *brightness_slider = lv_slider_create(brightness_page);
     lv_obj_set_size(brightness_slider, 260, 30);
-    lv_obj_set_style_margin_top(brightness_slider, 10, 0);
+    lv_obj_set_style_margin_top(brightness_slider, 6, 0);
     lv_obj_set_ext_click_area(brightness_slider, 18);
     lv_obj_set_style_bg_color(brightness_slider, lv_color_hex(MENU_COLOR_TRACK), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(brightness_slider, LV_OPA_COVER, LV_PART_MAIN);
@@ -2511,7 +2772,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_t *brightness_scale = lv_obj_create(brightness_page);
     lv_obj_remove_style_all(brightness_scale);
     lv_obj_set_size(brightness_scale, 260, 16);
-    lv_obj_set_style_margin_top(brightness_scale, 6, 0);
+    lv_obj_set_style_margin_top(brightness_scale, 4, 0);
     lv_obj_set_flex_flow(brightness_scale, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(brightness_scale,
                           LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -2519,14 +2780,46 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(brightness_scale, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *brightness_min = make_label(brightness_scale, "1%", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(brightness_min, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(brightness_min, &lv_font_montserrat_14, 0);
     lv_obj_t *brightness_max = make_label(brightness_scale, "100%", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(brightness_max, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(brightness_max, &lv_font_montserrat_14, 0);
 
-    lv_obj_t *brightness_hint = make_value_label(brightness_page, "Drag to adjust");
-    lv_obj_set_style_text_font(brightness_hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(brightness_hint, lv_color_hex(MENU_COLOR_MUTED), 0);
-    lv_obj_set_style_margin_top(brightness_hint, 8, 0);
+    lv_obj_t *faces_button = lv_button_create(brightness_page);
+    lv_obj_set_size(faces_button, 280, 60);
+    style_small_button(faces_button);
+    lv_obj_set_style_pad_all(faces_button, 0, 0);
+    lv_obj_set_style_margin_top(faces_button, 8, 0);
+    lv_obj_add_flag(faces_button, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    lv_obj_add_event_cb(faces_button, on_faces_open, LV_EVENT_CLICKED, nullptr);
+    const uint32_t current_face = config->settings->theme_index < config->theme_count
+                                      ? config->settings->theme_index : 0;
+    const clock_settings_menu_theme_t *face = config->themes != nullptr && config->theme_count > 0
+                                                ? &config->themes[current_face] : nullptr;
+    if (face != nullptr && face->preview != nullptr) {
+        lv_obj_t *preview_clip = lv_obj_create(faces_button);
+        lv_obj_remove_style_all(preview_clip);
+        lv_obj_set_size(preview_clip, 44, 44);
+        lv_obj_set_style_radius(preview_clip, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_clip_corner(preview_clip, true, 0);
+        lv_obj_clear_flag(preview_clip, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(preview_clip, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_align(preview_clip, LV_ALIGN_LEFT_MID, 10, 0);
+        lv_obj_t *preview = lv_image_create(preview_clip);
+        lv_image_set_src(preview, face->preview);
+        lv_image_set_scale(preview, 128);
+        lv_obj_center(preview);
+    }
+    lv_obj_t *faces_label = make_label(faces_button, "Watch faces", lv_color_hex(MENU_COLOR_TEXT));
+    lv_obj_set_style_text_font(faces_label, &lv_font_montserrat_16, 0);
+    lv_obj_align(faces_label, LV_ALIGN_TOP_LEFT, 66, 9);
+    lv_obj_t *face_name = make_label(faces_button, face != nullptr ? face->name : "Choose a style",
+                                    lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(face_name, &lv_font_montserrat_14, 0);
+    lv_obj_set_width(face_name, 174);
+    lv_label_set_long_mode(face_name, LV_LABEL_LONG_DOT);
+    lv_obj_align(face_name, LV_ALIGN_BOTTOM_LEFT, 66, -9);
+    lv_obj_t *faces_arrow = make_label(faces_button, LV_SYMBOL_RIGHT, lv_color_hex(MENU_COLOR_ACCENT));
+    lv_obj_align(faces_arrow, LV_ALIGN_RIGHT_MID, -14, 0);
 
     lv_obj_t *sleep_page = make_setting_page(wheel);
     make_page_caption(sleep_page, "POWER");
@@ -2547,7 +2840,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_add_event_cb(s_power_card, on_power_card_clicked, LV_EVENT_CLICKED, nullptr);
 
     lv_obj_t *battery_caption = make_label(s_power_card, "BATTERY", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(battery_caption, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_font(battery_caption, &lv_font_montserrat_14, 0);
     lv_obj_align(battery_caption, LV_ALIGN_TOP_LEFT, 14, 5);
 
     s_power_battery = make_label(s_power_card, "Battery --", lv_color_hex(MENU_COLOR_TEXT));
@@ -2558,7 +2851,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_align(s_power_battery, LV_ALIGN_TOP_LEFT, 14, 20);
 
     s_power_battery_detail = make_label(s_power_card, "", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(s_power_battery_detail, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_power_battery_detail, &lv_font_montserrat_14, 0);
     lv_obj_set_width(s_power_battery_detail, 220);
     lv_obj_set_style_text_align(s_power_battery_detail, LV_TEXT_ALIGN_LEFT, 0);
     lv_label_set_long_mode(s_power_battery_detail, LV_LABEL_LONG_DOT);
@@ -2652,7 +2945,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
 
     lv_obj_t *ntp_row = lv_obj_create(wifi_page);
     lv_obj_remove_style_all(ntp_row);
-    lv_obj_set_size(ntp_row, 280, 32);
+    lv_obj_set_size(ntp_row, 280, 44);
     lv_obj_set_style_margin_top(ntp_row, 4, 0);
     lv_obj_set_flex_flow(ntp_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(ntp_row,
@@ -2663,7 +2956,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_t *ntp_label = make_label(ntp_row, "Auto NTP", lv_color_hex(MENU_COLOR_MUTED));
     lv_obj_set_style_text_font(ntp_label, &lv_font_montserrat_14, 0);
     s_ntp_switch = lv_switch_create(ntp_row);
-    lv_obj_set_size(s_ntp_switch, 64, 32);
+    lv_obj_set_size(s_ntp_switch, 76, 44);
     lv_obj_add_flag(s_ntp_switch, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
     style_switch(s_ntp_switch);
     if (config->settings->ntp_enabled) {
@@ -2680,7 +2973,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     s_wifi_detail = make_label(wifi_page,
                                "Tap Setup to configure",
                                lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(s_wifi_detail, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_wifi_detail, &lv_font_montserrat_14, 0);
     lv_obj_set_width(s_wifi_detail, 280);
     lv_obj_set_style_text_align(s_wifi_detail, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(s_wifi_detail, LV_LABEL_LONG_DOT);
@@ -2688,8 +2981,25 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
 
     lv_obj_t *sound_page = make_setting_page(wheel);
     make_page_header(sound_page, LV_SYMBOL_AUDIO, "Sound");
+    lv_obj_t *sound_body = lv_obj_create(sound_page);
+    s_sound_body = sound_body;
+    lv_obj_remove_style_all(sound_body);
+    lv_obj_set_size(sound_body, 296, 194);
+    lv_obj_set_style_pad_left(sound_body, 8, 0);
+    lv_obj_set_style_pad_right(sound_body, 8, 0);
+    lv_obj_set_style_pad_bottom(sound_body, 8, 0);
+    lv_obj_set_style_pad_row(sound_body, 8, 0);
+    lv_obj_set_flex_flow(sound_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(sound_body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_scroll_dir(sound_body, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(sound_body, LV_SCROLLBAR_MODE_ON);
+    lv_obj_set_style_bg_color(sound_body, lv_color_hex(MENU_COLOR_ACCENT), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(sound_body, LV_OPA_50, LV_PART_SCROLLBAR);
+    lv_obj_set_style_width(sound_body, 3, LV_PART_SCROLLBAR);
+    lv_obj_clear_flag(sound_body, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    lv_obj_add_event_cb(sound_body, on_root_pressed, LV_EVENT_SCROLL, nullptr);
 
-    lv_obj_t *master_row = make_switch_row(sound_page, "Sound", &s_sound_master_switch);
+    lv_obj_t *master_row = make_switch_row(sound_body, "Sound", &s_sound_master_switch);
     lv_obj_set_style_margin_top(master_row, 4, 0);
     if (config->settings->sound_enabled) {
         lv_obj_add_state(s_sound_master_switch, LV_STATE_CHECKED);
@@ -2697,9 +3007,9 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_add_event_cb(s_sound_master_switch, on_sound_master_changed,
                         LV_EVENT_VALUE_CHANGED, nullptr);
 
-    lv_obj_t *volume_row = lv_obj_create(sound_page);
+    lv_obj_t *volume_row = lv_obj_create(sound_body);
     lv_obj_remove_style_all(volume_row);
-    lv_obj_set_size(volume_row, 280, 36);
+    lv_obj_set_size(volume_row, 280, 44);
     lv_obj_set_style_margin_top(volume_row, 4, 0);
     lv_obj_set_flex_flow(volume_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(volume_row,
@@ -2711,7 +3021,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_text_font(volume_label, &lv_font_montserrat_14, 0);
 
     s_sound_volume_slider = lv_slider_create(volume_row);
-    lv_obj_set_size(s_sound_volume_slider, 132, 20);
+    lv_obj_set_size(s_sound_volume_slider, 164, 24);
     lv_obj_set_ext_click_area(s_sound_volume_slider, 10);
     lv_obj_set_style_bg_color(s_sound_volume_slider, lv_color_hex(MENU_COLOR_TRACK), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(s_sound_volume_slider, LV_OPA_COVER, LV_PART_MAIN);
@@ -2728,6 +3038,8 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_set_style_pad_all(s_sound_volume_slider, 5, LV_PART_KNOB);
     lv_slider_set_range(s_sound_volume_slider, 0, 100);
     lv_slider_set_value(s_sound_volume_slider, config->settings->sound_volume, LV_ANIM_OFF);
+    lv_obj_clear_flag(s_sound_volume_slider, LV_OBJ_FLAG_SCROLL_CHAIN_VER);
+    lv_obj_add_event_cb(s_sound_volume_slider, on_brightness_pressed, LV_EVENT_PRESSED, nullptr);
     lv_obj_add_event_cb(s_sound_volume_slider, on_sound_volume_changed,
                         LV_EVENT_VALUE_CHANGED, nullptr);
     lv_obj_add_event_cb(s_sound_volume_slider, on_sound_volume_released,
@@ -2738,7 +3050,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     s_sound_volume_value = make_label(volume_row,
                                       "",
                                       lv_color_hex(MENU_COLOR_TEXT));
-    lv_obj_set_width(s_sound_volume_value, 34);
+    lv_obj_set_width(s_sound_volume_value, 44);
     lv_obj_set_style_text_align(s_sound_volume_value, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_style_text_font(s_sound_volume_value, &lv_font_montserrat_14, 0);
     char volume_text[8] = {};
@@ -2746,11 +3058,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
              (unsigned)config->settings->sound_volume);
     set_label_text_if_changed(s_sound_volume_value, volume_text);
 
-    lv_obj_t *test_sound = make_action_button(volume_row, "Test", 54);
-    lv_obj_set_height(test_sound, 30);
-    lv_obj_add_event_cb(test_sound, on_test_sound_clicked, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t *ui_sound_row = make_switch_row(sound_page, "UI sounds", &s_ui_sounds_switch);
+    lv_obj_t *ui_sound_row = make_switch_row(sound_body, "UI sounds", &s_ui_sounds_switch);
     lv_obj_set_style_margin_top(ui_sound_row, 4, 0);
     if (config->settings->ui_sounds) {
         lv_obj_add_state(s_ui_sounds_switch, LV_STATE_CHECKED);
@@ -2758,7 +3066,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_add_event_cb(s_ui_sounds_switch, on_ui_sounds_changed,
                         LV_EVENT_VALUE_CHANGED, nullptr);
 
-    lv_obj_t *chime_row = make_switch_row(sound_page, "Hourly chime", &s_chime_switch);
+    lv_obj_t *chime_row = make_switch_row(sound_body, "Hourly chime", &s_chime_switch);
     lv_obj_set_style_margin_top(chime_row, 4, 0);
     if (config->settings->hourly_chime) {
         lv_obj_add_state(s_chime_switch, LV_STATE_CHECKED);
@@ -2766,9 +3074,9 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
     lv_obj_add_event_cb(s_chime_switch, on_chime_changed,
                         LV_EVENT_VALUE_CHANGED, nullptr);
 
-    lv_obj_t *sound_actions = lv_obj_create(sound_page);
+    lv_obj_t *sound_actions = lv_obj_create(sound_body);
     lv_obj_remove_style_all(sound_actions);
-    lv_obj_set_size(sound_actions, 280, 38);
+    lv_obj_set_size(sound_actions, 280, 44);
     lv_obj_set_style_margin_top(sound_actions, 4, 0);
     lv_obj_set_flex_flow(sound_actions, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(sound_actions,
@@ -2777,14 +3085,16 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_clear_flag(sound_actions, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_t *alarms_button = make_action_button(sound_actions, "Alarms", 86);
-    lv_obj_set_height(alarms_button, 38);
     lv_obj_add_event_cb(alarms_button, on_alarm_open_clicked, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *timer_button = make_action_button(sound_actions, "Timer", 86);
-    lv_obj_set_height(timer_button, 38);
     lv_obj_add_event_cb(timer_button, on_timer_open_clicked, LV_EVENT_CLICKED, nullptr);
     lv_obj_t *sleep_button = make_action_button(sound_actions, "Sleep", 86);
-    lv_obj_set_height(sleep_button, 38);
     lv_obj_add_event_cb(sleep_button, on_sleep_open_clicked, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t *test_sound = make_action_button(sound_body, "Audio test", 180);
+    lv_obj_add_event_cb(test_sound, on_test_sound_clicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t *alarm_hint = make_label(sound_body, "Alarms ring with Sound off", lv_color_hex(MENU_COLOR_MUTED));
+    lv_obj_set_style_text_font(alarm_hint, &lv_font_montserrat_14, 0);
 
     lv_obj_t *tabs = lv_obj_create(content);
     lv_obj_remove_style_all(tabs);
@@ -2811,7 +3121,7 @@ lv_obj_t *clock_settings_menu_create(lv_obj_t *parent, const clock_settings_menu
         lv_obj_set_style_text_color(icon, lv_color_hex(MENU_COLOR_MUTED), 0);
         lv_obj_t *label = lv_label_create(tab);
         lv_label_set_text(label, MENU_TAB_LABELS[i]);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(label, lv_color_hex(MENU_COLOR_MUTED), 0);
         s_page_tabs[i] = tab;
         s_page_tab_icons[i] = icon;
@@ -3061,12 +3371,12 @@ static void open_power_detail(void)
 
     s_power_detail_extra =
         make_label(s_power_detail_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(s_power_detail_extra, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_power_detail_extra, &lv_font_montserrat_14, 0);
     lv_obj_align(s_power_detail_extra, LV_ALIGN_TOP_MID, 0, 192);
 
     s_power_detail_config =
         make_label(s_power_detail_overlay, "", lv_color_hex(MENU_COLOR_MUTED));
-    lv_obj_set_style_text_font(s_power_detail_config, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(s_power_detail_config, &lv_font_montserrat_14, 0);
     lv_obj_align(s_power_detail_config, LV_ALIGN_TOP_MID, 0, 214);
 
     lv_obj_t *close_button = make_action_button(s_power_detail_overlay, "Close", 140);
@@ -3163,7 +3473,8 @@ void clock_settings_menu_update_sleep_status(bool playing, bool usb_powered)
 
 bool clock_settings_menu_is_setup_open(void)
 {
-    return s_wifi_setup_overlay != nullptr ||
+    return s_faces_overlay != nullptr ||
+           s_wifi_setup_overlay != nullptr ||
            s_alarm_list_overlay != nullptr ||
            s_alarm_edit_overlay != nullptr ||
            s_timer_overlay != nullptr ||

@@ -1,5 +1,6 @@
 #include "wifi_manager.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 
@@ -44,7 +45,15 @@ static bool s_enabled = false;
 static bool s_has_credentials = false;
 static bool s_initialized = false;
 static volatile bool s_started = false;
-static volatile bool s_scan_in_progress = false;
+static std::atomic<bool> s_scan_in_progress{false};
+static bool s_scan_started_radio = false;
+static bool s_scan_event_ready = false;
+static esp_err_t s_scan_error = ESP_OK;
+static wifi_manager_scan_state_t s_scan_state = WIFI_MANAGER_SCAN_IDLE;
+static wifi_manager_ap_t s_scan_results[8] = {};
+static size_t s_scan_count = 0;
+static uint64_t s_scan_started_us = 0;
+static void update_scan(void);
 static char s_ssid[WIFI_SSID_MAX_LEN + 1] = {};
 static char s_password[WIFI_PASSWORD_MAX_LEN + 1] = {};
 static char s_ip[16] = {};
@@ -373,6 +382,17 @@ static void wifi_event_handler(void *arg,
 {
     (void)arg;
 
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
+        const auto *event = static_cast<const wifi_event_sta_scan_done_t *>(event_data);
+        portENTER_CRITICAL(&s_lock);
+        if (s_scan_in_progress && !s_scan_event_ready) {
+            s_scan_event_ready = true;
+            s_scan_error = event != nullptr && event->status == 0 ? ESP_OK : ESP_FAIL;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
+
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         set_disconnect_reason(0);
         if (s_scan_in_progress) {
@@ -596,13 +616,19 @@ esp_err_t wifi_manager_set_enabled(bool enabled)
         }
     }
 
+    if (s_scan_in_progress && enabled) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!enabled) {
         portENTER_CRITICAL(&s_lock);
         s_enabled = false;
         portEXIT_CRITICAL(&s_lock);
         cancel_retry();
         reset_retry_counters(false);
-        stop_wifi_radio();
+        // An in-flight scan owns the temporary radio session until completion.
+        if (!s_scan_in_progress) {
+            stop_wifi_radio();
+        }
         set_ip(nullptr);
         set_disconnect_reason(0);
         set_state(WIFI_MANAGER_OFF);
@@ -637,102 +663,151 @@ bool wifi_manager_has_credentials(void)
     return has_credentials;
 }
 
-esp_err_t wifi_manager_scan(wifi_manager_ap_t *results, size_t max_results, size_t *count)
+// Called from the application/LVGL thread, including after the menu closes.
+static void finish_scan_radio(void)
 {
-    if (results == nullptr || max_results == 0 || count == nullptr) {
-        return ESP_ERR_INVALID_ARG;
+    if (!wifi_manager_is_enabled()) {
+        stop_wifi_radio();
+        set_state(WIFI_MANAGER_OFF);
+    } else if (s_scan_started_radio && get_state() != WIFI_MANAGER_CONNECTED) {
+        stop_wifi_radio();
+        if (!is_retry_scheduled()) {
+            schedule_retry(false);
+        }
     }
-    *count = 0;
+    s_scan_started_radio = false;
+    s_scan_in_progress = false;
+}
 
+esp_err_t wifi_manager_scan_start(void)
+{
+    if (s_scan_in_progress) {
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t err = wifi_manager_init();
     if (err != ESP_OK) {
         return err;
     }
-
-    struct ScanInProgressGuard {
-        ScanInProgressGuard() { s_scan_in_progress = true; }
-        ~ScanInProgressGuard() { s_scan_in_progress = false; }
-    } scan_guard;
-
-    bool started_here = false;
-    if (!s_started) {
+    portENTER_CRITICAL(&s_lock);
+    s_scan_in_progress = true;
+    s_scan_event_ready = false;
+    s_scan_error = ESP_OK;
+    portEXIT_CRITICAL(&s_lock);
+    s_scan_state = WIFI_MANAGER_SCAN_BUSY;
+    s_scan_count = 0;
+    s_scan_started_radio = !s_started;
+    s_scan_started_us = esp_timer_get_time();
+    if (s_scan_started_radio) {
         err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            return err;
+        if (err == ESP_OK) {
+            err = esp_wifi_start();
         }
-        err = esp_wifi_start();
-        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            return err;
+        if (err == ESP_OK) {
+            s_started = true;
         }
-        s_started = true;
-        started_here = true;
-    }
-
-    wifi_scan_config_t config = {};
-    ESP_LOGI(TAG, "WiFi scan start");
-    err = esp_wifi_scan_start(&config, true);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "WiFi scan start failed: %s", esp_err_to_name(err));
     }
     if (err == ESP_OK) {
-        bool ap_list_freed = false;
-        uint16_t found = 0;
-        if (esp_wifi_scan_get_ap_num(&found) == ESP_OK && found > 0) {
-            static wifi_ap_record_t records[16];
-            uint16_t fetch_count = found > 16 ? 16 : found;
-            if (esp_wifi_scan_get_ap_records(&fetch_count, records) == ESP_OK) {
-                // esp_wifi_scan_get_ap_records() already frees the scan list.
-                ap_list_freed = true;
-                for (uint16_t i = 0; i < fetch_count && *count < max_results; ++i) {
-                    if (records[i].ssid[0] == '\0') {
-                        continue;
+        wifi_scan_config_t config = {};
+        err = esp_wifi_scan_start(&config, false);
+    }
+    if (err != ESP_OK) {
+        portENTER_CRITICAL(&s_lock);
+        s_scan_error = err;
+        portEXIT_CRITICAL(&s_lock);
+        s_scan_state = WIFI_MANAGER_SCAN_ERROR;
+        finish_scan_radio();
+    }
+    return err;
+}
+
+static void update_scan(void)
+{
+    if (!s_scan_in_progress) {
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    const bool ready = s_scan_event_ready;
+    esp_err_t err = s_scan_error;
+    portEXIT_CRITICAL(&s_lock);
+    const bool timeout = (uint64_t)esp_timer_get_time() - s_scan_started_us >= 15000000ULL;
+    if (!ready && !timeout) {
+        return;
+    }
+    if (!ready) {
+        portENTER_CRITICAL(&s_lock);
+        s_scan_event_ready = true; // Fence a late completion after the timeout.
+        portEXIT_CRITICAL(&s_lock);
+        esp_wifi_scan_stop();
+        err = ESP_ERR_TIMEOUT;
+    }
+    uint16_t found = 0;
+    if (err == ESP_OK) {
+        err = esp_wifi_scan_get_ap_num(&found);
+    }
+    if (err == ESP_OK && found > 0) {
+        static wifi_ap_record_t records[16];
+        uint16_t fetched = found > 16 ? 16 : found;
+        err = esp_wifi_scan_get_ap_records(&fetched, records);
+        if (err == ESP_OK) {
+            for (uint16_t i = 0; i < fetched && s_scan_count < 8; ++i) {
+                if (records[i].ssid[0] == '\0') {
+                    continue;
+                }
+                const char *ssid = reinterpret_cast<const char *>(records[i].ssid);
+                bool duplicate = false;
+                for (size_t j = 0; j < s_scan_count; ++j) {
+                    if (std::strcmp(s_scan_results[j].ssid, ssid) == 0) {
+                        duplicate = true;
+                        break;
                     }
-                    const char *ssid = reinterpret_cast<const char *>(records[i].ssid);
-                    bool duplicate = false;
-                    for (size_t j = 0; j < *count; ++j) {
-                        if (std::strcmp(results[j].ssid, ssid) == 0) {
-                            if (records[i].rssi > results[j].rssi) {
-                                results[j].rssi = records[i].rssi;
-                            }
-                            duplicate = true;
-                            break;
-                        }
-                    }
-                    if (duplicate) {
-                        continue;
-                    }
-                    copy_string(results[*count].ssid, sizeof(results[*count].ssid), ssid);
-                    results[*count].rssi = records[i].rssi;
-                    results[*count].secure = records[i].authmode != WIFI_AUTH_OPEN;
-                    ++(*count);
+                }
+                if (!duplicate) {
+                    auto &ap = s_scan_results[s_scan_count++];
+                    copy_string(ap.ssid, sizeof(ap.ssid), ssid);
+                    ap.rssi = records[i].rssi;
+                    ap.secure = records[i].authmode != WIFI_AUTH_OPEN;
                 }
             }
         }
-        if (!ap_list_freed) {
-            // Only free the list when records were not fetched; a successful
-            // esp_wifi_scan_get_ap_records() call has already released it.
-            esp_wifi_clear_ap_list();
+    }
+    // Also release the driver's list on empty/error paths.
+    if (err != ESP_OK || found == 0) {
+        esp_wifi_clear_ap_list();
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_scan_error = err;
+    portEXIT_CRITICAL(&s_lock);
+    s_scan_state = err == ESP_OK ? WIFI_MANAGER_SCAN_DONE : WIFI_MANAGER_SCAN_ERROR;
+    finish_scan_radio();
+    ESP_LOGI(TAG, "Scan finished: %s, %u networks", esp_err_to_name(err), (unsigned)s_scan_count);
+}
+
+wifi_manager_scan_state_t wifi_manager_scan_results(wifi_manager_ap_t *results,
+                                                    size_t max_results,
+                                                    size_t *count,
+                                                    esp_err_t *error)
+{
+    update_scan();
+    if (count != nullptr) {
+        *count = s_scan_state == WIFI_MANAGER_SCAN_DONE ?
+                 (s_scan_count < max_results ? s_scan_count : max_results) : 0;
+        if (results != nullptr && *count > 0) {
+            std::memcpy(results, s_scan_results, *count * sizeof(*results));
         }
     }
-
-    if (started_here) {
-        stop_wifi_radio();
-        if (!wifi_manager_is_enabled()) {
-            set_state(WIFI_MANAGER_OFF);
-        } else if (get_state() != WIFI_MANAGER_CONNECTED &&
-                   !is_retry_scheduled()) {
-            // The temporary radio session for scanning is over; resume the
-            // normal backoff instead of leaving WiFi running.
-            schedule_retry(false);
-        }
+    if (error != nullptr) {
+        portENTER_CRITICAL(&s_lock);
+        *error = s_scan_error;
+        portEXIT_CRITICAL(&s_lock);
     }
-
-    ESP_LOGI(TAG, "WiFi scan found %u networks", (unsigned)*count);
-    return err;
+    return s_scan_state;
 }
 
 esp_err_t wifi_manager_connect(const char *ssid, const char *password)
 {
+    if (s_scan_in_progress) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (ssid == nullptr || ssid[0] == '\0' ||
         std::strlen(ssid) > WIFI_SSID_MAX_LEN) {
         return ESP_ERR_INVALID_ARG;
@@ -795,6 +870,7 @@ esp_err_t wifi_manager_forget(void)
 
 void wifi_manager_get_status(wifi_manager_status_t *status)
 {
+    update_scan();
     if (status == nullptr) {
         return;
     }

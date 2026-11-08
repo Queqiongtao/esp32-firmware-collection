@@ -26,6 +26,7 @@ file(GLOB M5_FONTS "${MAIN_DIR}/m5_assets/fonts/*.c")
 
 add_executable(preview
     preview.cpp
+    test_interactions.cpp
     ${MAIN_DIR}/clock_theme_minimal.cpp
     ${MAIN_DIR}/clock_theme_segment.cpp
     ${MAIN_DIR}/clock_theme_analog.cpp
@@ -35,6 +36,7 @@ add_executable(preview
     ${MAIN_DIR}/clock_theme_m5_number_flow.cpp
     ${MAIN_DIR}/clock_theme_dot_matrix.cpp
     ${MAIN_DIR}/clock_settings_menu.cpp
+    ${MAIN_DIR}/clock_theme_previews.c
     ${MAIN_DIR}/lv_font_clock_96.c
     ${MAIN_DIR}/lv_font_clock_144.c
     ${MAIN_DIR}/lv_font_seg_96.c
@@ -46,3 +48,13 @@ target_include_directories(preview PRIVATE ${MAIN_DIR} ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(preview PRIVATE lvgl m)
 
 target_compile_options(preview PRIVATE -Wno-missing-field-initializers)
+
+add_executable(test_alert_scheduler test_alert_scheduler.cpp ${MAIN_DIR}/clock_alert_scheduler.cpp)
+target_include_directories(test_alert_scheduler PRIVATE ${MAIN_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/stubs)
+enable_testing()
+add_test(NAME alert_scheduler COMMAND test_alert_scheduler)
+add_test(NAME menu_and_themes COMMAND preview --test)
+# mallinfo2 includes freed blocks retained by glibc's per-thread cache. Disable
+# that cache for this process so repeated-cycle heap comparisons measure ownership.
+set_tests_properties(menu_and_themes PROPERTIES
+    ENVIRONMENT "GLIBC_TUNABLES=glibc.malloc.tcache_count=0")

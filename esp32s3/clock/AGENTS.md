@@ -25,6 +25,8 @@
 
 - `main/main.cpp`：应用入口、主题切换与过渡、LVGL snapshot、旋转弹簧、亮度渐变、GPIO0 按钮/触摸手势/电源键接入、设置菜单、WiFi/NTP 状态轮询、音频事件/闹钟/倒计时、自动息屏。
 - `main/clock_theme.h`：时钟主题接口。
+- `main/clock_theme_previews.c` / `.h`：Display → Watch faces 的 8 个静态 RGB565 小预览；主题视觉更新后先生成预览，再运行 `python3 tools/preview/generate_thumbnails.py` 显式更新资源。
+- `main/clock_alert_scheduler.cpp` / `.h`：日期和槽位去重、并发闹钟队列、单调时间 Snooze 和待补发倒计时提醒；可用主机测试验证。
 - `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_dot_matrix.cpp`：本工程原有时钟主题。
 - `main/clock_theme_m5_*.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，按 Classic、Simple、BigNumber、NumberFlow 分为四个文件。
 - `main/lv_font_*.c`：主题位图字体资源；新增字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
@@ -93,7 +95,7 @@
 - WiFi 页提供开关、Setup 配网、Auto NTP 开关、Sync now 和两行状态显示；连接后显示 SSID、IP、RSSI 和 NTP 同步状态，失败时显示错误原因和下一次重试倒计时。保存凭据或启动连接失败时，配网弹层保持打开并显示错误，不再静默关闭。
 - WiFi 断线重试采用指数退避：30 秒、2 分钟、5 分钟、10 分钟、20 分钟，之后每 60 分钟一次；30 秒和 2 分钟档保持射频开启，5 分钟及以上档关闭射频；鉴权失败从 5 分钟档开始。连续在线 60 秒、重新切换 WiFi 开关或重新保存凭据会重置退避；不设重试次数上限。
 - Setup 弹层采用“摘要页 + 单字段编辑页”：摘要页显示 WiFi Name/Password 两个大条目，并提供 Scan networks 按钮扫描附近 AP；点选 SSID 后直接进入密码编辑，隐藏网络仍可手动输入。编辑页只显示一个输入框，使用约 350 × 270 的 6 列字母键盘，单键约 58 × 54 px；支持按键气泡、大小写和数字/符号层，当前输入框用薄荷绿边框高亮，密码支持显示/隐藏。密码以明文保存在 NVS `wifi_creds` 命名空间；连接成功后 SNTP 自动启动，依次使用 `ntp.aliyun.com`、`ntp.tencent.com`、`cn.pool.ntp.org` 三台服务器。
-- WiFi 扫描在 LVGL 事件中同步执行，扫描期间界面不响应触摸，通常持续 1–3 秒；最多展示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描完成后关闭。
+- WiFi 使用非阻塞扫描和 SCAN_DONE 事件，扫描期间可以返回、关闭菜单或息屏；结果由 LVGL 定时器读取，最多展示 8 个 AP。WiFi 原本关闭时会临时启动 STA，扫描完成或 15 秒超时后恢复关闭；菜单关闭后网络状态轮询仍会完成扫描清理。
 - AXP2101 使用共享 BSP I2C 总线，地址 `0x34`；初始化时关闭 TS 引脚温度检测，设置 50 mA 预充、400 mA 恒流、25 mA 截止、4.2 V 截止电压，并显式使能 E-Gauge（REG18h bit3）。本板 E-Gauge 寄存器 `0xA4` 可能持续返回 0，此时 `power_manager` 使用 3300–4200 mV 电压曲线估算电量（充电时先补偿 70 mV），模块状态中的 `battery_percent_estimated` 为 true，UI 用 `~` 前缀和 `Estimated | 4.2 V / 400 mA` 标识估算值；串口首次更新会打印 `gauge=... percent=... (estimated) battery_mv=...`。
 - PCF85063、QMI8658、AXP2101、ES8311 和触摸控制器共用 BSP I2C 总线；ES8311 通过 I2S（MCLK42/BCLK9/WS45/DOUT8）输出，PA 使能为 GPIO46。
 - 睡眠白噪音只在 USB 供电时允许启动；播放中拔掉 USB 会淡出并停止。闹钟允许电池供电，但 60 秒自动停止。白噪音播放期间 UI 音效会暂时静音，Test 试听会先停止白噪音。
@@ -101,6 +103,14 @@
 - QMI8658 仅启用加速度计并读取 6 字节加速度数据；菜单打开、屏幕息屏或自动旋转关闭时会暂停采样。
 - 当前 UI 旋转方案复用一张 RGB565 snapshot，并且仅在主题内容实际变化时刷新；主题切换过渡只改图片 scale/opacity，不额外分配 PSRAM。
 - 设置存在 NVS `clock_settings` 命名空间下，首次上电或 NVS 异常时会回退到默认值；主题索引存于 `theme_id`，值是 `s_themes` 数组下标，增删或重排主题会改变映射。声音设置存于 `sound_on`、`sound_vol`、`ui_sound`、`chime_on`，3 个闹钟以 `alarm_cfg` blob 保存。移除 outline 主题后，旧固件升级时若缺少 `theme_map` 键，会把旧索引 3 回退到 analog，并把旧索引 4–7 前移为 3–6，然后写入 `theme_map=1`。自动旋转存于 `auto_rotate`，缺省为关闭；NTP 自动对时存于 `ntp`，缺省为开启。WiFi 凭据单独存于 `wifi_creds` 命名空间，SSID 和密码均为明文。ESP-IDF NVS 的命名空间和键名最长 15 个字符，新增 NVS 名称时必须检查长度。
+
+## 本轮体验约定
+
+- Display 页提供 Watch faces 两页圆形缩略图选择器；点击只选中，Apply 才应用，翻页保留候选，Back/关闭丢弃未应用选择。主题顺序和 NVS 索引保持稳定。
+- Sound 页内容可纵向滚动，底部 Tab 直接切页；主要按钮至少 44 px，闹钟分钟逐分钟调整并支持长按连调。
+- 包括配网和详情弹层在内，菜单统一 1 分钟无操作关闭。
+- 同时到期的闹钟按槽位排队；闹钟结束、超时或 Snooze 后补发待处理的倒计时提醒。白噪音被提醒打断后需手动重新启动。
+- 体验改动、主机测试与真机验收边界见 `doc/experience-optimization.md`。
 
 ## 验证要求
 
@@ -121,7 +131,7 @@
   - 菜单是否默认亮度页、Done 可关闭、点内容外不关闭、1 分钟无操作自动关闭、息屏时自动关闭；Motion 页开关是否默认关闭，关闭后时钟是否立即回正；WiFi 页状态是否与开关一致，能否显示 IP/RSSI/失败原因。
   - WiFi 断线后是否按 30 秒、2 分钟、5 分钟、10 分钟、20 分钟、之后每 60 分钟退避；30 秒和 2 分钟档是否保持射频开启，5 分钟及以上是否关闭射频；密码错误是否从 5 分钟档开始；重连或重新配网后是否重置退避；UI 是否显示正确的 Retry 倒计时。
   - WiFi 配网摘要页是否显示当前 SSID/密码状态，Scan networks 是否能列出附近 AP 并在点选后进入密码页；SSID/密码编辑页是否一次只编辑一个字段、6 列键盘是否足够大、按键气泡/大小写/符号层/焦点/密码显示隐藏是否正常；保存凭据并连接、Auto NTP 和 Sync now 是否可用；串口不应再出现 `ESP_ERR_NVS_KEY_TOO_LONG`。
-  - WiFi 连接成功后 NTP 是否自动同步，Sync now 是否能立即触发同步，同步后 PCF85063 时间是否更新；断电重启后 WiFi 是否按保存的开关和凭据自动连接。
+  - WiFi 连接成功后 NTP 是否自动同步，Sync now 是否能立即触发同步，同步后 PCF85063 时间是否更新；距离上次同步不足 2 小时时 WiFi 重连是否不会重复对时；NTP 超时后是否按 5/15/30/60 分钟退避重试且 WiFi 页显示 Retry 倒计时；断电重启后 WiFi 是否按保存的开关和凭据自动连接。
   - Brightness 胶囊进度条拖动是否跟手且不会误触发页面滚动；菜单打开/关闭动画是否流畅、无残留菜单对象。
   - 底部沿浅弧排列的 5 个图标 + 文字 Tab 是否可以直接切换页面，当前 Tab 高亮是否正确；顶部中央 Done 是否可点击关闭，且所有控件都在圆屏内。
   - 自动旋转开启后，断电重启是否保持开启；关闭后是否保持关闭，且启动时钟不跟随倾斜。
