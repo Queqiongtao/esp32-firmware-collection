@@ -1,4 +1,4 @@
-# M5 表盘字体生成
+# 表盘字体与点阵字形生成
 
 `main/m5_assets/fonts/` 下的 Commissioner / Maple Mono 字体来自 M5StopWatch-UserDemo。上游资源是 **2bpp**，只有 4 级灰度；`m5_simple` 的 108px 数字和 `m5_number_flow` 的 80px 数字在这种 bpp 下边缘会明显发软。
 
@@ -59,3 +59,25 @@ CLOCK_FONT_CACHE_DIR=/path/to/fonts ./tools/fonts/generate_m5_fonts.sh
 
 - `m5_number_flow` 当前使用 80px 数字和 28px 日期，是工程的显示设计；M5 上游对应的是 64px 数字和 24px 日期。
 - `CommissionerMedium64.c` 目前没有主题使用，保留作为上游资源参考，不参与 4bpp 重新生成。
+
+## Dot Matrix 纯点阵字形
+
+`main/dot_matrix_glyphs.h` 是离线采样的 10 个数字掩码，15×25、每行 15 bit，总计 500 字节。设备与主机预览直接包含此头文件，不加载 TTF，也无需新增 LVGL 字体或修改 CMake。
+
+生成源为系统 Ubuntu 字体包的 `UbuntuSans[wdth,wght].ttf`，Version 1.006；宽度轴 `wdth=75`、字重轴 `wght=750`。十个数字共用缩放、基线和固定字格，按字宽居中，不单独拉伸；以 32 倍分辨率渲染后面积采样到 15×25，覆盖阈值为 112/255。主时间用 4 px 圆点、2 px 间距显示，仅绘制命中点。
+
+在工程目录执行（依赖 Python 3 与 Pillow，脚本不下载字体）：
+
+```bash
+python3 tools/fonts/generate_dot_matrix_glyphs.py
+# 也可显式指定同一字体文件：
+python3 tools/fonts/generate_dot_matrix_glyphs.py --font '/path/to/UbuntuSans[wdth,wght].ttf'
+./tools/preview/run.sh
+python3 tools/preview/generate_thumbnails.py
+./tools/preview/run.sh
+./dev.sh build
+```
+
+默认读取 `/usr/share/fonts/truetype/ubuntu/UbuntuSans[wdth,wght].ttf`；生成头文件记录源文件名、SHA-256、采样参数和版权信息。相同源字体和 Pillow 环境可重复生成相同掩码。TTF 不入库，字体版本变化后需检查全部数字，尤其是 0/6/8/9 和连续的 1/2。
+
+字体版权为 Canonical Ltd.（2011、2022、2023），许可证为 [Ubuntu Font Licence 1.0](ubuntu-font-licence.txt)；生成的数字子集标注为 Ubuntu Sans derivative Clock Dot Matrix。

@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 #ifdef __GLIBC__
 #include <malloc.h>
 #endif
@@ -65,6 +66,84 @@ void click(const char *label)
     lv_obj_t *button = lv_obj_get_parent(text);
     CHECK(lv_obj_check_type(button, &lv_button_class));
     lv_obj_send_event(button, LV_EVENT_CLICKED, nullptr);
+}
+
+void test_dot_matrix()
+{
+    const auto &theme = g_clock_theme_dot_matrix;
+    CHECK(!theme.update(nullptr));
+    lv_obj_t *root = theme.build(lv_screen_active());
+    CHECK(root);
+    theme.reset();
+    tm local = {};
+    local.tm_year = 126; local.tm_mon = 9; local.tm_mday = 20; local.tm_wday = 2;
+    local.tm_hour = 23; local.tm_min = 59; local.tm_sec = 58;
+    CHECK(theme.update(&local));
+    CHECK(!theme.update(&local));
+    CHECK(find_text(root, "TUE 20 OCT"));
+    lv_draw_buf_t *main_buf = nullptr;
+    lv_draw_buf_t *seconds_buf = nullptr;
+    lv_obj_t *colon = nullptr;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(root); ++i) {
+        lv_obj_t *child = lv_obj_get_child(root, i);
+        if (lv_obj_check_type(child, &lv_canvas_class)) {
+            auto *buf = lv_canvas_get_draw_buf(child);
+            if (buf->header.w > 100) main_buf = buf;
+            else seconds_buf = buf;
+        } else if (lv_obj_check_type(child, &lv_obj_class)) {
+            colon = child;
+        }
+    }
+    CHECK(main_buf && seconds_buf && colon);
+    const std::vector<uint8_t> main_pixels(main_buf->data, main_buf->data + main_buf->data_size);
+    const std::vector<uint8_t> seconds_pixels(seconds_buf->data, seconds_buf->data + seconds_buf->data_size);
+    const lv_color_t lit_colon = lv_obj_get_style_bg_color(colon, LV_PART_MAIN);
+    local.tm_sec = 59;
+    CHECK(theme.update(&local));
+    CHECK(!theme.update(&local));
+    CHECK(std::memcmp(main_buf->data, main_pixels.data(), main_pixels.size()) == 0);
+    CHECK(std::memcmp(seconds_buf->data, seconds_pixels.data(), seconds_pixels.size()) != 0);
+    CHECK(!lv_color_eq(lit_colon, lv_obj_get_style_bg_color(colon, LV_PART_MAIN)));
+    local.tm_mday = 21; local.tm_wday = 3;
+    CHECK(theme.update(&local));
+    CHECK(find_text(root, "WED 21 OCT"));
+    CHECK(std::memcmp(main_buf->data, main_pixels.data(), main_pixels.size()) == 0);
+    local.tm_hour = 0; local.tm_min = 0; local.tm_sec = 0;
+    CHECK(theme.update(&local));
+    CHECK(std::memcmp(main_buf->data, main_pixels.data(), main_pixels.size()) != 0);
+    CHECK(lv_color_eq(lit_colon, lv_obj_get_style_bg_color(colon, LV_PART_MAIN)));
+    auto pixel = [](const lv_draw_buf_t *buffer, uint32_t x, uint32_t y) {
+        uint16_t value;
+        std::memcpy(&value, buffer->data + y * buffer->header.stride + x * 2, sizeof(value));
+        return value;
+    };
+    // Open counters are true black, including the independent seconds canvas.
+    CHECK(pixel(main_buf, 43, 73) == 0);
+    CHECK(pixel(seconds_buf, 13, 19) == 0);
+    const std::vector<uint8_t> zero_pixels(main_buf->data, main_buf->data + main_buf->data_size);
+    local.tm_hour = 22; local.tm_min = 22;
+    CHECK(theme.update(&local));
+    unsigned shared_dots = 0;
+    for (uint32_t y = 1; y < main_buf->header.h; y += 6) {
+        for (uint32_t x = 1; x < main_buf->header.w; x += 6) {
+            uint16_t previous;
+            std::memcpy(&previous, zero_pixels.data() + y * main_buf->header.stride + x * 2,
+                        sizeof(previous));
+            const uint16_t current = pixel(main_buf, x, y);
+            if (previous && current) {
+                CHECK(previous == current); // Colors stay fixed when the glyph changes.
+                ++shared_dots;
+            }
+        }
+    }
+    CHECK(shared_dots > 100);
+    CHECK(pixel(main_buf, 19, 127) != pixel(main_buf, 319, 127)); // Gradient across the face.
+    theme.reset();
+    CHECK(theme.update(&local));
+    CHECK(!theme.update(&local));
+    lv_obj_delete(root);
+    CHECK(!theme.update(&local));
+    CHECK(lv_obj_get_child_count(lv_screen_active()) == 0);
 }
 }
 
@@ -186,6 +265,7 @@ int clock_preview_test(const clock_theme_t *const *themes, size_t count)
     clock_settings_menu_delete_immediately();
 
     // Exercise the actual theme/overlay ownership and reusable snapshot path.
+    test_dot_matrix();
     lv_draw_buf_t *buffer = nullptr;
     size_t warm_heap = 0;
     size_t steady_heap = 0;

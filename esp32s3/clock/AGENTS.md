@@ -28,6 +28,7 @@
 - `main/clock_theme_previews.c` / `.h`：Display → Watch faces 的 8 个静态 RGB565 小预览；主题视觉更新后先生成预览，再运行 `python3 tools/preview/generate_thumbnails.py` 显式更新资源。
 - `main/clock_alert_scheduler.cpp` / `.h`：日期和槽位去重、并发闹钟队列、单调时间 Snooze 和待补发倒计时提醒；可用主机测试验证。
 - `main/clock_theme_minimal.cpp`、`main/clock_theme_segment.cpp`、`main/clock_theme_analog.cpp`、`main/clock_theme_dot_matrix.cpp`：本工程原有时钟主题。
+- `dot_matrix` 当前为渐变纯点阵主题：Ubuntu Sans 粗体采样的 15×25 主数字、4 px 圆点、仅绘制亮点，横向青蓝至紫色渐变；独立 5×7 秒数、逐秒明暗冒号。主时间和秒数各持有一张 RGB565 canvas，随主题销毁，时分未变化时不重绘主时间；离线字形生成见 `tools/fonts/README.md`。
 - `main/clock_theme_m5_*.cpp`：从 M5StopWatch-UserDemo 迁移的 M5 WatchFace 主题，按 Classic、Simple、BigNumber、NumberFlow 分为四个文件。
 - `main/lv_font_*.c`：主题位图字体资源；新增字体需同时加入 `main/CMakeLists.txt` 和 `tools/preview/CMakeLists.txt`。
 - `main/m5_assets/`、`main/m5_watch_assets.h`：M5 WatchFace 图片和字体资源；M5 字体已用原始 TTF 重新生成为 4bpp（见 `tools/fonts/README.md`），`m5_number_flow` 的 80px 数字和 28px 日期是当前设计，不是上游的 64/24。

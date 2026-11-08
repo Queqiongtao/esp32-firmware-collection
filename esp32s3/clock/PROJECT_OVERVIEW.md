@@ -255,7 +255,7 @@ IMU 逻辑位于 `main/imu_demo.cpp`。
 - `main/clock_touch_gesture.cpp` / `main/clock_touch_gesture.h`：触摸滑动/轻扫和长按手势层。
 - `main/clock_theme.h`：主题接口。
 - `main/clock_theme_*.cpp`：各时钟主题实现。
-- `main/clock_theme_dot_matrix.cpp`：59×20、6×6 单格彩色点阵像素时钟，Paytone One 12×20 字形、10 色糖果配色；主时间 `HH:MM`，底部一行显示 `TUE 20 OCT • 35`，冒号左右留白，无背景网格和扫描动画。
+- `main/clock_theme_dot_matrix.cpp`：渐变纯点阵时钟，使用 Ubuntu Sans（wdth=75、wght=750）统一采样的 15×25 粗体数字、4 px 圆点和 2 px 间距，只绘制亮点；主时间 `HH:MM` 按横向固定位置从青蓝连续渐变至紫色，上方显示灰白 `TUE 20 OCT`，底部使用独立的浅紫 5×7 点阵秒数。冒号每秒明暗交替；主时间 canvas 仅时分变化时重绘，秒数独立更新，缓冲分配失败时释放部分资源并回退到现有字体。字形由 `tools/fonts/generate_dot_matrix_glyphs.py` 离线生成到 `main/dot_matrix_glyphs.h`，运行时不加载 TTF。
 - `main/lv_font_*.c`：主题位图字体资源（如 `lv_font_clock_144.c`）。
 - `main/clock_theme_m5_*.cpp`：M5 WatchFace 迁移主题。
 - `main/m5_assets/`：M5 WatchFace 图片和字体资源；字体为 4bpp，生成方法见 `tools/fonts/README.md`。
